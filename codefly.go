@@ -1,6 +1,7 @@
 package codefly
 
 import (
+	"fmt"
 	"os"
 	"strings"
 )
@@ -9,10 +10,16 @@ var networks map[string]string
 
 func init() {
 	networks = make(map[string]string)
+	Load()
+}
+
+func Load() {
+
 	for _, env := range os.Environ() {
 		if p, ok := strings.CutPrefix(env, "CODEFLY_NETWORK_"); ok {
 			tokens := strings.Split(p, "=")
 			key := strings.ToLower(tokens[0])
+			key = strings.Replace(key, "_", ".", -1)
 			value := tokens[1]
 			networks[key] = value
 		}
@@ -20,26 +27,28 @@ func init() {
 }
 
 type NetworkEndpoint struct {
-	value string
+	Value string
 }
 
 func (e *NetworkEndpoint) WithDefault(backup string) *NetworkEndpoint {
-	if e.value == "" {
-		e.value = backup
+	if e.Value == "" {
+		e.Value = backup
 	}
 	return e
 }
 
 func (e *NetworkEndpoint) Host() string {
-	return e.value
+	return e.Value
 }
 
 func (e *NetworkEndpoint) PortAddress() string {
-	return ":" + strings.Split(e.value, ":")[1]
+	fmt.Println("e.Value", e.Value)
+	return ":" + strings.Split(e.Value, ":")[1]
 }
 
 func Endpoint(name string) *NetworkEndpoint {
-	return &NetworkEndpoint{value: networks[name]}
+	fmt.Println("name", networks[name])
+	return &NetworkEndpoint{Value: networks[name]}
 }
 
 func Value(name string) bool {
