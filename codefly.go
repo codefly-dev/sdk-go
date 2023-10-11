@@ -16,10 +16,12 @@ func init() {
 func Load() {
 
 	for _, env := range os.Environ() {
-		if p, ok := strings.CutPrefix(env, "CODEFLY_NETWORK_"); ok {
+		if p, ok := strings.CutPrefix(env, "CODEFLY-NETWORK_"); ok {
 			tokens := strings.Split(p, "=")
 			key := strings.ToLower(tokens[0])
-			key = strings.Replace(key, "_", ".", -1)
+			// Namespace break
+			key = strings.Replace(key, "_", ".", 1)
+			key = strings.Replace(key, "_", "::", 1)
 			value := tokens[1]
 			networks[key] = value
 		}
@@ -42,12 +44,11 @@ func (e *NetworkEndpoint) Host() string {
 }
 
 func (e *NetworkEndpoint) PortAddress() string {
-	fmt.Println("e.Value", e.Value)
+	fmt.Printf("VALUE <%s>\n", e.Value)
 	return ":" + strings.Split(e.Value, ":")[1]
 }
 
 func Endpoint(name string) *NetworkEndpoint {
-	fmt.Println("name", networks[name])
 	return &NetworkEndpoint{Value: networks[name]}
 }
 

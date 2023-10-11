@@ -25,8 +25,18 @@ import (
 //	}
 
 func TestFromEnv(t *testing.T) {
-	err := os.Setenv("CODEFLY_NETWORK_GUESTBOOK-GO_DEFAULT", ":8080")
+	err := os.Setenv("CODEFLY-NETWORK_GUESTBOOK-GO_DEFAULT", ":8080")
 	codefly.Load()
 	assert.NoError(t, err)
 	assert.Equal(t, ":8080", codefly.Endpoint("guestbook-go.default").PortAddress())
+
+	err = os.Setenv("CODEFLY-NETWORK_GUESTBOOK-GO_DEFAULT_WRITE", ":8080")
+	codefly.Load()
+	assert.NoError(t, err)
+	assert.Equal(t, ":8080", codefly.Endpoint("guestbook-go.default::write").PortAddress())
+
+	err = os.Setenv("CODEFLY-NETWORK_GUESTBOOK-GO_DEFAULT_WRITE", "service.namespace:8080")
+	codefly.Load()
+	assert.NoError(t, err)
+	assert.Equal(t, "service.namespace:8080", codefly.Endpoint("guestbook-go.default::write").Host())
 }
