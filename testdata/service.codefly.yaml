@@ -1,0 +1,15 @@
+kind: service
+name: guestbook-go
+namespace: default
+application: test
+endpoints:
+    - endpoint:
+        name: write
+        description: Expose write
+      api:
+        protocol: tcp
+    - endpoint:
+        name: read
+        description: Expose read
+      api:
+        protocol: tcp

@@ -2,19 +2,38 @@ package codefly
 
 import (
 	"fmt"
+	"github.com/codefly-dev/core/configurations"
+	"github.com/codefly-dev/core/shared"
 	"os"
 	"strings"
 )
 
+var logger = shared.NewLogger("codefly")
 var networks map[string]string
 
 func init() {
+
 	networks = make(map[string]string)
-	Load()
+	LoadEnvironmentVariables()
+	LoadService()
 }
 
-func Load() {
+var root string
+var configuration *configurations.Service
 
+func WithRoot(dir string) {
+	root = dir
+}
+
+func LoadService() {
+	svc, err := configurations.LoadFromDir[configurations.Service](root)
+	if err != nil {
+		logger.Warn(shared.NewUserWarning("did not find any codefly service configuration"))
+	}
+	configuration = svc
+}
+
+func LoadEnvironmentVariables() {
 	for _, env := range os.Environ() {
 		if p, ok := strings.CutPrefix(env, "CODEFLY-NETWORK_"); ok {
 			tokens := strings.Split(p, "=")
@@ -44,12 +63,25 @@ func (e *NetworkEndpoint) Host() string {
 }
 
 func (e *NetworkEndpoint) PortAddress() string {
-	fmt.Printf("VALUE <%s>\n", e.Value)
 	return ":" + strings.Split(e.Value, ":")[1]
 }
 
 func Endpoint(name string) *NetworkEndpoint {
-	return &NetworkEndpoint{Value: networks[name]}
+	if r, ok := strings.CutPrefix(name, "self"); ok {
+		if configuration == nil {
+			shared.Exit("cannot use self without a codefly service configuration")
+		}
+		if nonDefault, ok := strings.CutPrefix(r, "::"); ok {
+			name = fmt.Sprintf("%s::%s", configuration.Endpoint(), nonDefault)
+		} else {
+			name = configuration.Endpoint()
+		}
+	}
+	if endpoint, ok := networks[name]; ok {
+		return &NetworkEndpoint{Value: endpoint}
+	}
+	shared.Exit("cannot find endpoint <%s>", name)
+	return nil
 }
 
 func Value(name string) bool {
@@ -59,7 +91,7 @@ func Value(name string) bool {
 func Endpoints() []string {
 	var endpoints []string
 	for k, v := range networks {
-		endpoints = append(endpoints, k+"="+v)
+		endpoints = append(endpoints, fmt.Sprintf("%s=%s", k, v))
 	}
 	return endpoints
 }
