@@ -6,19 +6,33 @@ import (
 	"github.com/codefly-dev/core/shared"
 	"os"
 	"path"
+	"runtime/debug"
 	"strings"
 )
 
 var logger = shared.NewLogger("codefly")
 var networks map[string][]string
 
-func init() {
-	WithTrace()
+func CatchPanic() {
+	if r := recover(); r != nil {
+		logger.Message("Caught panic: %s", r)
+		// Show the stack
+		logger.Message("stacktrace:%s\n", string(debug.Stack()))
+		os.Exit(1)
+	}
+}
 
+func init() {
+	// Probably make it a struct with some validation
 	networks = make(map[string][]string)
+
+	// Default current root
+	root, _ = os.Getwd()
+
 	LoadEnvironmentVariables()
-	LoadOverrides()
 	LoadService()
+	LoadOverrides()
+
 }
 
 var root string
@@ -26,14 +40,16 @@ var configuration *configurations.Service
 
 func WithRoot(dir string) {
 	root = dir
+	LoadService()
+	LoadOverrides()
 }
 
 func WithDebug() {
-	logger.SetDebug()
+	logger.SetLevel(shared.DebugLevel)
 }
 
 func WithTrace() {
-	logger.SetTrace()
+	logger.SetLevel(shared.TraceLevel)
 }
 
 func LoadService() {
@@ -42,6 +58,13 @@ func LoadService() {
 		logger.Warn(shared.NewUserWarning("did not find any codefly service configuration"))
 	}
 	configuration = svc
+}
+
+func Version() string {
+	if configuration == nil {
+		return "unknown"
+	}
+	return configuration.Version
 }
 
 func LoadEnvironmentVariables() {
@@ -65,7 +88,7 @@ type Configuration struct {
 func LoadOverrides() {
 	config, err := configurations.LoadFromPath[Configuration](path.Join(root, ".codefly.yaml"))
 	if err != nil {
-		logger.Tracef("no config found")
+		logger.Tracef("not using any overrides config")
 		return
 	}
 	for _, endpoint := range config.Endpoints {
