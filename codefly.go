@@ -30,7 +30,9 @@ func init() {
 	root, _ = os.Getwd()
 
 	LoadEnvironmentVariables()
+
 	LoadService()
+
 	LoadOverrides()
 
 }
@@ -53,6 +55,7 @@ func WithTrace() {
 }
 
 func LoadService() {
+	logger.DebugMe("ROOT %v", root)
 	svc, err := configurations.LoadFromDir[configurations.Service](root)
 	if err != nil {
 		logger.Warn(shared.NewUserWarning("did not find any codefly service configuration"))
@@ -69,8 +72,10 @@ func Version() string {
 
 func LoadEnvironmentVariables() {
 	for _, env := range os.Environ() {
-		if p, ok := strings.CutPrefix(env, configurations.NetworkPrefix); ok {
-			reference, addresses := configurations.ParseEnvironmentVariable(p)
+		logger.Tracef("checking environment variable: %s", env)
+		if p, ok := strings.CutPrefix(env, configurations.EndpointPrefix); ok {
+			reference, addresses := configurations.ParseEndpointEnvironmentVariable(p)
+			logger.Tracef("adding endpoint: %s -> %v", reference, addresses)
 			networks[reference] = addresses
 		}
 	}
@@ -153,10 +158,11 @@ func Endpoint(name string) INetworkEndpoint {
 		if configuration == nil {
 			shared.Exit("cannot use self without a codefly service configuration")
 		}
+		ref := fmt.Sprintf("%s/%s", configuration.Application, configuration.Name)
 		if nonDefault, ok := strings.CutPrefix(r, "::"); ok {
-			name = fmt.Sprintf("%s::%s", configuration.Endpoint(), nonDefault)
+			name = fmt.Sprintf("%s::%s", ref, nonDefault)
 		} else {
-			name = configuration.Endpoint()
+			name = ref
 		}
 	}
 	if endpoint, ok := networks[name]; ok {

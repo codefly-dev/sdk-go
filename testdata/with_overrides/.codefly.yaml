@@ -1,0 +1,3 @@
+endpoints:
+  - name: app/svc::write
+    override: localhost:11886
