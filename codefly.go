@@ -31,7 +31,10 @@ func init() {
 
 	LoadEnvironmentVariables()
 
-	LoadService()
+	err := LoadService()
+	if err != nil {
+		logger.Warn(shared.NewUserWarning("couldn't load codefly service configuration: %v", err))
+	}
 
 	LoadOverrides()
 
@@ -42,7 +45,10 @@ var configuration *configurations.Service
 
 func WithRoot(dir string) {
 	root = dir
-	LoadService()
+	err := LoadService()
+	if err != nil {
+		logger.Warn(shared.NewUserWarning("couldn't load codefly service configuration: %v", err))
+	}
 	LoadOverrides()
 }
 
@@ -54,13 +60,13 @@ func WithTrace() {
 	logger.SetLevel(shared.TraceLevel)
 }
 
-func LoadService() {
-	logger.DebugMe("ROOT %v", root)
+func LoadService() error {
 	svc, err := configurations.LoadFromDir[configurations.Service](root)
 	if err != nil {
-		logger.Warn(shared.NewUserWarning("did not find any codefly service configuration"))
+		return err
 	}
 	configuration = svc
+	return nil
 }
 
 func Version() string {
@@ -73,10 +79,13 @@ func Version() string {
 func LoadEnvironmentVariables() {
 	for _, env := range os.Environ() {
 		logger.Tracef("checking environment variable: %s", env)
-		if p, ok := strings.CutPrefix(env, configurations.EndpointPrefix); ok {
-			reference, addresses := configurations.ParseEndpointEnvironmentVariable(p)
-			logger.Tracef("adding endpoint: %s -> %v", reference, addresses)
-			networks[reference] = addresses
+		if ok := strings.HasPrefix(env, configurations.EndpointPrefix); ok {
+			instance, err := configurations.ParseEndpointEnvironmentVariable(env)
+			if err != nil {
+				logger.Warn(shared.NewUserWarning("cannot parse endpoint environment variable: %s", err))
+				continue
+			}
+			networks[instance.Unique] = instance.Addresses
 		}
 	}
 }
@@ -158,12 +167,7 @@ func Endpoint(name string) INetworkEndpoint {
 		if configuration == nil {
 			shared.Exit("cannot use self without a codefly service configuration")
 		}
-		ref := fmt.Sprintf("%s/%s", configuration.Application, configuration.Name)
-		if nonDefault, ok := strings.CutPrefix(r, "::"); ok {
-			name = fmt.Sprintf("%s::%s", ref, nonDefault)
-		} else {
-			name = ref
-		}
+		name = fmt.Sprintf("%s/%s%s", configuration.Application, configuration.Name, r)
 	}
 	if endpoint, ok := networks[name]; ok {
 		return &NetworkEndpoint{Values: endpoint}

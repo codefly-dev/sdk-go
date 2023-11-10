@@ -2,7 +2,6 @@ module github.com/codefly-dev/sdk-go
 
 go 1.21.3
 
-require github.com/codefly-dev/core v0.0.1
 
 require (
 	github.com/codefly-dev/golor v0.0.10 // indirect

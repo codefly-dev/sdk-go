@@ -3,13 +3,9 @@ name: svc
 application: app
 namespace: default
 endpoints:
-    - endpoint:
-        name: write
-        description: Expose write
-      api:
-        protocol: tcp
-    - endpoint:
-        name: read
-        description: Expose read
-      api:
-        protocol: tcp
+  - name: write
+    description: Expose write
+    api: tcp
+  - name: read
+    description: Expose read
+    api: tcp
