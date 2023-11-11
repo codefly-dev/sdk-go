@@ -22,7 +22,7 @@ func TestEndpoint(t *testing.T) {
 	assert.Equal(t, ":1234", codefly.Endpoint("app/svc").PortAddress())
 	assert.Equal(t, ":1234", codefly.Endpoint("self").PortAddress())
 
-	err = os.Setenv("CODEFLY-ENDPOINT__APP__SVC___WRITE", ":12345")
+	err = os.Setenv("CODEFLY_ENDPOINT__APP__SVC___WRITE", ":12345")
 
 	codefly.LoadEnvironmentVariables()
 	assert.NoError(t, err)
@@ -30,7 +30,7 @@ func TestEndpoint(t *testing.T) {
 	assert.Equal(t, ":12345", codefly.Endpoint("app/svc/write").PortAddress())
 	assert.Equal(t, ":12345", codefly.Endpoint("self/write").PortAddress())
 
-	err = os.Setenv("CODEFLY-ENDPOINT__APP__SVC___WRITE", "service.namespace:23456")
+	err = os.Setenv("CODEFLY_ENDPOINT__APP__SVC___WRITE", "service.namespace:23456")
 	codefly.LoadEnvironmentVariables()
 
 	assert.NoError(t, err)

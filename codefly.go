@@ -26,6 +26,12 @@ func init() {
 	// Probably make it a struct with some validation
 	networks = make(map[string][]string)
 
+	if os.Getenv("CODEFLY_SDK_LOGLEVEL") == "debug" {
+		logger.SetLevel(shared.DebugLevel)
+	} else if os.Getenv("CODEFLY_SDK_LOGLEVEL") == "trace" {
+		logger.SetLevel(shared.TraceLevel)
+	}
+
 	// Default current root
 	root, _ = os.Getwd()
 
@@ -36,7 +42,9 @@ func init() {
 		logger.Warn(shared.NewUserWarning("couldn't load codefly service configuration: %v", err))
 	}
 
-	LoadOverrides()
+	if os.Getenv("CODEFLY_SDK_WITHOVERRIDE") == "true" {
+		LoadOverrides()
+	}
 
 }
 
@@ -78,7 +86,10 @@ func Version() string {
 
 func LoadEnvironmentVariables() {
 	for _, env := range os.Environ() {
-		logger.Tracef("checking environment variable: %s", env)
+		if !strings.HasPrefix(env, "CODEFLY") {
+			continue
+		}
+		logger.DebugMe("checking environment variable: %s", env)
 		if ok := strings.HasPrefix(env, configurations.EndpointPrefix); ok {
 			instance, err := configurations.ParseEndpointEnvironmentVariable(env)
 			if err != nil {
@@ -163,14 +174,14 @@ func (e *NetworkEndpoint) PortAddress() string {
 }
 
 func Endpoint(name string) INetworkEndpoint {
+	if endpoint, ok := networks[name]; ok {
+		return &NetworkEndpoint{Values: endpoint}
+	}
 	if r, ok := strings.CutPrefix(name, "self"); ok {
 		if configuration == nil {
 			shared.Exit("cannot use self without a codefly service configuration")
 		}
 		name = fmt.Sprintf("%s/%s%s", configuration.Application, configuration.Name, r)
-	}
-	if endpoint, ok := networks[name]; ok {
-		return &NetworkEndpoint{Values: endpoint}
 	}
 	logger.Warn(shared.NewUserWarning("did not find any codefly network endpoint for %s", name))
 	return &NetworkEndpointNotFound{}
