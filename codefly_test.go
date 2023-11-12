@@ -11,6 +11,7 @@ import (
 func TestEndpoint(t *testing.T) {
 	env := configurations.AsEndpointEnvironmentVariableKey("app", "svc", &configurations.Endpoint{})
 	err := os.Setenv(env, ":1234")
+	assert.NoError(t, err)
 
 	codefly.WithRoot(configurations.SolveDir("testdata/regular"))
 	err = codefly.LoadService()

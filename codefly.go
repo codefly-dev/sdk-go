@@ -177,7 +177,6 @@ func (e *NetworkEndpoint) PortAddress() string {
 func Endpoint(name string) INetworkEndpoint {
 	if endpoint, ok := networks[name]; ok {
 		return &NetworkEndpoint{Values: endpoint}
-	} else {
 	}
 	if r, ok := strings.CutPrefix(name, "self"); ok {
 		if configuration == nil {
@@ -186,7 +185,6 @@ func Endpoint(name string) INetworkEndpoint {
 		name = fmt.Sprintf("%s/%s%s", configuration.Application, configuration.Name, r)
 		if endpoint, ok := networks[name]; ok {
 			return &NetworkEndpoint{Values: endpoint}
-		} else {
 		}
 	}
 	logger.Warn(shared.NewUserWarning("did not find any codefly network endpoint for %s", name))
