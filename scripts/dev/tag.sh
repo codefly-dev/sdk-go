@@ -1,6 +1,6 @@
 #!/bin/bash
 
-YAML_FILE="configurations/info.codefly.yaml"
+YAML_FILE="info.codefly.yaml"
 
 if [ ! -f "$YAML_FILE" ]; then
     echo "Error: YAML file $YAML_FILE does not exist."
