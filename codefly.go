@@ -1,6 +1,7 @@
 package codefly
 
 import (
+	"context"
 	"fmt"
 	"github.com/codefly-dev/core/configurations"
 	"github.com/codefly-dev/core/shared"
@@ -10,7 +11,7 @@ import (
 	"strings"
 )
 
-var logger = shared.NewLogger("codefly")
+var logger = shared.NewLogger()
 var networks map[string][]string
 
 func CatchPanic() {
@@ -23,13 +24,14 @@ func CatchPanic() {
 }
 
 func init() {
+	ctx := shared.NewContext()
 	// Probably make it a struct with some validation
 	networks = make(map[string][]string)
 
 	if os.Getenv("CODEFLY_SDK__LOGLEVEL") == "debug" {
-		logger.SetLevel(shared.DebugLevel)
+		logger.SetLevel(shared.Debug)
 	} else if os.Getenv("CODEFLY_SDK__LOGLEVEL") == "trace" {
-		logger.SetLevel(shared.TraceLevel)
+		logger.SetLevel(shared.Trace)
 	}
 
 	// Default current root
@@ -39,11 +41,11 @@ func init() {
 
 	err := LoadService()
 	if err != nil {
-		logger.Warn(shared.NewUserWarning("couldn't load codefly service configuration: %v", err))
+		logger.Info("couldn't load codefly service configuration: %v", err)
 	}
 
 	if os.Getenv("CODEFLY_SDK__WITHOVERRIDE") == "true" {
-		LoadOverrides()
+		LoadOverrides(ctx)
 	}
 
 }
@@ -51,25 +53,25 @@ func init() {
 var root string
 var configuration *configurations.Service
 
-func WithRoot(dir string) {
+func WithRoot(ctx context.Context, dir string) {
 	root = dir
 	err := LoadService()
 	if err != nil {
-		logger.Warn(shared.NewUserWarning("couldn't load codefly service configuration: %v", err))
+		logger.Info("couldn't load codefly service configuration: %v", err)
 	}
-	LoadOverrides()
+	LoadOverrides(ctx)
 }
 
 func WithDebug() {
-	logger.SetLevel(shared.DebugLevel)
+	logger.SetLevel(shared.Debug)
 }
 
 func WithTrace() {
-	logger.SetLevel(shared.TraceLevel)
+	logger.SetLevel(shared.Trace)
 }
 
 func LoadService() error {
-	svc, err := configurations.LoadFromDir[configurations.Service](root)
+	svc, err := configurations.LoadServiceFromDirUnsafe(shared.NewContext(), root)
 	if err != nil {
 		return err
 	}
@@ -93,7 +95,7 @@ func LoadEnvironmentVariables() {
 		if ok := strings.HasPrefix(env, configurations.EndpointPrefix); ok {
 			instance, err := configurations.ParseEndpointEnvironmentVariable(env)
 			if err != nil {
-				logger.Warn(shared.NewUserWarning("cannot parse endpoint environment variable: %s", err))
+				logger.Info("cannot parse endpoint environment variable: %s", err)
 				continue
 			}
 			logger.Debugf("env translation: %s -> %s", env, instance)
@@ -111,8 +113,8 @@ type Configuration struct {
 	Endpoints []EndpointOverride
 }
 
-func LoadOverrides() {
-	config, err := configurations.LoadFromPath[Configuration](path.Join(root, ".codefly.yaml"))
+func LoadOverrides(ctx context.Context) {
+	config, err := configurations.LoadFromPath[Configuration](ctx, path.Join(root, ".codefly.yaml"))
 	if err != nil {
 		logger.Tracef("not using any overrides config")
 		return
@@ -187,6 +189,6 @@ func Endpoint(name string) INetworkEndpoint {
 			return &NetworkEndpoint{Values: endpoint}
 		}
 	}
-	logger.Warn(shared.NewUserWarning("did not find any codefly network endpoint for %s", name))
+	logger.Info("did not find any codefly network endpoint for %s", name)
 	return &NetworkEndpointNotFound{}
 }

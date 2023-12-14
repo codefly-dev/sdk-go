@@ -2,6 +2,7 @@ package codefly_test
 
 import (
 	"github.com/codefly-dev/core/configurations"
+	"github.com/codefly-dev/core/shared"
 	codefly "github.com/codefly-dev/sdk-go"
 	"github.com/stretchr/testify/assert"
 	"os"
@@ -9,11 +10,12 @@ import (
 )
 
 func TestEndpoint(t *testing.T) {
+	ctx := shared.NewContext()
 	env := configurations.AsEndpointEnvironmentVariableKey("app", "svc", &configurations.Endpoint{})
 	err := os.Setenv(env, ":1234")
 	assert.NoError(t, err)
 
-	codefly.WithRoot(configurations.SolveDir("testdata/regular"))
+	codefly.WithRoot(ctx, configurations.SolveDir("testdata/regular"))
 	err = codefly.LoadService()
 	assert.NoError(t, err)
 
@@ -41,11 +43,13 @@ func TestEndpoint(t *testing.T) {
 
 func TestEndpointWithOverride(t *testing.T) {
 	codefly.WithTrace()
+	ctx := shared.NewContext()
 
-	codefly.WithRoot(configurations.SolveDir("testdata/with_overrides"))
+	codefly.WithRoot(ctx, configurations.SolveDir("testdata/with_overrides"))
 	err := codefly.LoadService()
 	assert.NoError(t, err)
-	codefly.LoadOverrides()
+
+	codefly.LoadOverrides(ctx)
 
 	assert.Equal(t, ":11886", codefly.Endpoint("app/svc::write").PortAddress())
 	assert.Equal(t, ":11886", codefly.Endpoint("self::write").PortAddress())

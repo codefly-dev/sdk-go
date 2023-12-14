@@ -1,0 +1,60 @@
+# Run settings
+run:
+  # Timeout for analysis, e.g. "5m", "10m30s" or "2h"
+  deadline: 5m
+
+  # Files and directories to exclude from linting
+  skip-files:
+    - ".*\\.pb\\.go"
+    - ".*_test\\.go"
+
+  # Files and directories to include in linting
+  include:
+    - "cmd/"
+    - "pkg/"
+
+# Output settings
+output:
+  format: colored-line-number # Output format (e.g., colored-line-number, json, checkstyle...)
+
+# Linters settings
+linters:
+  enable:
+    - govet
+      #    - revive
+      #- gocritic
+      #- gosec
+    - errcheck
+    - staticcheck
+    - unused
+    - typecheck
+
+  disable:
+    - gochecknoinits
+    - gochecknoglobals
+
+  # Linters settings
+  settings:
+    errcheck:
+      check-type-assertions: true
+    govet:
+      check-shadowing: true
+
+# Linters settings that require additional dependencies
+linters-settings:
+  gocritic:
+    enabled-checks:
+      - rangeValCopy
+      - appendCombine
+      - hugeParam
+
+# Service settings
+issues:
+  exclude-rules:
+    - linters:
+        - govet
+      text: "composite literal uses unkeyed fields"
+    - linters:
+        - revive
+      text: "should have comment or be unexported"
+
