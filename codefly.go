@@ -4,104 +4,108 @@ import (
 	"context"
 	"fmt"
 	"github.com/codefly-dev/core/configurations"
-	"github.com/codefly-dev/core/shared"
+	"github.com/codefly-dev/core/wool"
 	"os"
 	"path"
 	"runtime/debug"
 	"strings"
 )
 
-var logger = shared.NewLogger()
 var networks map[string][]string
 
-func CatchPanic() {
+func CatchPanic(ctx context.Context) {
+	w := wool.Get(ctx).In("codefly.CatchPanic")
 	if r := recover(); r != nil {
-		logger.Message("Caught panic: %s", r)
-		// Show the stack
-		logger.Message("stacktrace:%s\n", string(debug.Stack()))
+		w.Error("Caught panic: %s", wool.Field("panic", r), wool.Field("stack", string(debug.Stack())))
 		os.Exit(1)
 	}
 }
 
-func init() {
-	ctx := shared.NewContext()
-	// Probably make it a struct with some validation
-	networks = make(map[string][]string)
-
+func GetLogLevel() wool.Loglevel {
 	if os.Getenv("CODEFLY_SDK__LOGLEVEL") == "debug" {
-		logger.SetLevel(shared.Debug)
+		return wool.DEBUG
 	} else if os.Getenv("CODEFLY_SDK__LOGLEVEL") == "trace" {
-		logger.SetLevel(shared.Trace)
+		return wool.TRACE
 	}
-
-	// Default current root
-	root, _ = os.Getwd()
-
-	LoadEnvironmentVariables()
-
-	err := LoadService()
-	if err != nil {
-		logger.Info("couldn't load codefly service configuration: %v", err)
-	}
-
-	if os.Getenv("CODEFLY_SDK__WITHOVERRIDE") == "true" {
-		LoadOverrides(ctx)
-	}
-
+	return wool.INFO
 }
 
-var root string
-var configuration *configurations.Service
+func Init(ctx context.Context) error {
 
-func WithRoot(ctx context.Context, dir string) {
-	root = dir
-	err := LoadService()
-	if err != nil {
-		logger.Info("couldn't load codefly service configuration: %v", err)
+	if root == "" {
+		root, _ = os.Getwd()
 	}
-	LoadOverrides(ctx)
-}
 
-func WithDebug() {
-	logger.SetLevel(shared.Debug)
-}
+	ctx = context.Background()
+	// Temporary
+	provider := wool.New(ctx, configurations.CLI.AsResource()).WithConsole(GetLogLevel())
+	ctx = provider.WithContext(ctx)
 
-func WithTrace() {
-	logger.SetLevel(shared.Trace)
-}
-
-func LoadService() error {
-	svc, err := configurations.LoadServiceFromDirUnsafe(shared.NewContext(), root)
+	err := LoadService(ctx)
 	if err != nil {
 		return err
 	}
-	configuration = svc
+
+	// Now update the provider
+	provider = wool.New(ctx, service.AsResource()).WithConsole(GetLogLevel())
+	ctx = provider.WithContext(ctx)
+
+	// Probably make it a struct with some validation
+	networks = make(map[string][]string)
+
+	err = LoadNetworkEndpointFromEnvironmentVariables(ctx)
+	if err != nil {
+		return err
+	}
+	wool.Get(ctx).Debug("networks", wool.Field("networks", networks))
+
+	err = LoadOverrides(ctx)
+	if err != nil {
+		return err
+	}
+	return nil
+}
+
+var root string
+var service *configurations.Service
+
+func WithRoot(dir string) {
+	root = dir
+}
+
+func LoadService(ctx context.Context) error {
+	svc, err := configurations.LoadServiceFromDirUnsafe(ctx, root)
+	if err != nil {
+		return err
+	}
+	service = svc
 	return nil
 }
 
 func Version() string {
-	if configuration == nil {
+	if service == nil {
 		return "unknown"
 	}
-	return configuration.Version
+	return service.Version
 }
 
-func LoadEnvironmentVariables() {
+func LoadNetworkEndpointFromEnvironmentVariables(ctx context.Context) error {
+	w := wool.Get(ctx).In("codefly.LoadNetworkEndpointFromEnvironmentVariables")
 	for _, env := range os.Environ() {
 		if !strings.HasPrefix(env, "CODEFLY") {
 			continue
 		}
-		logger.Debugf("checking environment variable: %s", env)
+		w.Trace("checking environment variable", wool.Field("env", env))
 		if ok := strings.HasPrefix(env, configurations.EndpointPrefix); ok {
 			instance, err := configurations.ParseEndpointEnvironmentVariable(env)
 			if err != nil {
-				logger.Info("cannot parse endpoint environment variable: %s", err)
-				continue
+				return err
 			}
-			logger.Debugf("env translation: %s -> %s", env, instance)
+			w.Trace("env translation", wool.Field("from", env), wool.Field("to", instance.Addresses))
 			networks[instance.Unique] = instance.Addresses
 		}
 	}
+	return nil
 }
 
 type EndpointOverride struct {
@@ -113,16 +117,24 @@ type Configuration struct {
 	Endpoints []EndpointOverride
 }
 
-func LoadOverrides(ctx context.Context) {
-	config, err := configurations.LoadFromPath[Configuration](ctx, path.Join(root, ".codefly.yaml"))
+func LoadOverrides(ctx context.Context) error {
+	if os.Getenv("CODEFLY_SDK__WITHOVERRIDE") != "true" {
+		return nil
+	}
+	w := wool.Get(ctx).In("codefly.LoadOverrides")
+	dir, err := configurations.SolveDir(root)
 	if err != nil {
-		logger.Tracef("not using any overrides config")
-		return
+		return w.Wrapf(err, "cannot solve dir")
+	}
+	config, err := configurations.LoadFromPath[Configuration](ctx, path.Join(dir, ".codefly.yaml"))
+	if err != nil {
+		return w.Wrapf(err, "cannot load override configuration")
 	}
 	for _, endpoint := range config.Endpoints {
-		logger.Tracef("overloading endpoint: %s -> %s", endpoint.Name, endpoint.Override)
+		w.Info("overloading endpoint", wool.Field("endpoint", endpoint), wool.Field("override", endpoint.Override))
 		networks[endpoint.Name] = []string{endpoint.Override}
 	}
+	return nil
 }
 
 type INetworkEndpoint interface {
@@ -176,19 +188,20 @@ func (e *NetworkEndpoint) PortAddress() string {
 	return ":" + strings.Split(e.Values[0], ":")[1]
 }
 
-func Endpoint(name string) INetworkEndpoint {
+func Endpoint(ctx context.Context, name string) INetworkEndpoint {
+	w := wool.Get(ctx).In("codefly.Endpoint", wool.NameField(name))
 	if endpoint, ok := networks[name]; ok {
 		return &NetworkEndpoint{Values: endpoint}
 	}
 	if r, ok := strings.CutPrefix(name, "self"); ok {
-		if configuration == nil {
-			shared.Exit("cannot use self without a codefly service configuration")
+		if service == nil {
+			panic("cannot use self endpoint without a service")
 		}
-		name = fmt.Sprintf("%s/%s%s", configuration.Application, configuration.Name, r)
+		name = fmt.Sprintf("%s/%s%s", service.Application, service.Name, r)
 		if endpoint, ok := networks[name]; ok {
 			return &NetworkEndpoint{Values: endpoint}
 		}
 	}
-	logger.Info("did not find any codefly network endpoint for %s", name)
+	w.Info("did not find any codefly network endpoint")
 	return &NetworkEndpointNotFound{}
 }

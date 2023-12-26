@@ -1,4 +1,4 @@
-name: Go CI
+name: codefly go SDK
 
 on:
   push:
@@ -7,37 +7,72 @@ on:
     branches: [ main ]
 
 jobs:
-
   build:
     name: Build
     runs-on: ubuntu-latest
     steps:
+      - name: set up
+        uses: actions/setup-go@v3
+        with:
+          go-version: 1.21
 
-    - name: Set up Go 1.x
-      uses: actions/setup-go@v2
-      with:
-        go-version: ^1.16
-      id: go
+      - name: checkout
+        uses: actions/checkout@v3
 
-    - name: Check out code into the Go module directory
-      uses: actions/checkout@v2
+      - name: Cache Go Modules
+        uses: actions/cache@v2
+        continue-on-error: true
+        with:
+          path: ~/go/pkg/mod
+          key: ${{ runner.os }}-go-${{ hashFiles('**/go.sum') }}-20210329
+          restore-keys: |
+            ${{ runner.os }}-go-20210329
 
-    - name: Cache Go modules
-      uses: actions/cache@v2
-      with:
-        path: ~/go/pkg/mod
-        key: ${{ runner.os }}-go-${{ hashFiles('**/go.sum') }}
-        restore-keys: |
-          ${{ runner.os }}-go-
+      - name: Install Dependencies
+        run: go mod tidy && go mod download
 
-    - name: Test without race detection
-      run: go test ./... -v
+      - name: golangci-lint
+        uses: golangci/golangci-lint-action@v3
+        with:
+          version: v1.55
 
-    - name: Test with race detection
-      run: go test -race ./... -v
 
-    - name: Install golangci-lint
-      run: go install github.com/golangci/golangci-lint/cmd/golangci-lint@v1.55
+      - name: generate test generate coverage
+        run: go test ./... -coverprofile=cover.out -covermode=atomic -coverpkg=./...
 
-    - name: Run golangci-lint
-      run: golangci-lint run
+      - name: check test coverage
+        id: coverage
+        uses: vladopajic/go-test-coverage@v2
+        with:
+          config: ./.testcoverage.yaml
+          ## when token is not specified (value '') this feature is turend off
+          ## in this example badge is created and committed only for main brach
+          git-token: ${{ github.ref_name == 'main' && secrets.GITHUB_TOKEN || '' }}
+          ## name of branch where badges are stored
+          ## ideally this should be orphan branch (see below how to create this branch)
+          git-branch: badges
+
+      - name: test with race detection
+        run: go test -race ./... -v
+
+      - name: Notify Slack on Failure
+        if: failure()
+        uses: slackapi/slack-github-action@v1.24.0
+        with:
+          payload: |
+            {
+              "text": "Build Failed in ${{ github.repository }} on ${{ github.ref }}. See GitHub Actions for more details."
+            }
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+
+      - name: Notify Slack on Success
+        if: success()
+        uses: slackapi/slack-github-action@v1.24.0
+        with:
+          payload: |
+            {
+              "text": "Build Succeeded in ${{ github.repository }} on ${{ github.ref }}. Great job!"
+            }
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
