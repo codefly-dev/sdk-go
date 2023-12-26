@@ -54,25 +54,3 @@ jobs:
 
       - name: test with race detection
         run: go test -race ./... -v
-
-      - name: Notify Slack on Failure
-        if: failure()
-        uses: slackapi/slack-github-action@v1.24.0
-        with:
-          payload: |
-            {
-              "text": "Build Failed in ${{ github.repository }} on ${{ github.ref }}. See GitHub Actions for more details."
-            }
-        env:
-          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
-
-      - name: Notify Slack on Success
-        if: success()
-        uses: slackapi/slack-github-action@v1.24.0
-        with:
-          payload: |
-            {
-              "text": "Build Succeeded in ${{ github.repository }} on ${{ github.ref }}. Great job!"
-            }
-        env:
-          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}

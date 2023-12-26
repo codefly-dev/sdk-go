@@ -36,8 +36,7 @@ func Init(ctx context.Context) error {
 		root, _ = os.Getwd()
 	}
 
-	ctx = context.Background()
-	// Temporary
+	// For logging before we get the service
 	provider := wool.New(ctx, configurations.CLI.AsResource()).WithConsole(GetLogLevel())
 	ctx = provider.WithContext(ctx)
 

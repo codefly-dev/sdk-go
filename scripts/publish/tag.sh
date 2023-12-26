@@ -1,5 +1,7 @@
 #!/bin/bash
 
+# Usage: ./tag.sh <new_version>
+
 YAML_FILE="info.codefly.yaml"
 
 if [ ! -f "$YAML_FILE" ]; then
@@ -12,7 +14,6 @@ NEW_VERSION_TYPE=${1:-patch}
 
 CURRENT_VERSION=$(yq eval '.version' "$YAML_FILE")
 NEW_VERSION=$(semver bump "$NEW_VERSION_TYPE" "$CURRENT_VERSION")
-
 
 # Update the version in the YAML file (for macOS)
 sed -i '' "s/version:.*/version: $NEW_VERSION/" "$YAML_FILE"

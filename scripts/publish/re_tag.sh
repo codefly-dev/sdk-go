@@ -10,7 +10,6 @@ fi
 CURRENT_VERSION=$(yq eval '.version' "$YAML_FILE")
 NEW_VERSION="$CURRENT_VERSION"
 
-
 # Update the version in the YAML file (for macOS)
 sed -i '' "s/version:.*/version: $NEW_VERSION/" "$YAML_FILE"
 
