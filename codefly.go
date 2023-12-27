@@ -30,39 +30,37 @@ func GetLogLevel() wool.Loglevel {
 	return wool.INFO
 }
 
-func Init(ctx context.Context) error {
-
+func Init(ctx context.Context) (*wool.Provider, error) {
 	if root == "" {
 		root, _ = os.Getwd()
 	}
 
 	// For logging before we get the service
 	provider := wool.New(ctx, configurations.CLI.AsResource()).WithConsole(GetLogLevel())
-	ctx = provider.WithContext(ctx)
+	ctx = provider.Inject(ctx)
 
 	err := LoadService(ctx)
 	if err != nil {
-		return err
+		return nil, err
 	}
 
 	// Now update the provider
-	provider = wool.New(ctx, service.AsResource()).WithConsole(GetLogLevel())
-	ctx = provider.WithContext(ctx)
+	provider = wool.New(ctx, service.Identity().AsResource()).WithConsole(GetLogLevel())
+	ctx = provider.Inject(ctx)
 
 	// Probably make it a struct with some validation
 	networks = make(map[string][]string)
 
 	err = LoadNetworkEndpointFromEnvironmentVariables(ctx)
 	if err != nil {
-		return err
+		return nil, err
 	}
-	wool.Get(ctx).Debug("networks", wool.Field("networks", networks))
 
 	err = LoadOverrides(ctx)
 	if err != nil {
-		return err
+		return nil, err
 	}
-	return nil
+	return provider, nil
 }
 
 var root string
@@ -189,18 +187,28 @@ func (e *NetworkEndpoint) PortAddress() string {
 
 func Endpoint(ctx context.Context, name string) INetworkEndpoint {
 	w := wool.Get(ctx).In("codefly.Endpoint", wool.NameField(name))
+	endpoint, err := GetEndpoint(ctx, name)
+	if err == nil {
+		return endpoint
+	}
+	w.Error("cannot find endpoint", wool.ErrField(err))
+	return &NetworkEndpointNotFound{}
+}
+
+func GetEndpoint(ctx context.Context, name string) (*NetworkEndpoint, error) {
+	w := wool.Get(ctx).In("codefly.Endpoint", wool.NameField(name))
 	if endpoint, ok := networks[name]; ok {
-		return &NetworkEndpoint{Values: endpoint}
+		return &NetworkEndpoint{Values: endpoint}, nil
 	}
 	if r, ok := strings.CutPrefix(name, "self"); ok {
 		if service == nil {
-			panic("cannot use self endpoint without a service")
+			return nil, w.NewError("cannot use self endpoint without a service")
 		}
 		name = fmt.Sprintf("%s/%s%s", service.Application, service.Name, r)
 		if endpoint, ok := networks[name]; ok {
-			return &NetworkEndpoint{Values: endpoint}
+			return &NetworkEndpoint{Values: endpoint}, nil
 		}
+		return nil, w.NewError("did not find any codefly network endpoint self: %s", name)
 	}
-	w.Info("did not find any codefly network endpoint")
-	return &NetworkEndpointNotFound{}
+	return nil, w.NewError("did not find any codefly network endpoint")
 }

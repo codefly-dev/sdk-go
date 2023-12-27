@@ -21,7 +21,7 @@ func TestEndpoint(t *testing.T) {
 	assert.NoError(t, err)
 
 	codefly.WithRoot("testdata/regular")
-	err = codefly.Init(ctx)
+	_, err = codefly.Init(ctx)
 	assert.NoError(t, err)
 
 	assert.Equal(t, ":1234", codefly.Endpoint(ctx, "app/svc").PortAddress())
@@ -56,7 +56,7 @@ func TestEndpointWithOverride(t *testing.T) {
 	assert.NoError(t, err)
 
 	codefly.WithRoot("testdata/with_overrides")
-	err = codefly.Init(ctx)
+	_, err = codefly.Init(ctx)
 	assert.NoError(t, err)
 
 	assert.Equal(t, ":11886", codefly.Endpoint(ctx, "app/svc::write").PortAddress())
