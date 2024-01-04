@@ -15,7 +15,7 @@ func TestEndpoint(t *testing.T) {
 	err := os.Setenv("CODEFLY_SDK__LOGLEVEL", "trace")
 	assert.NoError(t, err)
 
-	env := configurations.AsEndpointEnvironmentVariableKey(&configurations.Endpoint{Application: "app", Service: "svc"})
+	env := configurations.EndpointEnvironmentVariableKey(&configurations.Endpoint{Application: "app", Service: "svc"})
 	t.Log(env)
 	err = os.Setenv(env, ":1234")
 	assert.NoError(t, err)

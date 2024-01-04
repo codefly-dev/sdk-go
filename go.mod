@@ -3,7 +3,7 @@ module github.com/codefly-dev/sdk-go
 go 1.21.4
 
 require (
-	github.com/codefly-dev/core v0.0.70 // indirect
+	github.com/codefly-dev/core v0.0.91 // indirect
 	github.com/codefly-dev/golor v0.0.10 // indirect
 	github.com/davecgh/go-spew v1.1.2-0.20180830191138-d8f796af33cc // indirect
 	github.com/fatih/color v1.16.0 // indirect
