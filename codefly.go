@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"github.com/codefly-dev/core/configurations"
+	"github.com/codefly-dev/core/configurations/standards"
 	"github.com/codefly-dev/core/wool"
 	"os"
 	"path"
@@ -143,6 +144,7 @@ type INetworkEndpoint interface {
 }
 
 type NetworkEndpointNotFound struct {
+	name string
 }
 
 func (e *NetworkEndpointNotFound) Host() string {
@@ -150,7 +152,7 @@ func (e *NetworkEndpointNotFound) Host() string {
 }
 
 func (e *NetworkEndpointNotFound) PortAddress() string {
-	return ":8080"
+	return standards.PortAddress(e.name)
 }
 
 func (e *NetworkEndpointNotFound) IsPresent() bool {
@@ -191,8 +193,8 @@ func Endpoint(ctx context.Context, name string) INetworkEndpoint {
 	if err == nil {
 		return endpoint
 	}
-	w.Error("cannot find endpoint", wool.ErrField(err))
-	return &NetworkEndpointNotFound{}
+	w.Debug("cannot find endpoint: using default", wool.ErrField(err))
+	return &NetworkEndpointNotFound{name: name}
 }
 
 func GetEndpoint(ctx context.Context, name string) (*NetworkEndpoint, error) {
@@ -202,7 +204,7 @@ func GetEndpoint(ctx context.Context, name string) (*NetworkEndpoint, error) {
 	}
 	if r, ok := strings.CutPrefix(name, "self"); ok {
 		if service == nil {
-			return nil, w.NewError("cannot use self endpoint without a service")
+			return nil, w.NewError("did not find any codefly service")
 		}
 		name = fmt.Sprintf("%s/%s%s", service.Application, service.Name, r)
 		if endpoint, ok := networks[name]; ok {
