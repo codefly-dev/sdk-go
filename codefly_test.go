@@ -9,6 +9,13 @@ import (
 	"testing"
 )
 
+func Must[T any](obj T, err error) T {
+	if err != nil {
+		panic(err.Error())
+	}
+	return obj
+}
+
 func TestEndpoint(t *testing.T) {
 	ctx := context.Background()
 
@@ -21,29 +28,31 @@ func TestEndpoint(t *testing.T) {
 	assert.NoError(t, err)
 
 	codefly.WithRoot("testdata/regular")
+
 	_, err = codefly.Init(ctx)
 	assert.NoError(t, err)
 
-	assert.Equal(t, ":1234", codefly.Endpoint(ctx, "app/svc").PortAddress())
-	assert.Equal(t, ":1234", codefly.Endpoint(ctx, "self").PortAddress())
+	assert.Equal(t, ":1234", Must(Must(codefly.GetEndpoint(ctx, "app/svc")).PortAddress()))
+	assert.Equal(t, ":1234", Must(Must(codefly.GetEndpoint(ctx, "app/svc")).PortAddress()))
 
-	err = os.Setenv("CODEFLY_ENDPOINT__APP__SVC___WRITE", ":12345")
+	env = configurations.EndpointEnvironmentVariableKey(&configurations.Endpoint{Application: "app", Service: "svc", Name: "write"})
+	err = os.Setenv(env, ":12345")
 	assert.NoError(t, err)
 
-	err = codefly.LoadNetworkEndpointFromEnvironmentVariables(ctx)
+	err = codefly.LoadFromEnvironmentVariables(ctx)
 	assert.NoError(t, err)
 
-	assert.Equal(t, ":12345", codefly.Endpoint(ctx, "app/svc/write").PortAddress())
-	assert.Equal(t, ":12345", codefly.Endpoint(ctx, "self/write").PortAddress())
+	assert.Equal(t, ":12345", Must(Must(codefly.GetEndpoint(ctx, "app/svc/write")).PortAddress()))
+	assert.Equal(t, ":12345", Must(Must(codefly.GetEndpoint(ctx, "self/write")).PortAddress()))
 
-	err = os.Setenv("CODEFLY_ENDPOINT__APP__SVC___WRITE", "service.namespace:23456")
+	err = os.Setenv(env, "service.namespace:23456")
 	assert.NoError(t, err)
 
-	err = codefly.LoadNetworkEndpointFromEnvironmentVariables(ctx)
+	err = codefly.LoadFromEnvironmentVariables(ctx)
 	assert.NoError(t, err)
 
-	assert.Equal(t, "service.namespace:23456", codefly.Endpoint(ctx, "app/svc/write").Host())
-	assert.Equal(t, "service.namespace:23456", codefly.Endpoint(ctx, "self/write").Host())
+	assert.Equal(t, "service.namespace:23456", Must(Must(codefly.GetEndpoint(ctx, "app/svc/write")).Address()))
+	assert.Equal(t, "service.namespace:23456", Must(Must(codefly.GetEndpoint(ctx, "self/write")).Address()))
 }
 
 func TestEndpointWithOverride(t *testing.T) {
@@ -56,11 +65,12 @@ func TestEndpointWithOverride(t *testing.T) {
 	assert.NoError(t, err)
 
 	codefly.WithRoot("testdata/with_overrides")
+
 	_, err = codefly.Init(ctx)
 	assert.NoError(t, err)
 
-	assert.Equal(t, ":11886", codefly.Endpoint(ctx, "app/svc::write").PortAddress())
-	assert.Equal(t, ":11886", codefly.Endpoint(ctx, "self::write").PortAddress())
-	assert.Equal(t, "localhost:11886", codefly.Endpoint(ctx, "app/svc::write").Host())
-	assert.Equal(t, "localhost:11886", codefly.Endpoint(ctx, "self::write").Host())
+	assert.Equal(t, ":11886", Must(Must(codefly.GetEndpoint(ctx, "app/svc/write")).PortAddress()))
+	assert.Equal(t, ":11886", Must(Must(codefly.GetEndpoint(ctx, "self/write")).PortAddress()))
+	assert.Equal(t, "localhost:11886", Must(Must(codefly.GetEndpoint(ctx, "app/svc/write")).Address()))
+	assert.Equal(t, "localhost:11886", Must(Must(codefly.GetEndpoint(ctx, "self/write")).Address()))
 }

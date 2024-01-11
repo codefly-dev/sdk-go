@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"github.com/codefly-dev/core/configurations"
-	"github.com/codefly-dev/core/configurations/standards"
 	"github.com/codefly-dev/core/wool"
 	"os"
 	"path"
@@ -12,7 +11,8 @@ import (
 	"strings"
 )
 
-var networks map[string][]string
+var environmentManager *configurations.EnvironmentVariableManager
+var networkOverrides map[string]string
 
 func CatchPanic(ctx context.Context) {
 	w := wool.Get(ctx).In("codefly.CatchPanic")
@@ -49,13 +49,12 @@ func Init(ctx context.Context) (*wool.Provider, error) {
 	provider = wool.New(ctx, service.Identity().AsResource()).WithConsole(GetLogLevel())
 	ctx = provider.Inject(ctx)
 
-	// Probably make it a struct with some validation
-	networks = make(map[string][]string)
-
-	err = LoadNetworkEndpointFromEnvironmentVariables(ctx)
+	err = LoadFromEnvironmentVariables(ctx)
 	if err != nil {
 		return nil, err
 	}
+
+	networkOverrides = make(map[string]string)
 
 	err = LoadOverrides(ctx)
 	if err != nil {
@@ -87,21 +86,13 @@ func Version() string {
 	return service.Version
 }
 
-func LoadNetworkEndpointFromEnvironmentVariables(ctx context.Context) error {
-	w := wool.Get(ctx).In("codefly.LoadNetworkEndpointFromEnvironmentVariables")
+func LoadFromEnvironmentVariables(ctx context.Context) error {
+	environmentManager = configurations.NewEnvironmentVariableManager()
 	for _, env := range os.Environ() {
 		if !strings.HasPrefix(env, "CODEFLY") {
 			continue
 		}
-		w.Trace("checking environment variable", wool.Field("env", env))
-		if ok := strings.HasPrefix(env, configurations.EndpointPrefix); ok {
-			instance, err := configurations.ParseEndpointEnvironmentVariable(env)
-			if err != nil {
-				return err
-			}
-			w.Trace("env translation", wool.Field("from", env), wool.Field("to", instance.Addresses))
-			networks[instance.Unique] = instance.Addresses
-		}
+		environmentManager.Add(env)
 	}
 	return nil
 }
@@ -130,87 +121,32 @@ func LoadOverrides(ctx context.Context) error {
 	}
 	for _, endpoint := range config.Endpoints {
 		w.Info("overloading endpoint", wool.Field("endpoint", endpoint), wool.Field("override", endpoint.Override))
-		networks[endpoint.Name] = []string{endpoint.Override}
+		networkOverrides[endpoint.Name] = endpoint.Override
 	}
 	return nil
 }
 
-type INetworkEndpoint interface {
-	IsPresent() bool
-	WithDefault(backup string) INetworkEndpoint
-
-	Host() string
-	PortAddress() string
-}
-
-type NetworkEndpointNotFound struct {
-	name string
-}
-
-func (e *NetworkEndpointNotFound) Host() string {
-	return "localhost"
-}
-
-func (e *NetworkEndpointNotFound) PortAddress() string {
-	return standards.PortAddress(e.name)
-}
-
-func (e *NetworkEndpointNotFound) IsPresent() bool {
-	return false
-}
-
-func (e *NetworkEndpointNotFound) WithDefault(backup string) INetworkEndpoint {
-	return e
-}
-
-type NetworkEndpoint struct {
-	Values []string
-}
-
-func (e *NetworkEndpoint) IsPresent() bool {
-	return true
-}
-
-func (e *NetworkEndpoint) WithDefault(backup string) INetworkEndpoint {
-	if e.Values == nil {
-		e.Values = []string{backup}
-	}
-	return e
-}
-
-func (e *NetworkEndpoint) Host() string {
-	// Not great
-	return e.Values[0]
-}
-
-func (e *NetworkEndpoint) PortAddress() string {
-	return ":" + strings.Split(e.Values[0], ":")[1]
-}
-
-func Endpoint(ctx context.Context, name string) INetworkEndpoint {
-	w := wool.Get(ctx).In("codefly.Endpoint", wool.NameField(name))
-	endpoint, err := GetEndpoint(ctx, name)
-	if err == nil {
-		return endpoint
-	}
-	w.Debug("cannot find endpoint: using default", wool.ErrField(err))
-	return &NetworkEndpointNotFound{name: name}
-}
-
-func GetEndpoint(ctx context.Context, name string) (*NetworkEndpoint, error) {
-	w := wool.Get(ctx).In("codefly.Endpoint", wool.NameField(name))
-	if endpoint, ok := networks[name]; ok {
-		return &NetworkEndpoint{Values: endpoint}, nil
-	}
-	if r, ok := strings.CutPrefix(name, "self"); ok {
+func GetEndpoint(ctx context.Context, unique string) (*configurations.EndpointInstance, error) {
+	if strings.HasPrefix(unique, "self") {
 		if service == nil {
-			return nil, w.NewError("did not find any codefly service")
+			return nil, fmt.Errorf("self only allowed when a codefly service configuration is found")
 		}
-		name = fmt.Sprintf("%s/%s%s", service.Application, service.Name, r)
-		if endpoint, ok := networks[name]; ok {
-			return &NetworkEndpoint{Values: endpoint}, nil
-		}
-		return nil, w.NewError("did not find any codefly network endpoint self: %s", name)
+		unique = strings.Replace(unique, "self", service.Unique(), 1)
 	}
-	return nil, w.NewError("did not find any codefly network endpoint")
+	if override, ok := networkOverrides[unique]; ok {
+		endpoint, err := configurations.ParseEndpoint(unique)
+		if err != nil {
+			return nil, err
+		}
+		return &configurations.EndpointInstance{Endpoint: endpoint, Addresses: []string{override}}, nil
+	}
+	return environmentManager.GetEndpoint(ctx, unique)
+}
+
+func GetProjectProvider(ctx context.Context, key string) (string, error) {
+	return environmentManager.GetProjectProvider(ctx, key)
+}
+
+func GetServiceProvider(ctx context.Context, unique string, key string) (string, error) {
+	return environmentManager.GetServiceProvider(ctx, unique, key)
 }
