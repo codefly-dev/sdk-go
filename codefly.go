@@ -17,7 +17,7 @@ var networkOverrides map[string]string
 func CatchPanic(ctx context.Context) {
 	w := wool.Get(ctx).In("codefly.CatchPanic")
 	if r := recover(); r != nil {
-		w.Error("Caught panic: %s", wool.Field("panic", r), wool.Field("stack", string(debug.Stack())))
+		w.Error("Caught panic", wool.Field("panic", r), wool.Field("stack", string(debug.Stack())))
 		os.Exit(1)
 	}
 }
@@ -55,10 +55,11 @@ func Init(ctx context.Context) (*wool.Provider, error) {
 	}
 
 	networkOverrides = make(map[string]string)
-
-	err = LoadOverrides(ctx)
-	if err != nil {
-		return nil, err
+	if os.Getenv("CODEFLY_SDK__WITHOVERRIDE") == "true" {
+		err = LoadOverrides(ctx)
+		if err != nil {
+			return nil, err
+		}
 	}
 	return provider, nil
 }
@@ -107,9 +108,6 @@ type Configuration struct {
 }
 
 func LoadOverrides(ctx context.Context) error {
-	if os.Getenv("CODEFLY_SDK__WITHOVERRIDE") != "true" {
-		return nil
-	}
 	w := wool.Get(ctx).In("codefly.LoadOverrides")
 	dir, err := configurations.SolveDir(root)
 	if err != nil {
@@ -121,6 +119,13 @@ func LoadOverrides(ctx context.Context) error {
 	}
 	for _, endpoint := range config.Endpoints {
 		w.Info("overloading endpoint", wool.Field("endpoint", endpoint), wool.Field("override", endpoint.Override))
+		if strings.HasPrefix(endpoint.Name, "self") {
+			// self is acceptable here for the endpoint as well
+			if service == nil {
+				return fmt.Errorf("self only allowed when a codefly service configuration is found")
+			}
+			endpoint.Name = strings.Replace(endpoint.Name, "self", service.Unique(), 1)
+		}
 		networkOverrides[endpoint.Name] = endpoint.Override
 	}
 	return nil
@@ -128,6 +133,7 @@ func LoadOverrides(ctx context.Context) error {
 
 func GetEndpoint(ctx context.Context, unique string) (*configurations.EndpointInstance, error) {
 	if strings.HasPrefix(unique, "self") {
+		// self is acceptable here for the endpoint as well
 		if service == nil {
 			return nil, fmt.Errorf("self only allowed when a codefly service configuration is found")
 		}

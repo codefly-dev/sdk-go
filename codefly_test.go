@@ -73,4 +73,10 @@ func TestEndpointWithOverride(t *testing.T) {
 	assert.Equal(t, ":11886", Must(Must(codefly.GetEndpoint(ctx, "self/write")).PortAddress()))
 	assert.Equal(t, "localhost:11886", Must(Must(codefly.GetEndpoint(ctx, "app/svc/write")).Address()))
 	assert.Equal(t, "localhost:11886", Must(Must(codefly.GetEndpoint(ctx, "self/write")).Address()))
+
+	assert.Equal(t, ":11887", Must(Must(codefly.GetEndpoint(ctx, "app/svc/read")).PortAddress()))
+	assert.Equal(t, ":11887", Must(Must(codefly.GetEndpoint(ctx, "self/read")).PortAddress()))
+	assert.Equal(t, "localhost:11887", Must(Must(codefly.GetEndpoint(ctx, "app/svc/read")).Address()))
+	assert.Equal(t, "localhost:11887", Must(Must(codefly.GetEndpoint(ctx, "self/read")).Address()))
+
 }
