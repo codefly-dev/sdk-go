@@ -22,7 +22,7 @@ func TestEndpoint(t *testing.T) {
 	err := os.Setenv("CODEFLY_SDK__LOGLEVEL", "trace")
 	assert.NoError(t, err)
 
-	env := configurations.EndpointEnvironmentVariableKey(&configurations.Endpoint{Application: "app", Service: "svc"})
+	env := configurations.EndpointEnvironmentVariableKey(&configurations.Endpoint{Application: "app", Service: "svc", API: configurations.Unknown})
 	t.Log(env)
 	err = os.Setenv(env, ":1234")
 	assert.NoError(t, err)
@@ -35,7 +35,7 @@ func TestEndpoint(t *testing.T) {
 	assert.Equal(t, ":1234", Must(Must(codefly.GetEndpoint(ctx, "app/svc")).PortAddress()))
 	assert.Equal(t, ":1234", Must(Must(codefly.GetEndpoint(ctx, "app/svc")).PortAddress()))
 
-	env = configurations.EndpointEnvironmentVariableKey(&configurations.Endpoint{Application: "app", Service: "svc", Name: "write"})
+	env = configurations.EndpointEnvironmentVariableKey(&configurations.Endpoint{Application: "app", Service: "svc", Name: "write", API: configurations.Unknown})
 	err = os.Setenv(env, ":12345")
 	assert.NoError(t, err)
 

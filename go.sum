@@ -28,6 +28,8 @@ github.com/codefly-dev/core v0.1.5 h1:wZeM6bjmGK5LAsFy4SuO9/pFep/X+a0HajyApowIOl
 github.com/codefly-dev/core v0.1.5/go.mod h1:jRauBwEsSrvBXfgowdVI3WwWGqedHLXbrJ/H41aiiGc=
 github.com/codefly-dev/core v0.1.6 h1:IiKY3opZrWLqkrUgjjrpQW9axGLPZYydQz9leOyKd/4=
 github.com/codefly-dev/core v0.1.6/go.mod h1:jRauBwEsSrvBXfgowdVI3WwWGqedHLXbrJ/H41aiiGc=
+github.com/codefly-dev/core v0.1.7 h1:gudshRk/VtCJZGlzmTRdSAXopn08x1LRzRkItnDA6oM=
+github.com/codefly-dev/core v0.1.7/go.mod h1:jRauBwEsSrvBXfgowdVI3WwWGqedHLXbrJ/H41aiiGc=
 github.com/codefly-dev/golor v0.0.10 h1:eqNxY3aSVbXDWo+3S9fcRynCEStPNo033owzwvzziOQ=
 github.com/codefly-dev/golor v0.0.10/go.mod h1:TzMkdNwKUDO9PKz9f2LzMPOMHYGFXQEluOj8wEP2q1g=
 github.com/davecgh/go-spew v1.1.0/go.mod h1:J7Y8YcW2NihsgmVo/mv3lAwl/skON4iLHjSsI+c5H38=
