@@ -118,7 +118,7 @@ func LoadOverrides(ctx context.Context) error {
 		return w.Wrapf(err, "cannot load override configuration")
 	}
 	for _, endpoint := range config.Endpoints {
-		w.Info("overloading endpoint", wool.Field("endpoint", endpoint), wool.Field("override", endpoint.Override))
+		w.Debug("overloading endpoint", wool.Field("endpoint", endpoint), wool.Field("override", endpoint.Override))
 		if strings.HasPrefix(endpoint.Name, "self") {
 			// self is acceptable here for the endpoint as well
 			if service == nil {
