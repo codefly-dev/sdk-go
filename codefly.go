@@ -153,6 +153,6 @@ func GetProjectProvider(ctx context.Context, key string) (string, error) {
 	return environmentManager.GetProjectProvider(ctx, key)
 }
 
-func GetServiceProvider(ctx context.Context, unique string, key string) (string, error) {
-	return environmentManager.GetServiceProvider(ctx, unique, key)
+func GetServiceProvider(ctx context.Context, unique string, name string, key string) (string, error) {
+	return environmentManager.GetServiceProvider(ctx, unique, name, key)
 }
