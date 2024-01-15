@@ -149,8 +149,8 @@ func GetEndpoint(ctx context.Context, unique string) (*configurations.EndpointIn
 	return environmentManager.GetEndpoint(ctx, unique)
 }
 
-func GetProjectProvider(ctx context.Context, key string) (string, error) {
-	return environmentManager.GetProjectProvider(ctx, key)
+func GetProjectProvider(ctx context.Context, name string, key string) (string, error) {
+	return environmentManager.GetProjectProvider(ctx, name, key)
 }
 
 func GetServiceProvider(ctx context.Context, unique string, name string, key string) (string, error) {
