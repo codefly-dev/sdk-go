@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"github.com/codefly-dev/core/configurations"
+	"github.com/codefly-dev/core/shared"
 	"github.com/codefly-dev/core/wool"
 	"os"
 	"path"
@@ -109,7 +110,7 @@ type Configuration struct {
 
 func LoadOverrides(ctx context.Context) error {
 	w := wool.Get(ctx).In("codefly.LoadOverrides")
-	dir, err := configurations.SolveDir(root)
+	dir, err := shared.SolvePath(root)
 	if err != nil {
 		return w.Wrapf(err, "cannot solve dir")
 	}
@@ -155,4 +156,8 @@ func GetProjectProvider(ctx context.Context, name string, key string) (string, e
 
 func GetServiceProvider(ctx context.Context, unique string, name string, key string) (string, error) {
 	return environmentManager.GetServiceProvider(ctx, unique, name, key)
+}
+
+func IsLocalEnvironment() bool {
+	return os.Getenv(configurations.EnvironmentAsEnvironmentVariableKey) == configurations.Local().Name
 }
