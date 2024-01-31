@@ -23,6 +23,11 @@ func TestEndpoint(t *testing.T) {
 	err := os.Setenv("CODEFLY_SDK__LOGLEVEL", "trace")
 	assert.NoError(t, err)
 
+	// Check the default
+	endpoint, err := codefly.GetEndpoint(ctx, "app/svc::rest")
+	assert.NoError(t, err)
+	assert.Equal(t, ":8080", Must(endpoint.PortAddress()))
+
 	env := configurations.EndpointEnvironmentVariableKey(&configurations.Endpoint{Application: "app", Service: "svc", API: configurations.Unknown})
 	t.Log(env)
 	err = os.Setenv(env, ":1234")

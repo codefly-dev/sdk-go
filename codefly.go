@@ -133,6 +133,7 @@ func LoadOverrides(ctx context.Context) error {
 }
 
 func GetEndpoint(ctx context.Context, unique string) (*configurations.EndpointInstance, error) {
+	w := wool.Get(ctx).In("codefly.GetEndpoint")
 	if strings.HasPrefix(unique, "self") {
 		// self is acceptable here for the endpoint as well
 		if service == nil {
@@ -147,7 +148,12 @@ func GetEndpoint(ctx context.Context, unique string) (*configurations.EndpointIn
 		}
 		return &configurations.EndpointInstance{Endpoint: endpoint, Addresses: []string{override}}, nil
 	}
-	return environmentManager.GetEndpoint(ctx, unique)
+	instance, err := environmentManager.GetEndpoint(ctx, unique)
+	if err != nil {
+		w.Warn("not endpoint configuration found, returning standards")
+		return configurations.DefaultEndpointInstance(unique), nil
+	}
+	return instance, nil
 }
 
 func GetProjectProvider(ctx context.Context, name string, key string) (string, error) {
