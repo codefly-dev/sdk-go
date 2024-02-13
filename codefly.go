@@ -32,6 +32,10 @@ func GetLogLevel() wool.Loglevel {
 	return wool.INFO
 }
 
+func init() {
+	_, _ = Init(context.Background())
+}
+
 func Init(ctx context.Context) (*wool.Provider, error) {
 	if root == "" {
 		root, _ = os.Getwd()
