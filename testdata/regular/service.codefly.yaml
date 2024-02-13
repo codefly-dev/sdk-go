@@ -1,6 +1,7 @@
 kind: service
 name: svc
 application: app
+project: test
 namespace: default
 endpoints:
   - name: write

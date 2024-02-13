@@ -2,14 +2,14 @@ module github.com/codefly-dev/sdk-go
 
 go 1.21.4
 
-require github.com/codefly-dev/core v0.1.22
+require github.com/codefly-dev/core v0.1.31
 
 require (
-	buf.build/gen/go/bufbuild/protovalidate/protocolbuffers/go v1.32.0-20231115204500-e097f827e652.1 // indirect
+	buf.build/gen/go/bufbuild/protovalidate/protocolbuffers/go v1.32.0-20240212200630-3014d81c3a48.1 // indirect
 	github.com/Masterminds/semver v1.5.0 // indirect
 	github.com/antlr4-go/antlr/v4 v4.13.0 // indirect
 	github.com/asaskevich/govalidator v0.0.0-20230301143203-a9d515a09cc2 // indirect
-	github.com/bufbuild/protovalidate-go v0.5.0 // indirect
+	github.com/bufbuild/protovalidate-go v0.5.2 // indirect
 	github.com/codefly-dev/golor v0.0.10 // indirect
 	github.com/davecgh/go-spew v1.1.2-0.20180830191138-d8f796af33cc // indirect
 	github.com/fatih/color v1.16.0 // indirect
@@ -40,16 +40,16 @@ require (
 	github.com/stretchr/testify v1.8.4 // indirect
 	github.com/yoheimuta/go-protoparser/v4 v4.9.0 // indirect
 	go.mongodb.org/mongo-driver v1.13.1 // indirect
-	go.opentelemetry.io/otel v1.22.0 // indirect
-	go.opentelemetry.io/otel/exporters/stdout/stdouttrace v1.22.0 // indirect
-	go.opentelemetry.io/otel/metric v1.22.0 // indirect
-	go.opentelemetry.io/otel/sdk v1.22.0 // indirect
-	go.opentelemetry.io/otel/trace v1.22.0 // indirect
-	golang.org/x/exp v0.0.0-20240119083558-1b970713d09a // indirect
-	golang.org/x/sys v0.16.0 // indirect
+	go.opentelemetry.io/otel v1.23.1 // indirect
+	go.opentelemetry.io/otel/exporters/stdout/stdouttrace v1.23.1 // indirect
+	go.opentelemetry.io/otel/metric v1.23.1 // indirect
+	go.opentelemetry.io/otel/sdk v1.23.1 // indirect
+	go.opentelemetry.io/otel/trace v1.23.1 // indirect
+	golang.org/x/exp v0.0.0-20240213143201-ec583247a57a // indirect
+	golang.org/x/sys v0.17.0 // indirect
 	golang.org/x/text v0.14.0 // indirect
-	google.golang.org/genproto/googleapis/api v0.0.0-20240125205218-1f4bbc51befe // indirect
-	google.golang.org/genproto/googleapis/rpc v0.0.0-20240125205218-1f4bbc51befe // indirect
+	google.golang.org/genproto/googleapis/api v0.0.0-20240213162025-012b6fc9bca9 // indirect
+	google.golang.org/genproto/googleapis/rpc v0.0.0-20240213162025-012b6fc9bca9 // indirect
 	google.golang.org/grpc v1.61.0 // indirect
 	google.golang.org/protobuf v1.32.0 // indirect
 	gopkg.in/yaml.v3 v3.0.1 // indirect
