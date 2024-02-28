@@ -32,54 +32,87 @@ func GetLogLevel() wool.Loglevel {
 	return wool.INFO
 }
 
+func LoadEnvironmentVariables(ctx context.Context) error {
+	err := LoadFromEnvironmentVariables(ctx)
+	if err != nil {
+		return err
+	}
+
+	return nil
+}
+
+func LoadOverrideIfNeeded(ctx context.Context) error {
+	networkOverrides = make(map[string]string)
+	if os.Getenv("CODEFLY_SDK__WITHOVERRIDE") == "true" {
+		err := LoadOverrides(ctx)
+		if err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 func init() {
-	_, _ = Init(context.Background())
+	_, err := Init(context.Background())
+	if err != nil {
+		fmt.Println("Cannot initialize codefly", err)
+	}
 }
 
 func Init(ctx context.Context) (*wool.Provider, error) {
-	if root == "" {
-		root, _ = os.Getwd()
+	var err error
+	root, err = os.Getwd()
+	if err != nil {
+		return nil, err
+	}
+
+	err = LoadEnvironmentVariables(ctx)
+	if err != nil {
+		return nil, err
+	}
+	err = LoadOverrideIfNeeded(ctx)
+	if err != nil {
+		return nil, err
 	}
 
 	// For logging before we get the service
-	provider := wool.New(ctx, configurations.CLI.AsResource()).WithConsole(GetLogLevel())
-	ctx = provider.Inject(ctx)
+	var provider *wool.Provider
 
-	err := LoadService(ctx)
+	err = LoadService(ctx)
 	if err != nil {
 		return nil, err
 	}
 
-	// Now update the provider
-	provider = wool.New(ctx, service.Identity().AsResource()).WithConsole(GetLogLevel())
+	if service == nil {
+		fmt.Println("No service configuration found. Will use default log wrapper")
+		provider = wool.New(ctx, configurations.CLI.AsResource()).WithConsole(GetLogLevel())
+	} else {
+		// Now update the provider
+		provider = wool.New(ctx, service.Identity().AsResource()).WithConsole(GetLogLevel())
+	}
+
 	ctx = provider.Inject(ctx)
 
-	err = LoadFromEnvironmentVariables(ctx)
-	if err != nil {
-		return nil, err
-	}
-
-	networkOverrides = make(map[string]string)
-	if os.Getenv("CODEFLY_SDK__WITHOVERRIDE") == "true" {
-		err = LoadOverrides(ctx)
-		if err != nil {
-			return nil, err
-		}
-	}
 	return provider, nil
 }
 
 var root string
 var service *configurations.Service
 
-func WithRoot(dir string) {
-	root = dir
-}
-
 func LoadService(ctx context.Context) error {
-	svc, err := configurations.LoadServiceFromDirUnsafe(ctx, root)
+	fmt.Println("Root", root)
+	svc, err := configurations.LoadServiceFromDir(ctx, root)
 	if err != nil {
-		return err
+		dir, errFind := configurations.FindUp[configurations.Service](ctx)
+		if errFind != nil {
+			return errFind
+		}
+		if dir != nil {
+			svc, err = configurations.LoadServiceFromDir(ctx, *dir)
+			if err != nil {
+				return err
+			}
+		}
 	}
 	service = svc
 	return nil
@@ -90,6 +123,10 @@ func Version() string {
 		return "unknown"
 	}
 	return service.Version
+}
+
+func Service() *configurations.Service {
+	return service
 }
 
 func LoadFromEnvironmentVariables(ctx context.Context) error {

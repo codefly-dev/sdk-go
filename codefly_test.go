@@ -4,9 +4,11 @@ import (
 	"context"
 	"github.com/codefly-dev/core/configurations"
 	basev0 "github.com/codefly-dev/core/generated/go/base/v0"
+	"github.com/codefly-dev/core/wool"
 	codefly "github.com/codefly-dev/sdk-go"
 	"github.com/stretchr/testify/assert"
 	"os"
+	"path"
 	"testing"
 )
 
@@ -17,10 +19,49 @@ func Must[T any](obj T, err error) T {
 	return obj
 }
 
+func TestServiceLoad(t *testing.T) {
+	cur, err := os.Getwd()
+	wool.SetGlobalLogLevel(wool.TRACE)
+	assert.NoError(t, err)
+	err = os.Chdir(path.Join(cur, "testdata/regular/some_folder"))
+	assert.NoError(t, err)
+	defer func() {
+		err = os.Chdir(cur)
+		assert.NoError(t, err)
+	}()
+	_, err = codefly.Init(context.Background())
+	assert.NoError(t, err)
+	assert.NotNil(t, codefly.Service())
+}
+
+func TestServiceLoadUp(t *testing.T) {
+	cur, err := os.Getwd()
+	assert.NoError(t, err)
+	err = os.Chdir(path.Join(cur, "testdata/regular/some_folder"))
+	assert.NoError(t, err)
+	defer func() {
+		err = os.Chdir(cur)
+		assert.NoError(t, err)
+	}()
+	_, err = codefly.Init(context.Background())
+	assert.NoError(t, err)
+	assert.NotNil(t, codefly.Service())
+}
+
 func TestEndpoint(t *testing.T) {
 	ctx := context.Background()
+	cur, err := os.Getwd()
+	assert.NoError(t, err)
+	err = os.Chdir(path.Join(cur, "testdata/regular/some_folder"))
+	assert.NoError(t, err)
+	defer func() {
+		err = os.Chdir(cur)
+		assert.NoError(t, err)
+	}()
+	_, err = codefly.Init(context.Background())
+	assert.NoError(t, err)
 
-	err := os.Setenv("CODEFLY_SDK__LOGLEVEL", "trace")
+	err = os.Setenv("CODEFLY_SDK__LOGLEVEL", "trace")
 	assert.NoError(t, err)
 
 	// Check the default
@@ -33,10 +74,9 @@ func TestEndpoint(t *testing.T) {
 	err = os.Setenv(env, ":1234")
 	assert.NoError(t, err)
 
-	codefly.WithRoot("testdata/regular")
-
 	_, err = codefly.Init(ctx)
 	assert.NoError(t, err)
+	assert.NotNil(t, codefly.Service())
 
 	assert.Equal(t, ":1234", Must(Must(codefly.GetEndpoint(ctx, "app/svc")).PortAddress()))
 	assert.Equal(t, ":1234", Must(Must(codefly.GetEndpoint(ctx, "app/svc")).PortAddress()))
@@ -63,17 +103,26 @@ func TestEndpoint(t *testing.T) {
 
 func TestEndpointWithOverride(t *testing.T) {
 	ctx := context.Background()
+	cur, err := os.Getwd()
+	assert.NoError(t, err)
+	err = os.Chdir(path.Join(cur, "testdata/with_overrides"))
+	assert.NoError(t, err)
+	defer func() {
+		err = os.Chdir(cur)
+		assert.NoError(t, err)
+		err = os.Unsetenv("CODEFLY_SDK__WITHOVERRIDE")
+		assert.NoError(t, err)
+	}()
 
-	err := os.Setenv("CODEFLY_SDK__LOGLEVEL", "trace")
+	err = os.Setenv("CODEFLY_SDK__LOGLEVEL", "trace")
 	assert.NoError(t, err)
 
 	err = os.Setenv("CODEFLY_SDK__WITHOVERRIDE", "true")
 	assert.NoError(t, err)
 
-	codefly.WithRoot("testdata/with_overrides")
-
 	_, err = codefly.Init(ctx)
 	assert.NoError(t, err)
+	assert.NotNil(t, codefly.Service())
 
 	assert.Equal(t, ":11886", Must(Must(codefly.GetEndpoint(ctx, "app/svc/write")).PortAddress()))
 	assert.Equal(t, ":11886", Must(Must(codefly.GetEndpoint(ctx, "self/write")).PortAddress()))
@@ -90,7 +139,19 @@ func TestEndpointWithOverride(t *testing.T) {
 func TestServiceProviderInformation(t *testing.T) {
 	ctx := context.Background()
 
-	err := os.Setenv("CODEFLY_SDK__LOGLEVEL", "trace")
+	cur, err := os.Getwd()
+	assert.NoError(t, err)
+	err = os.Chdir(path.Join(cur, "testdata/regular"))
+	assert.NoError(t, err)
+	defer func() {
+		err = os.Chdir(cur)
+		assert.NoError(t, err)
+	}()
+	_, err = codefly.Init(context.Background())
+
+	assert.NoError(t, err)
+
+	err = os.Setenv("CODEFLY_SDK__LOGLEVEL", "trace")
 	assert.NoError(t, err)
 
 	env := configurations.ProviderInformationEnvKey(&basev0.ProviderInformation{
@@ -102,8 +163,6 @@ func TestServiceProviderInformation(t *testing.T) {
 
 	err = os.Setenv(env, connection)
 	assert.NoError(t, err)
-
-	codefly.WithRoot("testdata/with_overrides")
 
 	_, err = codefly.Init(ctx)
 	assert.NoError(t, err)
@@ -117,8 +176,14 @@ func TestServiceProviderInformation(t *testing.T) {
 func TestProjectProviderInformation(t *testing.T) {
 	ctx := context.Background()
 
-	err := os.Setenv("CODEFLY_SDK__LOGLEVEL", "trace")
+	cur, err := os.Getwd()
 	assert.NoError(t, err)
+	err = os.Chdir(path.Join(cur, "testdata/with_overrides"))
+	assert.NoError(t, err)
+	defer func() {
+		err = os.Chdir(cur)
+		assert.NoError(t, err)
+	}()
 
 	env := configurations.ProviderInformationEnvKey(&basev0.ProviderInformation{
 		Name:   "auth",
@@ -129,9 +194,10 @@ func TestProjectProviderInformation(t *testing.T) {
 	err = os.Setenv(env, connection)
 	assert.NoError(t, err)
 
-	codefly.WithRoot("testdata/with_overrides")
+	err = os.Setenv("CODEFLY_SDK__LOGLEVEL", "trace")
+	assert.NoError(t, err)
 
-	_, err = codefly.Init(ctx)
+	_, err = codefly.Init(context.Background())
 	assert.NoError(t, err)
 
 	value, err := codefly.GetProjectProvider(ctx, "auth", "connection")
