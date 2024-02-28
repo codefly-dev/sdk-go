@@ -100,7 +100,6 @@ var root string
 var service *configurations.Service
 
 func LoadService(ctx context.Context) error {
-	fmt.Println("Root", root)
 	svc, err := configurations.LoadServiceFromDir(ctx, root)
 	if err != nil {
 		dir, errFind := configurations.FindUp[configurations.Service](ctx)
