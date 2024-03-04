@@ -70,7 +70,6 @@ func TestEndpoint(t *testing.T) {
 	assert.Equal(t, ":8080", Must(endpoint.PortAddress()))
 
 	env := configurations.EndpointEnvironmentVariableKey(&configurations.Endpoint{Application: "app", Service: "svc", API: configurations.Unknown})
-	t.Log(env)
 	err = os.Setenv(env, ":1234")
 	assert.NoError(t, err)
 
@@ -133,6 +132,11 @@ func TestEndpointWithOverride(t *testing.T) {
 	assert.Equal(t, ":11887", Must(Must(codefly.GetEndpoint(ctx, "self/read")).PortAddress()))
 	assert.Equal(t, "localhost:11887", Must(Must(codefly.GetEndpoint(ctx, "app/svc/read")).Address()))
 	assert.Equal(t, "localhost:11887", Must(Must(codefly.GetEndpoint(ctx, "self/read")).Address()))
+
+	// Test Port as well
+	assert.Equal(t, "http://localhost:8080", Must(Must(codefly.GetEndpoint(ctx, "self/http")).Address()))
+	assert.Equal(t, 8080, Must(Must(codefly.GetEndpoint(ctx, "self/http")).Port()))
+	assert.Equal(t, ":8080", Must(Must(codefly.GetEndpoint(ctx, "self/http")).PortAddress()))
 
 }
 
