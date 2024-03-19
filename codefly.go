@@ -182,16 +182,21 @@ func GetEndpoint(ctx context.Context, unique string) (*configurations.EndpointIn
 		unique = strings.Replace(unique, "self", service.Unique(), 1)
 	}
 	if override, ok := networkOverrides[unique]; ok {
-		endpoint, err := configurations.ParseEndpoint(unique)
+		info, err := configurations.ParseEndpoint(unique)
 		if err != nil {
 			return nil, err
 		}
-		return &configurations.EndpointInstance{Endpoint: endpoint, Addresses: []string{override}}, nil
+		return &configurations.EndpointInstance{Endpoint: &configurations.Endpoint{
+			Name:        info.Name,
+			Service:     info.Service,
+			Application: info.Application,
+			API:         info.API,
+		}, Address: override}, nil
 	}
 	instance, err := environmentManager.GetEndpoint(ctx, unique)
 	if err != nil {
 		w.Warn("not endpoint configuration found, returning standards")
-		return configurations.DefaultEndpointInstance(unique), nil
+		return configurations.DefaultEndpointInstance(unique)
 	}
 	return instance, nil
 }
