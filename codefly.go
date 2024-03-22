@@ -172,7 +172,8 @@ func LoadOverrides(ctx context.Context) error {
 	return nil
 }
 
-func GetEndpoint(ctx context.Context, unique string) (*configurations.EndpointInstance, error) {
+func GetEndpoint(ctx context.Context, application string, service string) (*configurations.EndpointInstance, error) {
+	unique := configurations.ServiceUnique(application, service)
 	w := wool.Get(ctx).In("codefly.GetEndpoint")
 	if strings.HasPrefix(unique, "self") {
 		// self is acceptable here for the endpoint as well
@@ -201,12 +202,12 @@ func GetEndpoint(ctx context.Context, unique string) (*configurations.EndpointIn
 	return instance, nil
 }
 
-func GetProjectProvider(ctx context.Context, name string, key string) (string, error) {
-	return environmentManager.GetProjectProvider(ctx, name, key)
+func GetProjectProvider(ctx context.Context, application string, service string, key string) (string, error) {
+	return environmentManager.GetProjectProvider(ctx, configurations.ServiceUnique(application, service), key)
 }
 
-func GetServiceProvider(ctx context.Context, unique string, name string, key string) (string, error) {
-	return environmentManager.GetServiceProvider(ctx, unique, name, key)
+func GetServiceProvider(ctx context.Context, application string, service string, name string, key string) (string, error) {
+	return environmentManager.GetServiceProvider(ctx, configurations.ServiceUnique(application, service), name, key)
 }
 
 func IsLocalEnvironment() bool {
