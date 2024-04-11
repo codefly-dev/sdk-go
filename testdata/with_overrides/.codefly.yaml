@@ -1,7 +1,0 @@
-endpoints:
-  - name: app/svc/write
-    override: localhost:11886
-  - name: self/read
-    override: localhost:11887
-  - name: self/http
-    override: http://localhost:8080
