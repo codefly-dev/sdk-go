@@ -68,9 +68,12 @@ func TestEnvironmentVariables(t *testing.T) {
 	err = os.Setenv("CODEFLY_SDK__LOGLEVEL", "trace")
 	assert.NoError(t, err)
 
-	// Check the default
+	// No default
 	net := codefly.For(ctx).API(standards.REST).NetworkInstance()
-	assert.NoError(t, err)
+	assert.Nil(t, net)
+
+	// With default
+	net = codefly.For(ctx).API(standards.REST).WithDefaultNetwork().NetworkInstance()
 	assert.NotNil(t, net)
 	assert.Equal(t, "localhost", net.Hostname)
 	assert.Equal(t, uint16(8080), net.Port)

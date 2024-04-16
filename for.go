@@ -7,11 +7,12 @@ import (
 )
 
 type Query struct {
-	application  string
-	service      string
-	endpointName string
-	endpointApi  string
-	ctx          context.Context
+	application        string
+	service            string
+	endpointName       string
+	endpointApi        string
+	ctx                context.Context
+	withDefaultNetwork bool
 }
 
 func For(ctx context.Context) *Query {
@@ -44,6 +45,12 @@ func (q *Query) Normalize() {
 	}
 }
 
+func (q *Query) WithDefaultNetwork() *Query {
+	q.withDefaultNetwork = true
+	return q
+}
+
+
 func (q *Query) NetworkInstance() *configurations.NetworkInstance {
 	w := wool.Get(q.ctx).In("NetworkInstance")
 	q.Normalize()
@@ -55,8 +62,11 @@ func (q *Query) NetworkInstance() *configurations.NetworkInstance {
 	}
 	instance, err := configurations.FindNetworkInstanceInEnvironmentVariables(q.ctx, info, envs)
 	if err != nil {
-		w.Warn("Cannot find network instance, returning default", wool.Field("info", info), wool.Field("error", err))
-		return configurations.DefaultNetworkInstance(q.endpointApi)
+		if q.withDefaultNetwork {
+			w.Warn("Cannot find network instance, returning default", wool.Field("info", info), wool.Field("error", err))
+			return configurations.DefaultNetworkInstance(q.endpointApi)
+		}
+		return nil
 	}
 	return instance
 }
