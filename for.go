@@ -2,12 +2,12 @@ package codefly
 
 import (
 	"context"
-	"github.com/codefly-dev/core/configurations"
+	"github.com/codefly-dev/core/resources"
 	"github.com/codefly-dev/core/wool"
 )
 
 type Query struct {
-	application        string
+	module             string
 	service            string
 	endpointName       string
 	endpointApi        string
@@ -18,7 +18,7 @@ type Query struct {
 func For(ctx context.Context) *Query {
 	q := &Query{ctx: ctx}
 	if runningService != nil {
-		q.application = runningService.Application
+		q.module = runningService.Module
 		q.service = runningService.Name
 	}
 	return q
@@ -29,8 +29,8 @@ func (q *Query) Service(s string) *Query {
 	return q
 }
 
-func (q *Query) Application(s string) *Query {
-	q.application = s
+func (q *Query) Module(s string) *Query {
+	q.module = s
 	return q
 }
 
@@ -50,21 +50,20 @@ func (q *Query) WithDefaultNetwork() *Query {
 	return q
 }
 
-
-func (q *Query) NetworkInstance() *configurations.NetworkInstance {
+func (q *Query) NetworkInstance() *resources.NetworkInstance {
 	w := wool.Get(q.ctx).In("NetworkInstance")
 	q.Normalize()
-	info := &configurations.EndpointInformation{
-		Application: q.application,
-		Service:     q.service,
-		API:         q.endpointApi,
-		Name:        q.endpointName,
+	info := &resources.EndpointInformation{
+		Module:  q.module,
+		Service: q.service,
+		API:     q.endpointApi,
+		Name:    q.endpointName,
 	}
-	instance, err := configurations.FindNetworkInstanceInEnvironmentVariables(q.ctx, info, envs)
+	instance, err := resources.FindNetworkInstanceInEnvironmentVariables(q.ctx, info, envs)
 	if err != nil {
 		if q.withDefaultNetwork {
 			w.Warn("Cannot find network instance, returning default", wool.Field("info", info), wool.Field("error", err))
-			return configurations.DefaultNetworkInstance(q.endpointApi)
+			return resources.DefaultNetworkInstance(q.endpointApi)
 		}
 		return nil
 	}
@@ -73,14 +72,14 @@ func (q *Query) NetworkInstance() *configurations.NetworkInstance {
 
 func (q *Query) Configuration(key string, name string) (string, error) {
 	q.Normalize()
-	unique := configurations.ServiceUnique(q.application, q.service)
-	envKey := configurations.ServiceConfigurationKeyFromUnique(unique, key, name)
-	return configurations.FindValueInEnvironmentVariables(q.ctx, envKey, envs)
+	unique := resources.ServiceUnique(q.module, q.service)
+	envKey := resources.ServiceConfigurationKeyFromUnique(unique, key, name)
+	return resources.FindValueInEnvironmentVariables(q.ctx, envKey, envs)
 }
 
 func (q *Query) Secret(key string, name string) (string, error) {
 	q.Normalize()
-	unique := configurations.ServiceUnique(q.application, q.service)
-	envKey := configurations.ServiceSecretConfigurationKeyFromUnique(unique, key, name)
-	return configurations.FindValueInEnvironmentVariables(q.ctx, envKey, envs)
+	unique := resources.ServiceUnique(q.module, q.service)
+	envKey := resources.ServiceSecretConfigurationKeyFromUnique(unique, key, name)
+	return resources.FindValueInEnvironmentVariables(q.ctx, envKey, envs)
 }

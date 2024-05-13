@@ -2,9 +2,9 @@ package codefly_test
 
 import (
 	"context"
-	"github.com/codefly-dev/core/configurations"
-	"github.com/codefly-dev/core/configurations/standards"
 	basev0 "github.com/codefly-dev/core/generated/go/base/v0"
+	"github.com/codefly-dev/core/resources"
+	"github.com/codefly-dev/core/standards"
 	"github.com/codefly-dev/core/wool"
 	codefly "github.com/codefly-dev/sdk-go"
 	"github.com/stretchr/testify/assert"
@@ -50,7 +50,6 @@ func TestServiceLoadUp(t *testing.T) {
 }
 
 func TestEnvironmentVariables(t *testing.T) {
-
 	ctx := context.Background()
 	wool.SetGlobalLogLevel(wool.TRACE)
 
@@ -80,7 +79,7 @@ func TestEnvironmentVariables(t *testing.T) {
 	assert.Equal(t, "http://localhost:8080", net.Address)
 
 	// With API and no name
-	env := configurations.EndpointAsEnvironmentVariableKey(&configurations.EndpointInformation{Application: "app", Service: "svc", Name: standards.HTTP, API: standards.HTTP})
+	env := resources.EndpointAsEnvironmentVariableKey(&resources.EndpointInformation{Module: "mod", Service: "svc", Name: standards.HTTP, API: standards.HTTP})
 	err = os.Setenv(env, "http://localhost:1234")
 	assert.NoError(t, err)
 	err = codefly.LoadEnvironmentVariables()
@@ -92,8 +91,8 @@ func TestEnvironmentVariables(t *testing.T) {
 	assert.Equal(t, "http://localhost:1234", net.Address)
 
 	outputConf := &basev0.Configuration{
-		Origin: "app/store",
-		Scope:  basev0.NetworkScope_Container,
+		Origin:         "mod/store",
+		RuntimeContext: resources.NewRuntimeContextNative(),
 		Configurations: []*basev0.ConfigurationInformation{
 			{Name: "postgres",
 				ConfigurationValues: []*basev0.ConfigurationValue{
@@ -103,8 +102,9 @@ func TestEnvironmentVariables(t *testing.T) {
 			},
 		},
 	}
-	secretEnvs := configurations.ConfigurationAsEnvironmentVariables(outputConf, true)
-	envs := configurations.ConfigurationAsEnvironmentVariables(outputConf, false)
+	secretEnvs := resources.ConfigurationAsEnvironmentVariables(outputConf, true)
+	envs := resources.ConfigurationAsEnvironmentVariables(outputConf, false)
+
 	for _, e := range secretEnvs {
 		err = os.Setenv(e.Key, e.ValueAsString())
 		assert.NoError(t, err)

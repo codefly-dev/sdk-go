@@ -3,7 +3,7 @@ package codefly
 import (
 	"context"
 	"fmt"
-	"github.com/codefly-dev/core/configurations"
+	"github.com/codefly-dev/core/resources"
 	"github.com/codefly-dev/core/wool"
 	"os"
 	"runtime/debug"
@@ -55,7 +55,7 @@ func Init(ctx context.Context) (*wool.Provider, error) {
 
 	if runningService == nil {
 		fmt.Println("No service configuration found.")
-		provider = wool.New(ctx, configurations.CLI.AsResource()).WithConsole(GetLogLevel())
+		provider = wool.New(ctx, resources.CLI.AsResource()).WithConsole(GetLogLevel())
 	} else {
 		// Now update the provider
 		provider = wool.New(ctx, runningService.Identity().AsResource()).WithConsole(GetLogLevel())
@@ -67,18 +67,18 @@ func Init(ctx context.Context) (*wool.Provider, error) {
 }
 
 var root string
-var runningService *configurations.Service
+var runningService *resources.Service
 var runningCtx context.Context
 
 func LoadService(ctx context.Context) error {
 	w := wool.Get(ctx).In("codefly.LoadService")
 	w.Debug("root", wool.Field("root", root))
-	dir, errFind := configurations.FindUp[configurations.Service](ctx)
+	dir, errFind := resources.FindUp[resources.Service](ctx)
 	if errFind != nil {
 		return errFind
 	}
 	if dir != nil {
-		svc, err := configurations.LoadServiceFromDir(ctx, *dir)
+		svc, err := resources.LoadServiceFromDir(ctx, *dir)
 		if err != nil {
 			return err
 		}
@@ -96,7 +96,7 @@ func Version() string {
 	return runningService.Version
 }
 
-func Service() *configurations.Service {
+func Service() *resources.Service {
 	return runningService
 }
 

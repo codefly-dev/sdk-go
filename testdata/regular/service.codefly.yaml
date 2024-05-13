@@ -1,8 +1,6 @@
 kind: service
 name: svc
-application: app
-project: test
-namespace: default
+module: mod
 endpoints:
   - name: write
     description: Expose write
