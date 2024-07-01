@@ -3,7 +3,7 @@ module github.com/codefly-dev/sdk-go
 go 1.22.0
 
 require (
-	github.com/codefly-dev/core v0.1.113
+	github.com/codefly-dev/core v0.1.114
 	github.com/stretchr/testify v1.9.0
 )
 
