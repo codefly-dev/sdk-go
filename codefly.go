@@ -19,9 +19,9 @@ func CatchPanic(ctx context.Context) {
 }
 
 func GetLogLevel() wool.Loglevel {
-	if os.Getenv("CODEFLY_SDK__LOGLEVEL") == "debug" {
+	if os.Getenv("CODEFLY__SDK__LOGLEVEL") == "debug" {
 		return wool.DEBUG
-	} else if os.Getenv("CODEFLY_SDK__LOGLEVEL") == "trace" {
+	} else if os.Getenv("CODEFLY__SDK__LOGLEVEL") == "trace" {
 		return wool.TRACE
 	}
 	return wool.INFO
@@ -124,4 +124,8 @@ type EndpointOverride struct {
 
 type Configuration struct {
 	Endpoints []EndpointOverride
+}
+
+func WithFixture(fixture string) bool {
+	return os.Getenv("CODEFLY__FIXTURE") == fixture
 }
