@@ -93,7 +93,7 @@ func TestEnvironmentVariables(t *testing.T) {
 	outputConf := &basev0.Configuration{
 		Origin:         "mod/store",
 		RuntimeContext: resources.NewRuntimeContextNative(),
-		Configurations: []*basev0.ConfigurationInformation{
+		Infos: []*basev0.ConfigurationInformation{
 			{Name: "postgres",
 				ConfigurationValues: []*basev0.ConfigurationValue{
 					{Key: "connection", Value: "secret", Secret: true},
