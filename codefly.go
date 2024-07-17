@@ -48,17 +48,23 @@ func Init(ctx context.Context) (*wool.Provider, error) {
 	// For logging before we get the runningService
 	var provider *wool.Provider
 
-	err = LoadService(ctx)
+	mod, svc, err := resources.LoadModuleAndServiceFromCurrentPath(ctx)
 	if err != nil {
 		return nil, err
 	}
 
+	runningService = svc
+	runningModule = mod
 	if runningService == nil {
 		fmt.Println("No service configuration found.")
 		provider = wool.New(ctx, resources.CLI.AsResource()).WithConsole(GetLogLevel())
 	} else {
 		// Now update the provider
-		provider = wool.New(ctx, runningService.Identity().AsResource()).WithConsole(GetLogLevel())
+		id, err := runningService.Identity()
+		if err != nil {
+			return nil, err
+		}
+		provider = wool.New(ctx, id.AsResource()).WithConsole(GetLogLevel())
 	}
 
 	ctx = provider.Inject(ctx)
@@ -68,26 +74,8 @@ func Init(ctx context.Context) (*wool.Provider, error) {
 
 var root string
 var runningService *resources.Service
+var runningModule *resources.Module
 var runningCtx context.Context
-
-func LoadService(ctx context.Context) error {
-	w := wool.Get(ctx).In("codefly.LoadService")
-	w.Debug("root", wool.Field("root", root))
-	dir, errFind := resources.FindUp[resources.Service](ctx)
-	if errFind != nil {
-		return errFind
-	}
-	if dir != nil {
-		svc, err := resources.LoadServiceFromDir(ctx, *dir)
-		if err != nil {
-			return err
-		}
-		w.Debug("loaded service", wool.Field("service", svc.Unique()))
-		runningService = svc
-		return nil
-	}
-	return w.NewError("no service found")
-}
 
 func Version() string {
 	if runningService == nil {

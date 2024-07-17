@@ -18,7 +18,7 @@ type Query struct {
 func For(ctx context.Context) *Query {
 	q := &Query{ctx: ctx}
 	if runningService != nil {
-		q.module = runningService.Module
+		q.module = runningModule.Name
 		q.service = runningService.Name
 	}
 	return q

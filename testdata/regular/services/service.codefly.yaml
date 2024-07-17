@@ -1,6 +1,5 @@
 kind: service
 name: svc
-module: mod
 endpoints:
   - name: write
     description: Expose write

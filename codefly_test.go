@@ -24,7 +24,7 @@ func TestServiceLoad(t *testing.T) {
 	cur, err := os.Getwd()
 	wool.SetGlobalLogLevel(wool.TRACE)
 	assert.NoError(t, err)
-	err = os.Chdir(path.Join(cur, "testdata/regular/src"))
+	err = os.Chdir(path.Join(cur, "testdata/regular/services/src"))
 	assert.NoError(t, err)
 	defer func() {
 		err = os.Chdir(cur)
@@ -38,7 +38,7 @@ func TestServiceLoad(t *testing.T) {
 func TestServiceLoadUp(t *testing.T) {
 	cur, err := os.Getwd()
 	assert.NoError(t, err)
-	err = os.Chdir(path.Join(cur, "testdata/regular/src"))
+	err = os.Chdir(path.Join(cur, "testdata/regular/services/src"))
 	assert.NoError(t, err)
 	defer func() {
 		err = os.Chdir(cur)
@@ -55,7 +55,7 @@ func TestEnvironmentVariables(t *testing.T) {
 
 	cur, err := os.Getwd()
 	assert.NoError(t, err)
-	err = os.Chdir(path.Join(cur, "testdata/regular/src"))
+	err = os.Chdir(path.Join(cur, "testdata/regular/services/src"))
 	assert.NoError(t, err)
 	defer func() {
 		err = os.Chdir(cur)
