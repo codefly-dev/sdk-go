@@ -10,6 +10,9 @@ import (
 	"strings"
 )
 
+var service string
+var module string
+
 func CatchPanic(ctx context.Context) {
 	w := wool.Get(ctx).In("codefly.CatchPanic")
 	if r := recover(); r != nil {
@@ -42,30 +45,19 @@ func Init(ctx context.Context) (*wool.Provider, error) {
 	}
 
 	err = LoadEnvironmentVariables()
+
 	if err != nil {
 		return nil, err
 	}
 	// For logging before we get the runningService
 	var provider *wool.Provider
 
-	mod, svc, err := resources.LoadModuleAndServiceFromCurrentPath(ctx)
-	if err != nil {
-		return nil, err
-	}
+	service = os.Getenv("CODEFLY__SERVICE")
+	module = os.Getenv("CODEFLY__MODULE")
 
-	runningService = svc
-	runningModule = mod
-	if runningService == nil {
-		fmt.Println("No service configuration found.")
-		provider = wool.New(ctx, resources.CLI.AsResource()).WithConsole(GetLogLevel())
-	} else {
-		// Now update the provider
-		id, err := runningService.Identity()
-		if err != nil {
-			return nil, err
-		}
-		provider = wool.New(ctx, id.AsResource()).WithConsole(GetLogLevel())
-	}
+	// Now update the provider
+	id := resources.ServiceIdentity{Name: service, Module: module}
+	provider = wool.New(ctx, id.AsResource()).WithConsole(GetLogLevel())
 
 	ctx = provider.Inject(ctx)
 
@@ -73,20 +65,7 @@ func Init(ctx context.Context) (*wool.Provider, error) {
 }
 
 var root string
-var runningService *resources.Service
-var runningModule *resources.Module
 var runningCtx context.Context
-
-func Version() string {
-	if runningService == nil {
-		return "unknown"
-	}
-	return runningService.Version
-}
-
-func Service() *resources.Service {
-	return runningService
-}
 
 var envs []string
 var uniqueEnvs = make(map[string]bool)

@@ -9,9 +9,13 @@ import (
 	codefly "github.com/codefly-dev/sdk-go"
 	"github.com/stretchr/testify/assert"
 	"os"
-	"path"
 	"testing"
 )
+
+func init() {
+	_ = os.Setenv("CODEFLY__SERVICE", "svc")
+	_ = os.Setenv("CODEFLY__MODULE", "mod")
+}
 
 func Must[T any](obj T, err error) T {
 	if err != nil {
@@ -20,48 +24,11 @@ func Must[T any](obj T, err error) T {
 	return obj
 }
 
-func TestServiceLoad(t *testing.T) {
-	cur, err := os.Getwd()
-	wool.SetGlobalLogLevel(wool.TRACE)
-	assert.NoError(t, err)
-	err = os.Chdir(path.Join(cur, "testdata/regular/services/src"))
-	assert.NoError(t, err)
-	defer func() {
-		err = os.Chdir(cur)
-		assert.NoError(t, err)
-	}()
-	_, err = codefly.Init(context.Background())
-	assert.NoError(t, err)
-	assert.NotNil(t, codefly.Service())
-}
-
-func TestServiceLoadUp(t *testing.T) {
-	cur, err := os.Getwd()
-	assert.NoError(t, err)
-	err = os.Chdir(path.Join(cur, "testdata/regular/services/src"))
-	assert.NoError(t, err)
-	defer func() {
-		err = os.Chdir(cur)
-		assert.NoError(t, err)
-	}()
-	_, err = codefly.Init(context.Background())
-	assert.NoError(t, err)
-	assert.NotNil(t, codefly.Service())
-}
-
 func TestEnvironmentVariables(t *testing.T) {
 	ctx := context.Background()
 	wool.SetGlobalLogLevel(wool.TRACE)
 
-	cur, err := os.Getwd()
-	assert.NoError(t, err)
-	err = os.Chdir(path.Join(cur, "testdata/regular/services/src"))
-	assert.NoError(t, err)
-	defer func() {
-		err = os.Chdir(cur)
-		assert.NoError(t, err)
-	}()
-	_, err = codefly.Init(context.Background())
+	_, err := codefly.Init(context.Background())
 	assert.NoError(t, err)
 
 	err = os.Setenv("CODEFLY_SDK__LOGLEVEL", "trace")
