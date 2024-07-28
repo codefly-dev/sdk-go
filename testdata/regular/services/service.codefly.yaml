@@ -1,9 +1,0 @@
-kind: service
-name: svc
-endpoints:
-  - name: write
-    description: Expose write
-    api: tcp
-  - name: read
-    description: Expose read
-    api: tcp
