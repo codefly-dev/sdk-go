@@ -84,6 +84,10 @@ func LoadEnvironmentVariables() error {
 	return nil
 }
 
+func ServiceVersion() string {
+	return os.Getenv("CODEFLY__SERVICE_VERSION")
+}
+
 type EndpointOverride struct {
 	Name     string
 	Override string
