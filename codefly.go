@@ -2,7 +2,6 @@ package codefly
 
 import (
 	"context"
-	"fmt"
 	"github.com/codefly-dev/core/resources"
 	"github.com/codefly-dev/core/wool"
 	"os"
@@ -28,13 +27,6 @@ func GetLogLevel() wool.Loglevel {
 		return wool.TRACE
 	}
 	return wool.INFO
-}
-
-func init() {
-	_, err := Init(context.Background())
-	if err != nil {
-		fmt.Println("Cannot initialize codefly", err)
-	}
 }
 
 func Init(ctx context.Context) (*wool.Provider, error) {
