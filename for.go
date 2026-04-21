@@ -37,6 +37,14 @@ func (q *Query) API(name string) *Query {
 	return q
 }
 
+// Endpoint sets the endpoint name independently from the API type.
+// Use when the endpoint name differs from the API protocol.
+// Example: codefly.For(ctx).Service("neo4j").Endpoint("bolt").API("tcp")
+func (q *Query) Endpoint(name string) *Query {
+	q.endpointName = name
+	return q
+}
+
 func (q *Query) Normalize() {
 	if q.endpointName == "" && q.endpointApi != "" {
 		q.endpointName = q.endpointApi
