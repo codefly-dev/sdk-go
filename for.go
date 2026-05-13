@@ -2,8 +2,12 @@ package codefly
 
 import (
 	"context"
+
+	"github.com/codefly-dev/core/configurations"
 	"github.com/codefly-dev/core/resources"
 	"github.com/codefly-dev/core/wool"
+	"os"
+	"path/filepath"
 )
 
 type Query struct {
@@ -80,12 +84,80 @@ func (q *Query) Configuration(key string, name string) (string, error) {
 	q.Normalize()
 	unique := resources.ServiceUnique(q.module, q.service)
 	envKey := resources.ServiceConfigurationKeyFromUnique(unique, key, name)
-	return resources.FindValueInEnvironmentVariables(q.ctx, envKey, envs)
+	if value, err := resources.FindValueInEnvironmentVariables(q.ctx, envKey, envs); err == nil {
+		return value, nil
+	}
+	return q.localConfigurationValue(key, name, false)
 }
 
 func (q *Query) Secret(key string, name string) (string, error) {
 	q.Normalize()
 	unique := resources.ServiceUnique(q.module, q.service)
 	envKey := resources.ServiceSecretConfigurationKeyFromUnique(unique, key, name)
-	return resources.FindValueInEnvironmentVariables(q.ctx, envKey, envs)
+	if value, err := resources.FindValueInEnvironmentVariables(q.ctx, envKey, envs); err == nil {
+		return value, nil
+	}
+	return q.localConfigurationValue(key, name, true)
+}
+
+func (q *Query) localConfigurationValue(infoName string, key string, secret bool) (string, error) {
+	w := wool.Get(q.ctx).In("LocalConfigurationValue")
+	if q.service == "" {
+		return "", w.NewError("service is not set")
+	}
+	workspace, err := resources.FindWorkspaceUp(q.ctx)
+	if err != nil {
+		return "", err
+	}
+	if workspace == nil {
+		return "", w.NewError("workspace not found")
+	}
+
+	var svc *resources.Service
+	if q.module != "" {
+		mod, err := workspace.LoadModuleFromName(q.ctx, q.module)
+		if err != nil {
+			return "", err
+		}
+		svc, err = mod.LoadServiceFromName(q.ctx, q.service)
+		if err != nil {
+			return "", err
+		}
+	} else {
+		var err error
+		svc, _, err = workspace.FindUniqueModuleServiceByName(q.ctx, q.service)
+		if err != nil {
+			return "", err
+		}
+	}
+
+	envName := localConfigurationEnvironmentName()
+	dir := filepath.Join(svc.Dir(), "configurations", envName)
+	infos, err := configurations.LoadConfigurationInformationsFromFiles(q.ctx, dir)
+	if err != nil {
+		return "", err
+	}
+	for _, info := range infos {
+		if !resources.Match(info.Name, infoName) {
+			continue
+		}
+		for _, value := range info.ConfigurationValues {
+			if resources.Match(value.Key, key) && value.Secret == secret {
+				return value.Value, nil
+			}
+		}
+	}
+	kind := "configuration"
+	if secret {
+		kind = "secret"
+	}
+	return "", w.NewError("no %s value for %s/%s in service %s (env=%s)",
+		kind, infoName, key, q.service, envName)
+}
+
+func localConfigurationEnvironmentName() string {
+	if env := os.Getenv(resources.EnvironmentPrefix); env != "" {
+		return env
+	}
+	return resources.LocalEnvironment().Name
 }

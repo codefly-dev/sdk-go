@@ -2,14 +2,16 @@ package codefly_test
 
 import (
 	"context"
+	"os"
+	"path/filepath"
+	"testing"
+
 	basev0 "github.com/codefly-dev/core/generated/go/codefly/base/v0"
 	"github.com/codefly-dev/core/resources"
 	"github.com/codefly-dev/core/standards"
 	"github.com/codefly-dev/core/wool"
 	codefly "github.com/codefly-dev/sdk-go"
 	"github.com/stretchr/testify/assert"
-	"os"
-	"testing"
 )
 
 func init() {
@@ -90,4 +92,57 @@ func TestEnvironmentVariables(t *testing.T) {
 	value, err = codefly.For(ctx).Service("store").Secret("postgres", "connection")
 	assert.NoError(t, err)
 	assert.Equal(t, "secret", value)
+}
+
+func TestConfigurationFallsBackToLocalFiles(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+
+	writeFile(t, filepath.Join(root, "workspace.codefly.yaml"), `name: sdk-test
+layout: modules
+modules:
+  - name: mod
+`)
+	writeFile(t, filepath.Join(root, "modules", "mod", "module.codefly.yaml"), `kind: module
+name: mod
+services:
+  - name: file-svc
+`)
+	serviceDir := filepath.Join(root, "modules", "mod", "services", "file-svc")
+	writeFile(t, filepath.Join(serviceDir, "service.codefly.yaml"), `kind: service
+name: file-svc
+version: 0.0.0
+agent:
+  kind: runtime::service
+  name: go-grpc
+  version: 0.0.1
+  publisher: codefly.ai
+`)
+	writeFile(t, filepath.Join(serviceDir, "configurations", "local", "api.secret.env"), "TOKEN=file-secret\n")
+	writeFile(t, filepath.Join(serviceDir, "configurations", "local", "api.env"), "URL=file-plain\n")
+
+	codeDir := filepath.Join(serviceDir, "code")
+	requireNoError(t, os.MkdirAll(codeDir, 0o755))
+	t.Chdir(codeDir)
+
+	secret, err := codefly.For(ctx).Module("mod").Service("file-svc").Secret("api", "token")
+	assert.NoError(t, err)
+	assert.Equal(t, "file-secret", secret)
+
+	plain, err := codefly.For(ctx).Module("mod").Service("file-svc").Configuration("api", "url")
+	assert.NoError(t, err)
+	assert.Equal(t, "file-plain", plain)
+}
+
+func writeFile(t *testing.T, path string, content string) {
+	t.Helper()
+	requireNoError(t, os.MkdirAll(filepath.Dir(path), 0o755))
+	requireNoError(t, os.WriteFile(path, []byte(content), 0o644))
+}
+
+func requireNoError(t *testing.T, err error) {
+	t.Helper()
+	if err != nil {
+		t.Fatal(err)
+	}
 }
