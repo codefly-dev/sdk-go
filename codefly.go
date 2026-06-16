@@ -21,12 +21,14 @@ func CatchPanic(ctx context.Context) {
 }
 
 func GetLogLevel() wool.Loglevel {
-	if os.Getenv("CODEFLY__SDK__LOGLEVEL") == "debug" {
+	switch strings.ToLower(os.Getenv("CODEFLY__SDK__LOGLEVEL")) {
+	case "debug":
 		return wool.DEBUG
-	} else if os.Getenv("CODEFLY__SDK__LOGLEVEL") == "trace" {
+	case "trace":
 		return wool.TRACE
+	default:
+		return wool.INFO
 	}
-	return wool.INFO
 }
 
 func Init(ctx context.Context) (*wool.Provider, error) {
@@ -51,7 +53,11 @@ func Init(ctx context.Context) (*wool.Provider, error) {
 	id := resources.ServiceIdentity{Name: service, Module: module}
 	provider = wool.New(ctx, id.AsResource()).WithConsole(GetLogLevel())
 
-	ctx = provider.Inject(ctx)
+	// Keep the provider-injected context so Context() can hand it back. The
+	// previous code injected into a local `ctx` and discarded it, so callers
+	// that kept their own context saw no provider and silently fell back to the
+	// default console logger (dropping the configured level + service identity).
+	runningCtx = provider.Inject(ctx)
 
 	return provider, nil
 }
@@ -59,34 +65,45 @@ func Init(ctx context.Context) (*wool.Provider, error) {
 var root string
 var runningCtx context.Context
 
-var envs []string
-var uniqueEnvs = make(map[string]bool)
+// Context returns the provider-injected context built by Init (so wool.Get sees
+// the SDK provider), or context.Background() before Init has run.
+func Context() context.Context {
+	if runningCtx == nil {
+		return context.Background()
+	}
+	return runningCtx
+}
+
+var (
+	envs      []string
+	envByName = map[string]string{}
+)
 
 func LoadEnvironmentVariables() error {
 	for _, env := range os.Environ() {
-		if !strings.HasPrefix(env, "CODEFLY") {
+		// Use the full "CODEFLY__" prefix: a bare "CODEFLY" also matched
+		// unrelated variables like CODEFLYFOO and widened the lookup surface.
+		if !strings.HasPrefix(env, "CODEFLY__") {
 			continue
 		}
-		if _, ok := uniqueEnvs[env]; ok {
+		name, value, found := strings.Cut(env, "=")
+		if !found {
 			continue
 		}
-		uniqueEnvs[env] = true
-		envs = append(envs, env)
+		// Dedupe by NAME (latest value wins). Keying on the whole "KEY=value"
+		// string meant a reload appended "KEY=new" after "KEY=old"; the
+		// first-match lookups then returned the stale value forever.
+		envByName[name] = value
+	}
+	envs = envs[:0]
+	for name, value := range envByName {
+		envs = append(envs, name+"="+value)
 	}
 	return nil
 }
 
 func ServiceVersion() string {
 	return os.Getenv("CODEFLY__SERVICE_VERSION")
-}
-
-type EndpointOverride struct {
-	Name     string
-	Override string
-}
-
-type Configuration struct {
-	Endpoints []EndpointOverride
 }
 
 func WithFixture(fixture string) bool {
