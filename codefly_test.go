@@ -134,6 +134,61 @@ agent:
 	assert.Equal(t, "file-plain", plain)
 }
 
+func TestWorkspaceConfigurationUsesSDKBoundary(t *testing.T) {
+	ctx := context.Background()
+	t.Setenv("CODEFLY__WORKSPACE_CONFIGURATION__SECURITY__PUBLIC_SETTING", "public")
+	t.Setenv("CODEFLY__WORKSPACE_SECRET_CONFIGURATION__SECURITY__SECRET_SETTING", "secret")
+	t.Setenv("CODEFLY__WORKSPACE_CONFIGURATION__INTERNAL-AUTH__TOKEN", "exact")
+	t.Setenv("CODEFLY__WORKSPACE_CONFIGURATION__INTERNAL_AUTH__TOKEN", "normalized")
+	t.Setenv("CODEFLY__WORKSPACE_SECRET_CONFIGURATION__INTERNAL_AUTH__FALLBACK", "normalized-secret")
+	t.Setenv("CODEFLY__ENVIRONMENT", "local")
+	t.Setenv("CODEFLY__FIXTURE", "dogfood")
+	t.Setenv("CODEFLY_SCOPED_AUTH_SECRET", "scoped")
+	requireNoError(t, codefly.LoadEnvironmentVariables())
+
+	value, err := codefly.For(ctx).WorkspaceConfiguration("security", "public-setting")
+	assert.NoError(t, err)
+	assert.Equal(t, "public", value)
+
+	value, err = codefly.For(ctx).WorkspaceSecret("security", "secret-setting")
+	assert.NoError(t, err)
+	assert.Equal(t, "secret", value)
+
+	value, err = codefly.For(ctx).WorkspaceValue("security", "secret-setting")
+	assert.NoError(t, err)
+	assert.Equal(t, "secret", value)
+
+	value, err = codefly.For(ctx).WorkspaceConfiguration("internal-auth", "token")
+	assert.NoError(t, err)
+	assert.Equal(t, "exact", value)
+
+	value, err = codefly.For(ctx).WorkspaceSecret("internal-auth", "fallback")
+	assert.NoError(t, err)
+	assert.Equal(t, "normalized-secret", value)
+
+	_, err = codefly.For(ctx).WorkspaceValue("security", "missing")
+	assert.Error(t, err)
+	assert.True(t, codefly.IsLocal())
+	assert.Equal(t, "dogfood", codefly.Fixture())
+	assert.True(t, codefly.WithFixture("dogfood"))
+	assert.Equal(t, "scoped", codefly.ScopedAuthSecret())
+}
+
+func TestEnvironmentReloadDropsRemovedValues(t *testing.T) {
+	const key = "CODEFLY__WORKSPACE_CONFIGURATION__RELOAD__VALUE"
+	t.Setenv(key, "present")
+	requireNoError(t, codefly.LoadEnvironmentVariables())
+
+	value, err := codefly.For(context.Background()).WorkspaceConfiguration("reload", "value")
+	assert.NoError(t, err)
+	assert.Equal(t, "present", value)
+
+	requireNoError(t, os.Unsetenv(key))
+	requireNoError(t, codefly.LoadEnvironmentVariables())
+	_, err = codefly.For(context.Background()).WorkspaceConfiguration("reload", "value")
+	assert.Error(t, err)
+}
+
 func writeFile(t *testing.T, path string, content string) {
 	t.Helper()
 	requireNoError(t, os.MkdirAll(filepath.Dir(path), 0o755))

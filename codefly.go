@@ -2,11 +2,14 @@ package codefly
 
 import (
 	"context"
-	"github.com/codefly-dev/core/resources"
-	"github.com/codefly-dev/core/wool"
 	"os"
 	"runtime/debug"
+	"sort"
 	"strings"
+	"sync"
+
+	"github.com/codefly-dev/core/resources"
+	"github.com/codefly-dev/core/wool"
 )
 
 var service string
@@ -46,8 +49,8 @@ func Init(ctx context.Context) (*wool.Provider, error) {
 	// For logging before we get the runningService
 	var provider *wool.Provider
 
-	service = os.Getenv("CODEFLY__SERVICE")
-	module = os.Getenv("CODEFLY__MODULE")
+	service = os.Getenv(resources.ServicePrefix)
+	module = os.Getenv(resources.ModulePrefix)
 
 	// Now update the provider
 	id := resources.ServiceIdentity{Name: service, Module: module}
@@ -75,11 +78,14 @@ func Context() context.Context {
 }
 
 var (
-	envs      []string
-	envByName = map[string]string{}
+	environmentVariablesMu sync.RWMutex
+	environmentVariables   []string
 )
 
 func LoadEnvironmentVariables() error {
+	// Build a new immutable snapshot so a runtime reload cannot retain a carrier
+	// removed from the process environment or race with concurrent SDK queries.
+	values := make(map[string]string)
 	for _, env := range os.Environ() {
 		// Use the full "CODEFLY__" prefix: a bare "CODEFLY" also matched
 		// unrelated variables like CODEFLYFOO and widened the lookup surface.
@@ -93,19 +99,56 @@ func LoadEnvironmentVariables() error {
 		// Dedupe by NAME (latest value wins). Keying on the whole "KEY=value"
 		// string meant a reload appended "KEY=new" after "KEY=old"; the
 		// first-match lookups then returned the stale value forever.
-		envByName[name] = value
+		values[name] = value
 	}
-	envs = envs[:0]
-	for name, value := range envByName {
-		envs = append(envs, name+"="+value)
+	snapshot := make([]string, 0, len(values))
+	for name, value := range values {
+		snapshot = append(snapshot, name+"="+value)
 	}
+	sort.Strings(snapshot)
+
+	environmentVariablesMu.Lock()
+	environmentVariables = snapshot
+	environmentVariablesMu.Unlock()
 	return nil
 }
 
+func codeflyEnvironmentVariables() []string {
+	environmentVariablesMu.RLock()
+	defer environmentVariablesMu.RUnlock()
+	return append([]string(nil), environmentVariables...)
+}
+
 func ServiceVersion() string {
-	return os.Getenv("CODEFLY__SERVICE_VERSION")
+	return os.Getenv(resources.VersionPrefix)
+}
+
+// Fixture returns the fixture selected by the Codefly runtime. Product code
+// must not depend on the runtime's environment-variable representation.
+func Fixture() string {
+	return os.Getenv(resources.FixturePrefix)
 }
 
 func WithFixture(fixture string) bool {
-	return os.Getenv("CODEFLY__FIXTURE") == fixture
+	return resources.Match(Fixture(), fixture)
 }
+
+// Environment returns the Codefly environment selected for this process. The
+// representation is owned by the SDK; product code must not read its carrier.
+func Environment() string {
+	return os.Getenv(resources.EnvironmentPrefix)
+}
+
+// IsLocal reports whether the current Codefly environment is local.
+func IsLocal() bool {
+	return resources.Match(Environment(), resources.LocalEnvironment().Name)
+}
+
+// ScopedAuthSecret returns the host-issued plugin authentication secret. This
+// legacy carrier remains encapsulated here until scoped auth moves to a typed
+// capability; product code must not read it directly.
+func ScopedAuthSecret() string {
+	return os.Getenv(scopedAuthSecretEnvironmentKey)
+}
+
+const scopedAuthSecretEnvironmentKey = "CODEFLY_SCOPED_AUTH_SECRET"

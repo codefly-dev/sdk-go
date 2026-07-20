@@ -2,12 +2,14 @@ package codefly
 
 import (
 	"context"
+	"fmt"
+	"os"
+	"path/filepath"
+	"strings"
 
 	"github.com/codefly-dev/core/configurations"
 	"github.com/codefly-dev/core/resources"
 	"github.com/codefly-dev/core/wool"
-	"os"
-	"path/filepath"
 )
 
 type Query struct {
@@ -69,7 +71,7 @@ func (q *Query) NetworkInstance() *resources.NetworkInstance {
 		API:     q.endpointApi,
 		Name:    q.endpointName,
 	}
-	instance, err := resources.FindNetworkInstanceInEnvironmentVariables(q.ctx, info, envs)
+	instance, err := resources.FindNetworkInstanceInEnvironmentVariables(q.ctx, info, codeflyEnvironmentVariables())
 	if err != nil {
 		if q.withDefaultNetwork {
 			w.Warn("Cannot find network instance, returning default", wool.Field("info", info), wool.Field("error", err))
@@ -84,7 +86,7 @@ func (q *Query) Configuration(key string, name string) (string, error) {
 	q.Normalize()
 	unique := resources.ServiceUnique(q.module, q.service)
 	envKey := resources.ServiceConfigurationKeyFromUnique(unique, key, name)
-	if value, err := resources.FindValueInEnvironmentVariables(q.ctx, envKey, envs); err == nil {
+	if value, err := resources.FindValueInEnvironmentVariables(q.ctx, envKey, codeflyEnvironmentVariables()); err == nil {
 		return value, nil
 	}
 	return q.localConfigurationValue(key, name, false)
@@ -94,10 +96,56 @@ func (q *Query) Secret(key string, name string) (string, error) {
 	q.Normalize()
 	unique := resources.ServiceUnique(q.module, q.service)
 	envKey := resources.ServiceSecretConfigurationKeyFromUnique(unique, key, name)
-	if value, err := resources.FindValueInEnvironmentVariables(q.ctx, envKey, envs); err == nil {
+	if value, err := resources.FindValueInEnvironmentVariables(q.ctx, envKey, codeflyEnvironmentVariables()); err == nil {
 		return value, nil
 	}
 	return q.localConfigurationValue(key, name, true)
+}
+
+// WorkspaceConfiguration returns one non-secret workspace configuration value.
+// Product services must use this API instead of depending on Codefly's environment
+// variable encoding, which is an SDK/runtime implementation detail.
+func (q *Query) WorkspaceConfiguration(name string, key string) (string, error) {
+	return q.workspaceConfigurationValue(resources.WorkspaceConfigurationPrefix, name, key)
+}
+
+// WorkspaceSecret returns one secret workspace configuration value without
+// exposing Codefly's environment variable encoding to the caller.
+func (q *Query) WorkspaceSecret(name string, key string) (string, error) {
+	return q.workspaceConfigurationValue(resources.WorkspaceSecretConfigurationPrefix, name, key)
+}
+
+// WorkspaceValue resolves a workspace value from the public namespace first,
+// then the secret namespace. It is intended for settings whose sensitivity is
+// deployment-defined while preserving a single SDK-only lookup boundary.
+func (q *Query) WorkspaceValue(name string, key string) (string, error) {
+	if value, err := q.WorkspaceConfiguration(name, key); err == nil && value != "" {
+		return value, nil
+	}
+	if value, err := q.WorkspaceSecret(name, key); err == nil && value != "" {
+		return value, nil
+	}
+	return "", wool.Get(q.ctx).In("WorkspaceValue").NewError("no workspace configuration value for %s/%s", name, key)
+}
+
+func (q *Query) workspaceConfigurationValue(prefix string, name string, key string) (string, error) {
+	// Runtime configuration names historically preserved '-' while newer core
+	// emitters normalize it to '_'. Exact wins; normalized is compatibility.
+	exact := strings.ToUpper(name)
+	normalized := resources.NameToKey(name)
+	for _, candidate := range []string{exact, normalized} {
+		envKey := fmt.Sprintf("%s__%s__%s", prefix, candidate, resources.NameToKey(key))
+		if value, ok := os.LookupEnv(envKey); ok && value != "" {
+			return value, nil
+		}
+		if value, err := resources.FindValueInEnvironmentVariables(q.ctx, envKey, codeflyEnvironmentVariables()); err == nil && value != "" {
+			return value, nil
+		}
+		if exact == normalized {
+			break
+		}
+	}
+	return "", wool.Get(q.ctx).In("WorkspaceConfiguration").NewError("no workspace configuration value for %s/%s", name, key)
 }
 
 func (q *Query) localConfigurationValue(infoName string, key string, secret bool) (string, error) {
