@@ -86,6 +86,9 @@ func (q *Query) Configuration(key string, name string) (string, error) {
 	q.Normalize()
 	unique := resources.ServiceUnique(q.module, q.service)
 	envKey := resources.ServiceConfigurationKeyFromUnique(unique, key, name)
+	if value, ok := os.LookupEnv(envKey); ok && value != "" {
+		return value, nil
+	}
 	if value, err := resources.FindValueInEnvironmentVariables(q.ctx, envKey, codeflyEnvironmentVariables()); err == nil {
 		return value, nil
 	}
@@ -96,6 +99,9 @@ func (q *Query) Secret(key string, name string) (string, error) {
 	q.Normalize()
 	unique := resources.ServiceUnique(q.module, q.service)
 	envKey := resources.ServiceSecretConfigurationKeyFromUnique(unique, key, name)
+	if value, ok := os.LookupEnv(envKey); ok && value != "" {
+		return value, nil
+	}
 	if value, err := resources.FindValueInEnvironmentVariables(q.ctx, envKey, codeflyEnvironmentVariables()); err == nil {
 		return value, nil
 	}

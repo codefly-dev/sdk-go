@@ -94,6 +94,49 @@ func TestEnvironmentVariables(t *testing.T) {
 	assert.Equal(t, "secret", value)
 }
 
+func TestServiceSecretPreservesHyphenatedCapabilityNames(t *testing.T) {
+	ctx := context.Background()
+	t.Setenv("CODEFLY__MODULE", "saas")
+	t.Setenv("CODEFLY__SERVICE", "accounts")
+	t.Setenv(
+		"CODEFLY__SERVICE_SECRET_CONFIGURATION__SAAS__STORE__POSTGRES__READ-ONLY-CONNECTION",
+		"postgresql://reader",
+	)
+	requireNoError(t, codefly.LoadEnvironmentVariables())
+
+	value, err := codefly.For(ctx).
+		Module("saas").
+		Service("store").
+		Secret("postgres", "read-only-connection")
+	assert.NoError(t, err)
+	assert.Equal(t, "postgresql://reader", value)
+}
+
+func TestServiceConfigurationReadsRuntimeValuesAddedAfterSnapshot(t *testing.T) {
+	ctx := context.Background()
+	requireNoError(t, codefly.LoadEnvironmentVariables())
+	secretKey := resources.ServiceSecretConfigurationKeyFromUnique(
+		"saas/store",
+		"postgres",
+		"read-write-connection",
+	)
+	configurationKey := resources.ServiceConfigurationKeyFromUnique(
+		"saas/store",
+		"postgres",
+		"pool-size",
+	)
+	t.Setenv(secretKey, "postgresql://writer")
+	t.Setenv(configurationKey, "12")
+
+	query := codefly.For(ctx).Module("saas").Service("store")
+	secret, err := query.Secret("postgres", "read-write-connection")
+	assert.NoError(t, err)
+	assert.Equal(t, "postgresql://writer", secret)
+	configuration, err := query.Configuration("postgres", "pool-size")
+	assert.NoError(t, err)
+	assert.Equal(t, "12", configuration)
+}
+
 func TestConfigurationFallsBackToLocalFiles(t *testing.T) {
 	ctx := context.Background()
 	root := t.TempDir()
