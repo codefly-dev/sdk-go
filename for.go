@@ -132,9 +132,9 @@ func (q *Query) workspaceConfigurationValue(prefix string, name string, key stri
 	// Runtime configuration names historically preserved '-' while newer core
 	// emitters normalize it to '_'. Exact wins; normalized is compatibility.
 	exact := strings.ToUpper(name)
-	normalized := resources.NameToKey(name)
+	normalized := normalizeWorkspaceEnvironmentKey(name)
 	for _, candidate := range []string{exact, normalized} {
-		envKey := fmt.Sprintf("%s__%s__%s", prefix, candidate, resources.NameToKey(key))
+		envKey := fmt.Sprintf("%s__%s__%s", prefix, candidate, normalizeWorkspaceEnvironmentKey(key))
 		if value, ok := os.LookupEnv(envKey); ok && value != "" {
 			return value, nil
 		}
@@ -146,6 +146,10 @@ func (q *Query) workspaceConfigurationValue(prefix string, name string, key stri
 		}
 	}
 	return "", wool.Get(q.ctx).In("WorkspaceConfiguration").NewError("no workspace configuration value for %s/%s", name, key)
+}
+
+func normalizeWorkspaceEnvironmentKey(value string) string {
+	return strings.ReplaceAll(strings.ToUpper(value), "-", "_")
 }
 
 func (q *Query) localConfigurationValue(infoName string, key string, secret bool) (string, error) {
