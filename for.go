@@ -23,8 +23,18 @@ type Query struct {
 
 func For(ctx context.Context) *Query {
 	q := &Query{ctx: ctx}
-	q.service = service
-	q.module = module
+	// The process environment is the runtime authority. Falling back to the
+	// values captured by Init preserves callers that construct a query after
+	// startup, while the direct read also makes early queries and runtime
+	// reinjection behave correctly.
+	q.service = os.Getenv(resources.ServicePrefix)
+	if q.service == "" {
+		q.service = service
+	}
+	q.module = os.Getenv(resources.ModulePrefix)
+	if q.module == "" {
+		q.module = module
+	}
 	return q
 }
 

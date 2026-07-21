@@ -98,10 +98,12 @@ func TestServiceSecretPreservesHyphenatedCapabilityNames(t *testing.T) {
 	ctx := context.Background()
 	t.Setenv("CODEFLY__MODULE", "saas")
 	t.Setenv("CODEFLY__SERVICE", "accounts")
-	t.Setenv(
-		"CODEFLY__SERVICE_SECRET_CONFIGURATION__SAAS__STORE__POSTGRES__READ-ONLY-CONNECTION",
-		"postgresql://reader",
+	secretKey := resources.ServiceSecretConfigurationKeyFromUnique(
+		"saas/store",
+		"postgres",
+		"read-only-connection",
 	)
+	t.Setenv(secretKey, "postgresql://reader")
 	requireNoError(t, codefly.LoadEnvironmentVariables())
 
 	value, err := codefly.For(ctx).
@@ -135,6 +137,24 @@ func TestServiceConfigurationReadsRuntimeValuesAddedAfterSnapshot(t *testing.T) 
 	configuration, err := query.Configuration("postgres", "pool-size")
 	assert.NoError(t, err)
 	assert.Equal(t, "12", configuration)
+}
+
+func TestQueryUsesTheLiveRuntimeIdentityWithoutReinitialization(t *testing.T) {
+	ctx := context.Background()
+	t.Setenv("CODEFLY__MODULE", "live-module")
+	t.Setenv("CODEFLY__SERVICE", "live-consumer")
+	secretKey := resources.ServiceSecretConfigurationKeyFromUnique(
+		"live-module/store",
+		"postgres",
+		"read-only-connection",
+	)
+	t.Setenv(secretKey, "postgresql://live-reader")
+
+	value, err := codefly.For(ctx).
+		Service("store").
+		Secret("postgres", "read-only-connection")
+	assert.NoError(t, err)
+	assert.Equal(t, "postgresql://live-reader", value)
 }
 
 func TestConfigurationFallsBackToLocalFiles(t *testing.T) {
