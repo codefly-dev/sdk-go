@@ -98,12 +98,10 @@ func TestServiceSecretPreservesHyphenatedCapabilityNames(t *testing.T) {
 	ctx := context.Background()
 	t.Setenv("CODEFLY__MODULE", "saas")
 	t.Setenv("CODEFLY__SERVICE", "accounts")
-	secretKey := resources.ServiceSecretConfigurationKeyFromUnique(
-		"saas/store",
-		"postgres",
-		"read-only-connection",
+	t.Setenv(
+		"CODEFLY__SERVICE_SECRET_CONFIGURATION__SAAS__STORE__POSTGRES__READ-ONLY-CONNECTION",
+		"postgresql://reader",
 	)
-	t.Setenv(secretKey, "postgresql://reader")
 	requireNoError(t, codefly.LoadEnvironmentVariables())
 
 	value, err := codefly.For(ctx).
@@ -112,6 +110,24 @@ func TestServiceSecretPreservesHyphenatedCapabilityNames(t *testing.T) {
 		Secret("postgres", "read-only-connection")
 	assert.NoError(t, err)
 	assert.Equal(t, "postgresql://reader", value)
+}
+
+func TestServiceSecretAcceptsNormalizedRuntimeCapabilityNames(t *testing.T) {
+	ctx := context.Background()
+	t.Setenv("CODEFLY__MODULE", "saas")
+	t.Setenv("CODEFLY__SERVICE", "accounts")
+	t.Setenv(
+		"CODEFLY__SERVICE_SECRET_CONFIGURATION__SAAS__STORE__POSTGRES__READ_ONLY_CONNECTION",
+		"postgresql://normalized-reader",
+	)
+	requireNoError(t, codefly.LoadEnvironmentVariables())
+
+	value, err := codefly.For(ctx).
+		Module("saas").
+		Service("store").
+		Secret("postgres", "read-only-connection")
+	assert.NoError(t, err)
+	assert.Equal(t, "postgresql://normalized-reader", value)
 }
 
 func TestServiceConfigurationReadsRuntimeValuesAddedAfterSnapshot(t *testing.T) {

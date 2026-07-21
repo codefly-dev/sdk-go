@@ -96,10 +96,10 @@ func (q *Query) Configuration(key string, name string) (string, error) {
 	q.Normalize()
 	unique := resources.ServiceUnique(q.module, q.service)
 	envKey := resources.ServiceConfigurationKeyFromUnique(unique, key, name)
-	if value, ok := os.LookupEnv(envKey); ok && value != "" {
-		return value, nil
-	}
-	if value, err := resources.FindValueInEnvironmentVariables(q.ctx, envKey, codeflyEnvironmentVariables()); err == nil {
+	legacyKey := fmt.Sprintf("%s__%s__%s",
+		resources.ServiceConfigurationEnvironmentKeyPrefixFromUnique(unique),
+		strings.ToUpper(key), strings.ToUpper(name))
+	if value, ok := runtimeServiceConfigurationValue(q.ctx, envKey, legacyKey, strings.ReplaceAll(legacyKey, "-", "_")); ok {
 		return value, nil
 	}
 	return q.localConfigurationValue(key, name, false)
@@ -109,13 +109,33 @@ func (q *Query) Secret(key string, name string) (string, error) {
 	q.Normalize()
 	unique := resources.ServiceUnique(q.module, q.service)
 	envKey := resources.ServiceSecretConfigurationKeyFromUnique(unique, key, name)
-	if value, ok := os.LookupEnv(envKey); ok && value != "" {
-		return value, nil
-	}
-	if value, err := resources.FindValueInEnvironmentVariables(q.ctx, envKey, codeflyEnvironmentVariables()); err == nil {
+	legacyKey := fmt.Sprintf("%s__%s__%s",
+		resources.ServiceSecretConfigurationEnvironmentKeyPrefixFromUnique(unique),
+		strings.ToUpper(key), strings.ToUpper(name))
+	if value, ok := runtimeServiceConfigurationValue(q.ctx, envKey, legacyKey, strings.ReplaceAll(legacyKey, "-", "_")); ok {
 		return value, nil
 	}
 	return q.localConfigurationValue(key, name, true)
+}
+
+func runtimeServiceConfigurationValue(ctx context.Context, candidates ...string) (string, bool) {
+	// Capability names historically preserved '-' while released runtime
+	// agents normalize it to '_'. Prefer the current canonical spelling, then
+	// accept the legacy carrier so SDK users remain independent of agent version.
+	seen := make(map[string]struct{}, len(candidates))
+	for _, candidate := range candidates {
+		if _, ok := seen[candidate]; ok {
+			continue
+		}
+		seen[candidate] = struct{}{}
+		if value, ok := os.LookupEnv(candidate); ok && value != "" {
+			return value, true
+		}
+		if value, err := resources.FindValueInEnvironmentVariables(ctx, candidate, codeflyEnvironmentVariables()); err == nil && value != "" {
+			return value, true
+		}
+	}
+	return "", false
 }
 
 // WorkspaceConfiguration returns one non-secret workspace configuration value.
