@@ -123,6 +123,48 @@ func TestWorkContextStartTaskVerifyAndCanonicalize(t *testing.T) {
 	require.Equal(t, "agent-claude-code", verified.ActorChain[0].PrincipalId)
 }
 
+func TestRequireWorkContextScopeUsesFinalActorEffectiveAuthority(t *testing.T) {
+	_, claims, err := workContextTestSigner(t, workContextTestTime).StartTask(workContextTestInput())
+	require.NoError(t, err)
+
+	require.NoError(t, RequireWorkContextScope(claims, WorkContextScopeRequirement{
+		ResourceKind: "repository",
+		Action:       "write",
+		ResourceID:   "repo-warden",
+	}))
+	require.NoError(t, RequireWorkContextScope(claims, WorkContextScopeRequirement{
+		ResourceKind: "evidence",
+		Action:       "append",
+		ResourceID:   "codefly.execution",
+	}), "empty resource IDs grant every resource of the kind")
+
+	for _, denied := range []WorkContextScopeRequirement{
+		{ResourceKind: "repository", Action: "write", ResourceID: "repo-codefly"},
+		{ResourceKind: "repository", Action: "admin", ResourceID: "repo-warden"},
+		{ResourceKind: "repository", Action: "write"},
+		{ResourceKind: "deployment", Action: "write", ResourceID: "prod"},
+	} {
+		err = RequireWorkContextScope(claims, denied)
+		require.ErrorIs(t, err, ErrWorkContextDenied)
+	}
+}
+
+func TestRequireWorkContextScopeDistinguishesInvalidClaimsFromDenial(t *testing.T) {
+	err := RequireWorkContextScope(nil, WorkContextScopeRequirement{
+		ResourceKind: "evidence", Action: "append", ResourceID: "codefly.execution",
+	})
+	require.ErrorIs(t, err, ErrWorkContextInvalid)
+	require.NotErrorIs(t, err, ErrWorkContextDenied)
+
+	_, claims, err := workContextTestSigner(t, workContextTestTime).StartTask(workContextTestInput())
+	require.NoError(t, err)
+	claims.ActorChain[0].GrantedScopes[0].Actions = []string{"write", "read"}
+	err = RequireWorkContextScope(claims, WorkContextScopeRequirement{
+		ResourceKind: "repository", Action: "read", ResourceID: "repo-warden",
+	})
+	require.ErrorIs(t, err, ErrWorkContextInvalid, "mutated non-canonical claims must fail closed")
+}
+
 func TestWorkContextWireGolden(t *testing.T) {
 	token, _, err := workContextTestSigner(t, workContextTestTime).StartTask(workContextTestInput())
 	require.NoError(t, err)

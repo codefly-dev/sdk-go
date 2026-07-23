@@ -46,6 +46,7 @@ var (
 	WorkContextClockSkew  = time.Minute
 
 	ErrWorkContextInvalid = errors.New("invalid Codefly Work Context")
+	ErrWorkContextDenied  = errors.New("Codefly Work Context scope denied")
 )
 
 // WorkContextToken is an opaque signed capability. Its encoded representation
@@ -363,6 +364,82 @@ type WorkContextExpectations struct {
 	SessionID             string
 	ParentSessionID       *string
 	AuthorizationRevision *uint64
+}
+
+// WorkContextScopeRequirement identifies one exact capability a verified Work
+// Context must grant. An empty ResourceID asks whether the effective scope
+// grants every resource of ResourceKind; it never ignores explicit resource
+// restrictions.
+type WorkContextScopeRequirement struct {
+	ResourceKind string
+	Action       string
+	ResourceID   string
+}
+
+// RequireWorkContextScope evaluates the current actor's effective scope. The
+// authority scopes apply to a direct owner call; when actors are present, only
+// the final actor's monotonically attenuated granted scopes are effective.
+//
+// Call this only after signature, time, issuer, and audience verification.
+// The claims are structurally validated again so a caller cannot accidentally
+// authorize from a hand-constructed or mutated protobuf.
+func RequireWorkContextScope(
+	claims *basev0.WorkContextV1,
+	requirement WorkContextScopeRequirement,
+) error {
+	if err := validateWorkContext(claims); err != nil {
+		return err
+	}
+	if err := validateBounded(
+		"required resource_kind",
+		requirement.ResourceKind,
+		workContextMaxKindBytes,
+		true,
+	); err != nil {
+		return err
+	}
+	if err := validateBounded(
+		"required action",
+		requirement.Action,
+		workContextMaxKindBytes,
+		true,
+	); err != nil {
+		return err
+	}
+	if err := validateBounded(
+		"required resource_id",
+		requirement.ResourceID,
+		workContextMaxIDBytes,
+		false,
+	); err != nil {
+		return err
+	}
+
+	effective := claims.GetAuthorityScopes()
+	if actors := claims.GetActorChain(); len(actors) > 0 {
+		effective = actors[len(actors)-1].GetGrantedScopes()
+	}
+	for _, scope := range effective {
+		if scope.GetResourceKind() != requirement.ResourceKind ||
+			!sortedStringsContain(scope.GetActions(), requirement.Action) {
+			continue
+		}
+		resourceIDs := scope.GetResourceIds()
+		switch {
+		case len(resourceIDs) == 0:
+			return nil
+		case requirement.ResourceID != "" &&
+			sortedStringsContain(resourceIDs, requirement.ResourceID):
+			return nil
+		}
+	}
+	return fmt.Errorf(
+		"%w: %s:%s:%s",
+		ErrWorkContextDenied,
+		requirement.ResourceKind,
+		requirement.Action,
+		requirement.ResourceID,
+	)
 }
 
 func (v *WorkContextVerifier) Verify(token WorkContextToken, expected WorkContextExpectations) (*basev0.WorkContextV1, error) {
@@ -780,6 +857,11 @@ func stringSubset(child, parent []string) bool {
 		}
 	}
 	return true
+}
+
+func sortedStringsContain(values []string, wanted string) bool {
+	index := sort.SearchStrings(values, wanted)
+	return index < len(values) && values[index] == wanted
 }
 
 func canonicalizeWorkContext(context *basev0.WorkContextV1) {
