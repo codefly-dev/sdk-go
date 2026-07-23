@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	basev0 "github.com/codefly-dev/core/generated/go/codefly/base/v0"
+	"github.com/codefly-dev/core/network"
 	"github.com/codefly-dev/core/resources"
 	"github.com/codefly-dev/core/standards"
 	"github.com/codefly-dev/core/wool"
@@ -211,6 +212,64 @@ agent:
 	plain, err := codefly.For(ctx).Module("mod").Service("file-svc").Configuration("api", "url")
 	assert.NoError(t, err)
 	assert.Equal(t, "file-plain", plain)
+}
+
+func TestEndpointResolutionFallsBackToDeterministicLocalWorkspace(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	t.Setenv("CODEFLY__ENVIRONMENT", "")
+	requireNoError(t, codefly.LoadEnvironmentVariables())
+
+	writeFile(t, filepath.Join(root, "workspace.codefly.yaml"), `name: sdk-endpoint-test
+layout: modules
+modules:
+  - name: platform
+`)
+	writeFile(t, filepath.Join(root, "modules", "platform", "module.codefly.yaml"), `kind: module
+name: platform
+services:
+  - name: warden
+`)
+	serviceDir := filepath.Join(root, "modules", "platform", "services", "warden")
+	writeFile(t, filepath.Join(serviceDir, "service.codefly.yaml"), `kind: service
+name: warden
+version: 0.0.0
+agent:
+  kind: codefly:service
+  name: rust
+  version: 0.0.20
+  publisher: codefly.dev
+endpoints:
+  - name: rest
+`)
+	t.Chdir(root)
+
+	instance, err := codefly.For(ctx).
+		Module("platform").
+		Service("warden").
+		Endpoint("rest").
+		ResolveNetworkInstance()
+	assert.NoError(t, err)
+	expected := network.NativeFor(
+		ctx,
+		"sdk-endpoint-test",
+		"platform",
+		"warden",
+		"",
+		&basev0.Endpoint{Name: "rest", Api: "rest"},
+	)
+	assert.Equal(t, expected.Address, instance.Address)
+	assert.Equal(t, expected.Host, instance.Host)
+	assert.Equal(t, uint16(expected.Port), instance.Port)
+
+	scoped, err := codefly.For(ctx).
+		Module("platform").
+		Service("warden").
+		Endpoint("rest").
+		NamingScope("agent-test").
+		ResolveNetworkInstance()
+	assert.NoError(t, err)
+	assert.NotEqual(t, instance.Port, scoped.Port)
 }
 
 func TestWorkspaceConfigurationUsesSDKBoundary(t *testing.T) {
