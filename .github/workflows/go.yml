@@ -6,36 +6,30 @@ on:
   pull_request:
     branches: [ main ]
 
+permissions:
+  contents: write
+
 jobs:
   build:
     name: Build
     runs-on: ubuntu-latest
     steps:
-      - name: set up
-        uses: actions/setup-go@v3
-        with:
-          go-version: 1.21
-
       - name: checkout
-        uses: actions/checkout@v3
+        uses: actions/checkout@v7
 
-      - name: Cache Go Modules
-        uses: actions/cache@v2
-        continue-on-error: true
+      - name: set up
+        uses: actions/setup-go@v7
         with:
-          path: ~/go/pkg/mod
-          key: ${{ runner.os }}-go-${{ hashFiles('**/go.sum') }}-20210329
-          restore-keys: |
-            ${{ runner.os }}-go-20210329
+          go-version-file: go.mod
+          cache: true
 
       - name: Install Dependencies
         run: go mod tidy && go mod download
 
       - name: golangci-lint
-        uses: golangci/golangci-lint-action@v3
+        uses: golangci/golangci-lint-action@v9
         with:
-          version: v1.55
-
+          version: v2.12.2
 
       - name: generate test generate coverage
         run: go test ./... -coverprofile=cover.out -covermode=atomic -coverpkg=./...
