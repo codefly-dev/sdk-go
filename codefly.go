@@ -2,6 +2,7 @@ package codefly
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"runtime/debug"
 	"sort"
@@ -137,6 +138,27 @@ func WithFixture(fixture string) bool {
 // representation is owned by the SDK; product code must not read its carrier.
 func Environment() string {
 	return os.Getenv(resources.EnvironmentPrefix)
+}
+
+// Workspace returns the Codefly workspace identity for the current process.
+// A runtime-injected identity is authoritative. Local tools that are not
+// launched as a service fall back to the enclosing workspace resource, keeping
+// product code independent from Codefly's environment-variable carriers.
+func Workspace(ctx context.Context) (string, error) {
+	if name := strings.TrimSpace(os.Getenv(resources.WorkspacePrefix)); name != "" {
+		return name, nil
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	workspace, err := resources.FindWorkspaceUp(ctx)
+	if err != nil {
+		return "", fmt.Errorf("resolve Codefly workspace: %w", err)
+	}
+	if workspace == nil || strings.TrimSpace(workspace.Name) == "" {
+		return "", fmt.Errorf("resolve Codefly workspace: no enclosing workspace")
+	}
+	return workspace.Name, nil
 }
 
 // IsLocal reports whether the current Codefly environment is local.

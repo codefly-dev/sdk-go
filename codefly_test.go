@@ -312,6 +312,27 @@ func TestWorkspaceConfigurationUsesSDKBoundary(t *testing.T) {
 	assert.Equal(t, "scoped", codefly.ScopedAuthSecret())
 }
 
+func TestWorkspacePrefersRuntimeIdentity(t *testing.T) {
+	t.Setenv(resources.WorkspacePrefix, "runtime-workspace")
+
+	name, err := codefly.Workspace(t.Context())
+
+	assert.NoError(t, err)
+	assert.Equal(t, "runtime-workspace", name)
+}
+
+func TestWorkspaceFallsBackToEnclosingResource(t *testing.T) {
+	root := t.TempDir()
+	writeFile(t, filepath.Join(root, "workspace.codefly.yaml"), "name: local-workspace\nlayout: flat\n")
+	t.Chdir(root)
+	t.Setenv(resources.WorkspacePrefix, "")
+
+	name, err := codefly.Workspace(t.Context())
+
+	assert.NoError(t, err)
+	assert.Equal(t, "local-workspace", name)
+}
+
 func TestEnvironmentReloadDropsRemovedValues(t *testing.T) {
 	const key = "CODEFLY__WORKSPACE_CONFIGURATION__RELOAD__VALUE"
 	t.Setenv(key, "present")
