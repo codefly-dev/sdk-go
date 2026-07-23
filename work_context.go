@@ -371,9 +371,10 @@ type WorkContextExpectations struct {
 // grants every resource of ResourceKind; it never ignores explicit resource
 // restrictions.
 type WorkContextScopeRequirement struct {
-	ResourceKind string
-	Action       string
-	ResourceID   string
+	ResourceKind            string
+	Action                  string
+	ResourceID              string
+	RequireExplicitResource bool
 }
 
 // RequireWorkContextScope evaluates the current actor's effective scope. The
@@ -410,7 +411,7 @@ func RequireWorkContextScope(
 		"required resource_id",
 		requirement.ResourceID,
 		workContextMaxIDBytes,
-		false,
+		requirement.RequireExplicitResource,
 	); err != nil {
 		return err
 	}
@@ -426,7 +427,7 @@ func RequireWorkContextScope(
 		}
 		resourceIDs := scope.GetResourceIds()
 		switch {
-		case len(resourceIDs) == 0:
+		case len(resourceIDs) == 0 && !requirement.RequireExplicitResource:
 			return nil
 		case requirement.ResourceID != "" &&
 			sortedStringsContain(resourceIDs, requirement.ResourceID):

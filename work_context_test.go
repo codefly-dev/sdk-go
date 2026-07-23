@@ -128,15 +128,23 @@ func TestRequireWorkContextScopeUsesFinalActorEffectiveAuthority(t *testing.T) {
 	require.NoError(t, err)
 
 	require.NoError(t, RequireWorkContextScope(claims, WorkContextScopeRequirement{
-		ResourceKind: "repository",
-		Action:       "write",
-		ResourceID:   "repo-warden",
+		ResourceKind:            "repository",
+		Action:                  "write",
+		ResourceID:              "repo-warden",
+		RequireExplicitResource: true,
 	}))
 	require.NoError(t, RequireWorkContextScope(claims, WorkContextScopeRequirement{
 		ResourceKind: "evidence",
 		Action:       "append",
 		ResourceID:   "codefly.execution",
 	}), "empty resource IDs grant every resource of the kind")
+	err = RequireWorkContextScope(claims, WorkContextScopeRequirement{
+		ResourceKind:            "evidence",
+		Action:                  "append",
+		ResourceID:              "codefly.execution",
+		RequireExplicitResource: true,
+	})
+	require.ErrorIs(t, err, ErrWorkContextDenied, "explicit producer binding must reject wildcard authority")
 
 	for _, denied := range []WorkContextScopeRequirement{
 		{ResourceKind: "repository", Action: "write", ResourceID: "repo-codefly"},
