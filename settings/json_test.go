@@ -81,6 +81,76 @@ func TestJSONCodecTreatsNullAsAbsentRatherThanAThirdScalarState(t *testing.T) {
 	require.Equal(t, "example/default", defaulted)
 }
 
+func TestJSONCodecTreatsNullAtEveryNestedLevelAsAbsence(t *testing.T) {
+	codec := settings.MustJSONCodec(
+		func() *descriptorpb.FileDescriptorProto { return &descriptorpb.FileDescriptorProto{} },
+		1024,
+	)
+	tests := map[string]string{
+		"outer parent null": `{"options":null}`,
+		"inner parent null": `{"options":{"features":null}}`,
+		"leaf null":         `{"options":{"features":{"field_presence":null}}}`,
+	}
+	for name, encoded := range tests {
+		t.Run(name, func(t *testing.T) {
+			decoded, err := codec.Unmarshal([]byte(encoded))
+			require.NoError(t, err)
+			_, present, err := fileSettings.FieldPresence.Lookup(decoded)
+			require.NoError(t, err)
+			require.False(t, present)
+			value, err := fileSettings.FieldPresence.Get(decoded)
+			require.NoError(t, err)
+			require.Equal(t, descriptorpb.FeatureSet_EXPLICIT, value)
+		})
+	}
+}
+
+func TestJSONCodecPreservesExplicitScalarZeroPresence(t *testing.T) {
+	codec := settings.MustJSONCodec(
+		func() *descriptorpb.FileDescriptorProto { return &descriptorpb.FileDescriptorProto{} },
+		1024,
+	)
+	decoded, err := codec.Unmarshal([]byte(`{
+		"options": {
+			"go_package": "",
+			"java_multiple_files": false,
+			"features": {"field_presence": "FIELD_PRESENCE_UNKNOWN"}
+		}
+	}`))
+	require.NoError(t, err)
+
+	text, present, err := fileSettings.GoPackage.Lookup(decoded)
+	require.NoError(t, err)
+	require.True(t, present)
+	require.Empty(t, text)
+	flag, present, err := fileSettings.JavaMultipleFiles.Lookup(decoded)
+	require.NoError(t, err)
+	require.True(t, present)
+	require.False(t, flag)
+	enum, present, err := fileSettings.FieldPresence.Lookup(decoded)
+	require.NoError(t, err)
+	require.True(t, present)
+	require.Equal(t, descriptorpb.FeatureSet_FIELD_PRESENCE_UNKNOWN, enum)
+}
+
+func TestJSONCodecEmptyObjectParentIsPresentButLeafRemainsAbsent(t *testing.T) {
+	codec := settings.MustJSONCodec(
+		func() *descriptorpb.FileDescriptorProto { return &descriptorpb.FileDescriptorProto{} },
+		1024,
+	)
+	decoded, err := codec.Unmarshal([]byte(`{"options":{}}`))
+	require.NoError(t, err)
+	require.NotNil(t, decoded.Options)
+
+	_, present, err := fileSettings.GoPackage.Lookup(decoded)
+	require.NoError(t, err)
+	require.False(t, present)
+	value, err := fileSettings.GoPackage.Get(decoded)
+	require.NoError(t, err)
+	require.Equal(t, "example/default", value)
+	require.NotNil(t, decoded.Options, "Get must not rewrite or prune the document")
+}
+
 func TestJSONCodecRejectsMalformedAndTypeInvalidJSON(t *testing.T) {
 	codec := settings.MustJSONCodec(
 		func() *descriptorpb.FileDescriptorProto { return &descriptorpb.FileDescriptorProto{} },

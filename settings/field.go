@@ -252,7 +252,18 @@ func MustEnum[M proto.Message, E ~int32](prototype M, path string, defaultValue 
 			if descriptor.Kind() != protoreflect.EnumKind {
 				return fmt.Errorf("expected enum, got %s", descriptor.Kind())
 			}
-			return requirePresence(descriptor)
+			if err := requirePresence(descriptor); err != nil {
+				return err
+			}
+			number := protoreflect.EnumNumber(defaultValue)
+			if descriptor.Enum().Values().ByNumber(number) == nil {
+				return fmt.Errorf(
+					"default %d is not defined by %s",
+					number,
+					descriptor.Enum().FullName(),
+				)
+			}
+			return nil
 		},
 		func(message protoreflect.Message, descriptor protoreflect.FieldDescriptor) (E, error) {
 			return E(message.Get(descriptor).Enum()), nil
