@@ -220,6 +220,34 @@ type StartRootSessionInput struct {
 	TTL          time.Duration
 }
 
+// ExchangeWorkContextAudienceInput reissues one verified Work Context for a
+// different consumer. The exchange preserves every immutable work and
+// authority claim; callers may only select transport-lifetime properties.
+type ExchangeWorkContextAudienceInput struct {
+	Audience     string
+	ReplayPolicy string
+	TTL          time.Duration
+}
+
+// ExchangeWorkContextAudience reissues a capability for another audience
+// without creating a new Task, Session, actor, or delegation. Authorities use
+// this when one logical execution crosses service trust boundaries.
+func (s *WorkContextSigner) ExchangeWorkContextAudience(
+	parent WorkContextToken,
+	input ExchangeWorkContextAudienceInput,
+) (WorkContextToken, *basev0.WorkContextV1, error) {
+	verified, err := s.verifyOwn(parent)
+	if err != nil {
+		return WorkContextToken{}, nil, err
+	}
+	return s.exchange(
+		cloneContext(verified),
+		input.Audience,
+		input.ReplayPolicy,
+		input.TTL,
+	)
+}
+
 func (s *WorkContextSigner) StartSession(parent WorkContextToken, input StartRootSessionInput) (WorkContextToken, *basev0.WorkContextV1, error) {
 	verified, err := s.verifyOwn(parent)
 	if err != nil {

@@ -123,6 +123,51 @@ func TestWorkContextStartTaskVerifyAndCanonicalize(t *testing.T) {
 	require.Equal(t, "agent-claude-code", verified.ActorChain[0].PrincipalId)
 }
 
+func TestWorkContextAudienceExchangePreservesImmutableLineage(t *testing.T) {
+	signer := workContextTestSigner(t, workContextTestTime)
+	parentToken, parent, err := signer.StartTask(workContextTestInput())
+	require.NoError(t, err)
+
+	exchangedToken, exchanged, err := signer.ExchangeWorkContextAudience(
+		parentToken,
+		ExchangeWorkContextAudienceInput{
+			Audience:     "warden.gateway",
+			ReplayPolicy: WorkContextReplaySingleUse,
+			TTL:          2 * time.Minute,
+		},
+	)
+	require.NoError(t, err)
+	require.NotEqual(t, parentToken.Encoded(), exchangedToken.Encoded())
+	require.Equal(t, "warden.gateway", exchanged.GetAudience())
+	require.Equal(t, WorkContextReplaySingleUse, exchanged.GetReplayPolicy())
+	require.Equal(t, workContextTestTime.Add(2*time.Minute).Unix(), exchanged.GetExpiresAtUnix())
+
+	require.Equal(t, parent.GetTenantId(), exchanged.GetTenantId())
+	require.Equal(t, parent.GetOwnerPrincipalId(), exchanged.GetOwnerPrincipalId())
+	require.Equal(t, parent.GetTaskId(), exchanged.GetTaskId())
+	require.Equal(t, parent.GetSessionId(), exchanged.GetSessionId())
+	require.Equal(t, parent.GetParentSessionId(), exchanged.GetParentSessionId())
+	require.Equal(t, parent.GetAuthorizationRevision(), exchanged.GetAuthorizationRevision())
+	require.Equal(t, parent.GetAuthorityScopes(), exchanged.GetAuthorityScopes())
+	require.Equal(t, parent.GetActorChain(), exchanged.GetActorChain())
+	require.Equal(t, parent.GetAttributionTeamIds(), exchanged.GetAttributionTeamIds())
+	require.Equal(t, parent.GetWorkspaceId(), exchanged.GetWorkspaceId())
+	require.Equal(t, parent.GetProjectId(), exchanged.GetProjectId())
+
+	verified, err := workContextTestVerifier(t, workContextTestTime).Verify(
+		exchangedToken,
+		WorkContextExpectations{
+			Audience:         "warden.gateway",
+			TenantID:         parent.GetTenantId(),
+			OwnerPrincipalID: parent.GetOwnerPrincipalId(),
+			TaskID:           parent.GetTaskId(),
+			SessionID:        parent.GetSessionId(),
+		},
+	)
+	require.NoError(t, err)
+	require.Equal(t, parent.GetActorChain(), verified.GetActorChain())
+}
+
 func TestRequireWorkContextScopeUsesFinalActorEffectiveAuthority(t *testing.T) {
 	_, claims, err := workContextTestSigner(t, workContextTestTime).StartTask(workContextTestInput())
 	require.NoError(t, err)
