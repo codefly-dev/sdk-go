@@ -59,11 +59,37 @@ func TestMissingParentReturnsConfiguredDefaultWithoutMaterializing(t *testing.T)
 	value, err := fileSettings.GoPackage.Get(message)
 	require.NoError(t, err)
 	require.Equal(t, "example/default", value)
+	require.Equal(t, "example/default", fileSettings.GoPackage.Default())
 	require.Nil(t, message.Options, "a read must never materialize a parent")
 
 	_, present, err := fileSettings.GoPackage.Lookup(message)
 	require.NoError(t, err)
 	require.False(t, present)
+}
+
+func TestApplyDefaultMaterializesMissingParents(t *testing.T) {
+	message := &descriptorpb.FileDescriptorProto{}
+
+	changed, err := fileSettings.GoPackage.ApplyDefault(message)
+
+	require.NoError(t, err)
+	require.True(t, changed)
+	require.NotNil(t, message.Options)
+	require.Equal(t, "example/default", message.Options.GetGoPackage())
+}
+
+func TestApplyDefaultNeverOverwritesExplicitZeroValue(t *testing.T) {
+	message := &descriptorpb.FileDescriptorProto{}
+	require.NoError(t, fileSettings.JavaMultipleFiles.Set(message, false))
+
+	changed, err := fileSettings.JavaMultipleFiles.ApplyDefault(message)
+
+	require.NoError(t, err)
+	require.False(t, changed)
+	value, present, err := fileSettings.JavaMultipleFiles.Lookup(message)
+	require.NoError(t, err)
+	require.True(t, present)
+	require.False(t, value)
 }
 
 func TestSetAndClearMaterializeAndPruneMultipleMissingParents(t *testing.T) {

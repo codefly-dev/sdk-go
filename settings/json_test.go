@@ -61,6 +61,26 @@ func TestJSONCodecIgnoresRemovedUnknownFieldsOnRead(t *testing.T) {
 	require.Equal(t, "settings.proto", decoded.GetName())
 }
 
+func TestJSONCodecTreatsNullAsAbsentRatherThanAThirdScalarState(t *testing.T) {
+	codec := settings.MustJSONCodec(
+		func() *descriptorpb.FileDescriptorProto { return &descriptorpb.FileDescriptorProto{} },
+		1024,
+	)
+
+	decoded, err := codec.Unmarshal([]byte(`{
+		"options": {"go_package": null}
+	}`))
+
+	require.NoError(t, err)
+	value, present, err := fileSettings.GoPackage.Lookup(decoded)
+	require.NoError(t, err)
+	require.False(t, present)
+	require.Empty(t, value)
+	defaulted, err := fileSettings.GoPackage.Get(decoded)
+	require.NoError(t, err)
+	require.Equal(t, "example/default", defaulted)
+}
+
 func TestJSONCodecRejectsMalformedAndTypeInvalidJSON(t *testing.T) {
 	codec := settings.MustJSONCodec(
 		func() *descriptorpb.FileDescriptorProto { return &descriptorpb.FileDescriptorProto{} },

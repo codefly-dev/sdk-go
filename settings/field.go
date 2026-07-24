@@ -33,6 +33,11 @@ func (field Field[M, T]) Path() string {
 	return field.path
 }
 
+// Default returns the field's configured fallback value.
+func (field Field[M, T]) Default() T {
+	return field.defaultValue
+}
+
 // Get returns the explicitly stored value, or the field's configured default
 // when the field or any of its parent messages is absent.
 func (field Field[M, T]) Get(message M) (T, error) {
@@ -45,6 +50,23 @@ func (field Field[M, T]) Get(message M) (T, error) {
 		return field.defaultValue, nil
 	}
 	return value, nil
+}
+
+// ApplyDefault writes the configured default only when the field is absent.
+// It returns true when the message changed. Existing values, including
+// explicit false, empty string, zero, or the zero enum, are never overwritten.
+func (field Field[M, T]) ApplyDefault(message M) (bool, error) {
+	_, present, err := field.Lookup(message)
+	if err != nil {
+		return false, err
+	}
+	if present {
+		return false, nil
+	}
+	if err := field.Set(message, field.defaultValue); err != nil {
+		return false, err
+	}
+	return true, nil
 }
 
 // Lookup returns the value and its protobuf presence. An explicit scalar zero
