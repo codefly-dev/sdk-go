@@ -221,17 +221,20 @@ type StartRootSessionInput struct {
 }
 
 // ExchangeWorkContextAudienceInput reissues one verified Work Context for a
-// different consumer. The exchange preserves every immutable work and
-// authority claim; callers may only select transport-lifetime properties.
+// different consumer. Immutable work and delegation identity is preserved.
+// AttenuatedScopes, when non-nil, replaces the effective scopes and must be a
+// subset of the parent's effective scopes.
 type ExchangeWorkContextAudienceInput struct {
-	Audience     string
-	ReplayPolicy string
-	TTL          time.Duration
+	Audience         string
+	ReplayPolicy     string
+	TTL              time.Duration
+	AttenuatedScopes []*basev0.WorkScopeV1
 }
 
 // ExchangeWorkContextAudience reissues a capability for another audience
 // without creating a new Task, Session, actor, or delegation. Authorities use
-// this when one logical execution crosses service trust boundaries.
+// this when one logical execution crosses service trust boundaries. An
+// exchange may reduce effective authority but can never widen it.
 func (s *WorkContextSigner) ExchangeWorkContextAudience(
 	parent WorkContextToken,
 	input ExchangeWorkContextAudienceInput,
@@ -240,8 +243,28 @@ func (s *WorkContextSigner) ExchangeWorkContextAudience(
 	if err != nil {
 		return WorkContextToken{}, nil, err
 	}
+	next := cloneContext(verified)
+	if input.AttenuatedScopes != nil {
+		attenuated := cloneScopes(input.AttenuatedScopes)
+		canonicalizeScopes(attenuated)
+		effective := verified.GetAuthorityScopes()
+		if actors := verified.GetActorChain(); len(actors) > 0 {
+			effective = actors[len(actors)-1].GetGrantedScopes()
+		}
+		if !scopesAttenuate(effective, attenuated) {
+			return WorkContextToken{}, nil, fmt.Errorf(
+				"%w: audience exchange widens authority",
+				ErrWorkContextInvalid,
+			)
+		}
+		if actors := next.GetActorChain(); len(actors) > 0 {
+			actors[len(actors)-1].GrantedScopes = attenuated
+		} else {
+			next.AuthorityScopes = attenuated
+		}
+	}
 	return s.exchange(
-		cloneContext(verified),
+		next,
 		input.Audience,
 		input.ReplayPolicy,
 		input.TTL,

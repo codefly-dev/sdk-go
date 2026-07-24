@@ -149,7 +149,10 @@ func TestWorkContextAudienceExchangePreservesImmutableLineage(t *testing.T) {
 	require.Equal(t, parent.GetParentSessionId(), exchanged.GetParentSessionId())
 	require.Equal(t, parent.GetAuthorizationRevision(), exchanged.GetAuthorizationRevision())
 	require.Equal(t, parent.GetAuthorityScopes(), exchanged.GetAuthorityScopes())
-	require.Equal(t, parent.GetActorChain(), exchanged.GetActorChain())
+	require.Equal(t, parent.GetActorChain()[0].GetPrincipalId(), exchanged.GetActorChain()[0].GetPrincipalId())
+	require.Equal(t, parent.GetActorChain()[0].GetPrincipalKind(), exchanged.GetActorChain()[0].GetPrincipalKind())
+	require.Equal(t, parent.GetActorChain()[0].GetDelegationId(), exchanged.GetActorChain()[0].GetDelegationId())
+	require.Equal(t, parent.GetActorChain()[0].GetGrantedScopes(), exchanged.GetActorChain()[0].GetGrantedScopes())
 	require.Equal(t, parent.GetAttributionTeamIds(), exchanged.GetAttributionTeamIds())
 	require.Equal(t, parent.GetWorkspaceId(), exchanged.GetWorkspaceId())
 	require.Equal(t, parent.GetProjectId(), exchanged.GetProjectId())
@@ -166,6 +169,61 @@ func TestWorkContextAudienceExchangePreservesImmutableLineage(t *testing.T) {
 	)
 	require.NoError(t, err)
 	require.Equal(t, parent.GetActorChain(), verified.GetActorChain())
+}
+
+func TestWorkContextAudienceExchangeOnlyAttenuatesEffectiveScopes(t *testing.T) {
+	signer := workContextTestSigner(t, workContextTestTime)
+	parentToken, parent, err := signer.StartTask(workContextTestInput())
+	require.NoError(t, err)
+
+	token, exchanged, err := signer.ExchangeWorkContextAudience(
+		parentToken,
+		ExchangeWorkContextAudienceInput{
+			Audience: "warden.gateway",
+			AttenuatedScopes: []*basev0.WorkScopeV1{{
+				ResourceKind: "repository",
+				Actions:      []string{"write"},
+				ResourceIds:  []string{"repo-warden"},
+			}},
+		},
+	)
+	require.NoError(t, err)
+	require.NotEmpty(t, token.Encoded())
+	require.Equal(t, parent.GetActorChain()[0].GetDelegationId(), exchanged.GetActorChain()[0].GetDelegationId())
+	require.Equal(t, []*basev0.WorkScopeV1{{
+		ResourceKind: "repository",
+		Actions:      []string{"write"},
+		ResourceIds:  []string{"repo-warden"},
+	}}, exchanged.GetActorChain()[0].GetGrantedScopes())
+
+	for name, scopes := range map[string][]*basev0.WorkScopeV1{
+		"new action": {{
+			ResourceKind: "repository",
+			Actions:      []string{"admin"},
+			ResourceIds:  []string{"repo-warden"},
+		}},
+		"new resource": {{
+			ResourceKind: "repository",
+			Actions:      []string{"write"},
+			ResourceIds:  []string{"repo-other"},
+		}},
+		"explicit to wildcard": {{
+			ResourceKind: "repository",
+			Actions:      []string{"write"},
+		}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			_, _, exchangeErr := signer.ExchangeWorkContextAudience(
+				parentToken,
+				ExchangeWorkContextAudienceInput{
+					Audience:         "warden.gateway",
+					AttenuatedScopes: scopes,
+				},
+			)
+			require.ErrorIs(t, exchangeErr, ErrWorkContextInvalid)
+			require.Contains(t, exchangeErr.Error(), "widens authority")
+		})
+	}
 }
 
 func TestRequireWorkContextScopeUsesFinalActorEffectiveAuthority(t *testing.T) {
