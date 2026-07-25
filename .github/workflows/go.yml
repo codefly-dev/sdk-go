@@ -11,52 +11,66 @@ concurrency:
   cancel-in-progress: true
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
-  quality:
-    name: ${{ matrix.gate }}
+  module-consistency:
+    name: module-consistency
     runs-on: ubuntu-latest
     timeout-minutes: 5
-    strategy:
-      fail-fast: true
-      matrix:
-        gate:
-          - module-consistency
-          - lint
-          - coverage
-          - race
     steps:
       - name: Checkout
         uses: actions/checkout@v7
-
       - name: Set up Go
         uses: actions/setup-go@v7
         with:
           go-version-file: go.mod
           cache: true
-
       - name: Download modules
         run: go mod download
-
       - name: Check module consistency
-        if: matrix.gate == 'module-consistency'
         run: |
           go mod tidy
           git diff --exit-code -- go.mod go.sum
 
+  lint:
+    name: lint
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+      - name: Set up Go
+        uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Download modules
+        run: go mod download
       - name: Lint
-        if: matrix.gate == 'lint'
         uses: golangci/golangci-lint-action@v9
         with:
           version: v2.12.2
 
+  coverage:
+    name: coverage
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+      - name: Set up Go
+        uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Download modules
+        run: go mod download
       - name: Test with coverage
-        if: matrix.gate == 'coverage'
         run: go test ./... -coverprofile=cover.out -covermode=atomic -coverpkg=./...
-
       - name: Check test coverage
-        if: matrix.gate == 'coverage'
         id: coverage
         uses: vladopajic/go-test-coverage@v2
         with:
@@ -64,6 +78,19 @@ jobs:
           git-token: ${{ github.ref_name == 'main' && secrets.GITHUB_TOKEN || '' }}
           git-branch: badges
 
+  race:
+    name: race
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+      - name: Set up Go
+        uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Download modules
+        run: go mod download
       - name: Test with race detection
-        if: matrix.gate == 'race'
         run: go test -race ./... -v
