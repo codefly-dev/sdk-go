@@ -50,7 +50,9 @@ func LoadRuntimeEnvironmentFile(path string) error {
 	if err != nil {
 		return fmt.Errorf("open Codefly runtime environment file: %w", err)
 	}
-	defer file.Close()
+	defer func() {
+		_ = file.Close()
+	}()
 
 	limited := io.LimitReader(file, maxRuntimeEnvironmentFileBytes+1)
 	scanner := bufio.NewScanner(limited)

@@ -221,7 +221,9 @@ func (v *WorkContextJWKSVerifier) fetch(ctx context.Context) (map[string]ed25519
 	if err != nil {
 		return nil, fmt.Errorf("%w: fetch Work Context JWKS: %v", ErrWorkContextInvalid, err)
 	}
-	defer response.Body.Close()
+	defer func() {
+		_ = response.Body.Close()
+	}()
 	if response.Request != nil && response.Request.URL != nil &&
 		response.Request.URL.String() != v.url {
 		return nil, fmt.Errorf("%w: Work Context JWKS redirected", ErrWorkContextInvalid)
