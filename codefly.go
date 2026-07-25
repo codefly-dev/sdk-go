@@ -2,6 +2,7 @@ package codefly
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"runtime/debug"
@@ -9,6 +10,7 @@ import (
 	"strings"
 	"sync"
 
+	basev0 "github.com/codefly-dev/core/generated/go/codefly/base/v0"
 	"github.com/codefly-dev/core/resources"
 	"github.com/codefly-dev/core/wool"
 )
@@ -79,8 +81,11 @@ func Context() context.Context {
 }
 
 var (
-	environmentVariablesMu sync.RWMutex
-	environmentVariables   []string
+	environmentVariablesMu       sync.RWMutex
+	processEnvironmentVariables  map[string]string
+	injectedConfigurationValues  map[string]string
+	injectedEndpointValues       map[string]string
+	environmentVariablesSnapshot []string
 )
 
 func LoadEnvironmentVariables() error {
@@ -102,22 +107,118 @@ func LoadEnvironmentVariables() error {
 		// first-match lookups then returned the stale value forever.
 		values[name] = value
 	}
+	environmentVariablesMu.Lock()
+	processEnvironmentVariables = values
+	rebuildEnvironmentSnapshotLocked()
+	environmentVariablesMu.Unlock()
+	return nil
+}
+
+// InjectConfigurations replaces the SDK's in-process configuration carrier
+// without mutating the process environment. This is the library boundary for
+// an embedded Codefly flow: resolved configuration enters the same immutable
+// snapshot queried by For. Calling it with no configurations clears the prior
+// injected configuration values.
+func InjectConfigurations(configurations ...*basev0.Configuration) error {
+	values := make(map[string]string)
+	for _, configuration := range configurations {
+		if configuration == nil {
+			continue
+		}
+		if strings.TrimSpace(configuration.Origin) == "" {
+			return errors.New("inject configuration: origin is required")
+		}
+		for _, information := range configuration.Infos {
+			if information == nil || strings.TrimSpace(information.Name) == "" {
+				return fmt.Errorf("inject configuration %s: information name is required", configuration.Origin)
+			}
+			for _, value := range information.ConfigurationValues {
+				if value == nil || strings.TrimSpace(value.Key) == "" {
+					return fmt.Errorf("inject configuration %s/%s: value key is required", configuration.Origin, information.Name)
+				}
+			}
+		}
+		envs := resources.ConfigurationAsEnvironmentVariables(configuration, false)
+		envs = append(envs, resources.ConfigurationAsEnvironmentVariables(configuration, true)...)
+		for _, env := range envs {
+			if env == nil || strings.TrimSpace(env.Key) == "" {
+				continue
+			}
+			values[env.Key] = env.ValueAsString()
+		}
+	}
+
+	environmentVariablesMu.Lock()
+	injectedConfigurationValues = values
+	rebuildEnvironmentSnapshotLocked()
+	environmentVariablesMu.Unlock()
+	return nil
+}
+
+// InjectEndpoints replaces the SDK's in-process endpoint carrier without
+// mutating the process environment. Calling it with no endpoints clears the
+// prior injected endpoint values. Invalid endpoint access is rejected before
+// the live snapshot changes.
+func InjectEndpoints(endpoints ...*resources.EndpointAccess) error {
+	values := make(map[string]string)
+	for index, endpoint := range endpoints {
+		if endpoint == nil || endpoint.Endpoint == nil || endpoint.NetworkInstance == nil {
+			return fmt.Errorf("inject endpoint %d: endpoint and network instance are required", index)
+		}
+		if strings.TrimSpace(endpoint.Endpoint.Module) == "" ||
+			strings.TrimSpace(endpoint.Endpoint.Service) == "" ||
+			strings.TrimSpace(endpoint.Endpoint.Name) == "" ||
+			strings.TrimSpace(endpoint.Endpoint.Api) == "" ||
+			strings.TrimSpace(endpoint.NetworkInstance.Address) == "" {
+			return fmt.Errorf("inject endpoint %d: module, service, name, api, and address are required", index)
+		}
+		env := resources.EndpointAsEnvironmentVariable(endpoint)
+		values[env.Key] = env.ValueAsString()
+	}
+
+	environmentVariablesMu.Lock()
+	injectedEndpointValues = values
+	rebuildEnvironmentSnapshotLocked()
+	environmentVariablesMu.Unlock()
+	return nil
+}
+
+func rebuildEnvironmentSnapshotLocked() {
+	size := len(processEnvironmentVariables) + len(injectedConfigurationValues) + len(injectedEndpointValues)
+	values := make(map[string]string, size)
+	for name, value := range processEnvironmentVariables {
+		values[name] = value
+	}
+	for name, value := range injectedConfigurationValues {
+		values[name] = value
+	}
+	for name, value := range injectedEndpointValues {
+		values[name] = value
+	}
 	snapshot := make([]string, 0, len(values))
 	for name, value := range values {
 		snapshot = append(snapshot, name+"="+value)
 	}
 	sort.Strings(snapshot)
-
-	environmentVariablesMu.Lock()
-	environmentVariables = snapshot
-	environmentVariablesMu.Unlock()
-	return nil
+	environmentVariablesSnapshot = snapshot
 }
 
 func codeflyEnvironmentVariables() []string {
 	environmentVariablesMu.RLock()
 	defer environmentVariablesMu.RUnlock()
-	return append([]string(nil), environmentVariables...)
+	return append([]string(nil), environmentVariablesSnapshot...)
+}
+
+func injectedEnvironmentValue(name string) (string, bool) {
+	environmentVariablesMu.RLock()
+	defer environmentVariablesMu.RUnlock()
+	if value, ok := injectedConfigurationValues[name]; ok && value != "" {
+		return value, true
+	}
+	if value, ok := injectedEndpointValues[name]; ok && value != "" {
+		return value, true
+	}
+	return "", false
 }
 
 func ServiceVersion() string {

@@ -250,6 +250,9 @@ func runtimeServiceConfigurationValue(ctx context.Context, candidates ...string)
 			continue
 		}
 		seen[candidate] = struct{}{}
+		if value, ok := injectedEnvironmentValue(candidate); ok {
+			return value, true
+		}
 		if value, ok := os.LookupEnv(candidate); ok && value != "" {
 			return value, true
 		}
@@ -293,6 +296,9 @@ func (q *Query) workspaceConfigurationValue(prefix string, name string, key stri
 	normalized := normalizeWorkspaceEnvironmentKey(name)
 	for _, candidate := range []string{exact, normalized} {
 		envKey := fmt.Sprintf("%s__%s__%s", prefix, candidate, normalizeWorkspaceEnvironmentKey(key))
+		if value, ok := injectedEnvironmentValue(envKey); ok {
+			return value, nil
+		}
 		if value, ok := os.LookupEnv(envKey); ok && value != "" {
 			return value, nil
 		}

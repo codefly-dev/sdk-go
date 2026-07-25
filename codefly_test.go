@@ -348,6 +348,138 @@ func TestEnvironmentReloadDropsRemovedValues(t *testing.T) {
 	assert.Error(t, err)
 }
 
+func TestInjectConfigurationsReplacesSnapshotWithoutProcessMutation(t *testing.T) {
+	ctx := context.Background()
+	key := resources.ServiceSecretConfigurationKeyFromUnique(
+		"embedded/store",
+		"postgres",
+		"connection",
+	)
+	t.Setenv(key, "postgresql://process")
+	requireNoError(t, codefly.LoadEnvironmentVariables())
+	t.Cleanup(func() {
+		requireNoError(t, codefly.InjectConfigurations())
+	})
+
+	configuration := &basev0.Configuration{
+		Origin: "embedded/store",
+		Infos: []*basev0.ConfigurationInformation{{
+			Name: "postgres",
+			ConfigurationValues: []*basev0.ConfigurationValue{{
+				Key:    "connection",
+				Value:  "postgresql://in-process",
+				Secret: true,
+			}},
+		}},
+	}
+	requireNoError(t, codefly.InjectConfigurations(configuration))
+
+	value, err := codefly.For(ctx).
+		Module("embedded").
+		Service("store").
+		Secret("postgres", "connection")
+	assert.NoError(t, err)
+	assert.Equal(t, "postgresql://in-process", value)
+	assert.Equal(t, "postgresql://process", os.Getenv(key), "injection must not mutate process environment")
+
+	requireNoError(t, codefly.LoadEnvironmentVariables())
+	value, err = codefly.For(ctx).
+		Module("embedded").
+		Service("store").
+		Secret("postgres", "connection")
+	assert.NoError(t, err)
+	assert.Equal(t, "postgresql://in-process", value, "environment reload must preserve typed injection")
+
+	requireNoError(t, codefly.InjectConfigurations())
+	value, err = codefly.For(ctx).
+		Module("embedded").
+		Service("store").
+		Secret("postgres", "connection")
+	assert.NoError(t, err)
+	assert.Equal(t, "postgresql://process", value, "clearing injection must reveal the process carrier")
+}
+
+func TestInjectConfigurationsDropsPriorInjectedValues(t *testing.T) {
+	ctx := context.Background()
+	t.Cleanup(func() {
+		requireNoError(t, codefly.InjectConfigurations())
+	})
+	first := &basev0.Configuration{
+		Origin: "embedded/first",
+		Infos: []*basev0.ConfigurationInformation{{
+			Name: "settings",
+			ConfigurationValues: []*basev0.ConfigurationValue{{
+				Key:   "value",
+				Value: "first",
+			}},
+		}},
+	}
+	second := &basev0.Configuration{
+		Origin: "embedded/second",
+		Infos: []*basev0.ConfigurationInformation{{
+			Name: "settings",
+			ConfigurationValues: []*basev0.ConfigurationValue{{
+				Key:   "value",
+				Value: "second",
+			}},
+		}},
+	}
+	requireNoError(t, codefly.InjectConfigurations(first))
+	requireNoError(t, codefly.InjectConfigurations(second))
+
+	err := codefly.InjectConfigurations(&basev0.Configuration{})
+	assert.Error(t, err)
+
+	_, err = codefly.For(ctx).
+		Module("embedded").
+		Service("first").
+		Configuration("settings", "value")
+	assert.Error(t, err)
+	value, err := codefly.For(ctx).
+		Module("embedded").
+		Service("second").
+		Configuration("settings", "value")
+	assert.NoError(t, err)
+	assert.Equal(t, "second", value)
+}
+
+func TestInjectEndpointsUsesTypedSnapshotAndRejectsInvalidReplacement(t *testing.T) {
+	ctx := context.Background()
+	t.Cleanup(func() {
+		requireNoError(t, codefly.InjectEndpoints())
+	})
+	endpoint := &resources.EndpointAccess{
+		Endpoint: &basev0.Endpoint{
+			Module:  "embedded",
+			Service: "store",
+			Name:    "tcp",
+			Api:     "tcp",
+		},
+		NetworkInstance: &basev0.NetworkInstance{Address: "127.0.0.1:5432"},
+	}
+	requireNoError(t, codefly.InjectEndpoints(endpoint))
+
+	instance, err := codefly.For(ctx).
+		Module("embedded").
+		Service("store").
+		Endpoint("tcp").
+		API("tcp").
+		ResolveNetworkInstance()
+	assert.NoError(t, err)
+	assert.Equal(t, "127.0.0.1:5432", instance.Address)
+
+	err = codefly.InjectEndpoints(&resources.EndpointAccess{})
+	assert.Error(t, err)
+	instance, err = codefly.For(ctx).
+		Module("embedded").
+		Service("store").
+		Endpoint("tcp").
+		API("tcp").
+		ResolveNetworkInstance()
+	assert.NoError(t, err)
+	assert.Equal(t, "127.0.0.1:5432", instance.Address, "invalid replacement must leave the live snapshot intact")
+}
+
 func writeFile(t *testing.T, path string, content string) {
 	t.Helper()
 	requireNoError(t, os.MkdirAll(filepath.Dir(path), 0o755))
