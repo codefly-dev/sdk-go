@@ -6,45 +6,64 @@ on:
   pull_request:
     branches: [ main ]
 
+concurrency:
+  group: sdk-go-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 permissions:
   contents: write
 
 jobs:
-  build:
-    name: Build
+  quality:
+    name: ${{ matrix.gate }}
     runs-on: ubuntu-latest
+    timeout-minutes: 5
+    strategy:
+      fail-fast: true
+      matrix:
+        gate:
+          - module-consistency
+          - lint
+          - coverage
+          - race
     steps:
-      - name: checkout
+      - name: Checkout
         uses: actions/checkout@v7
 
-      - name: set up
+      - name: Set up Go
         uses: actions/setup-go@v7
         with:
           go-version-file: go.mod
           cache: true
 
-      - name: Install Dependencies
-        run: go mod tidy && go mod download
+      - name: Download modules
+        run: go mod download
 
-      - name: golangci-lint
+      - name: Check module consistency
+        if: matrix.gate == 'module-consistency'
+        run: |
+          go mod tidy
+          git diff --exit-code -- go.mod go.sum
+
+      - name: Lint
+        if: matrix.gate == 'lint'
         uses: golangci/golangci-lint-action@v9
         with:
           version: v2.12.2
 
-      - name: generate test generate coverage
+      - name: Test with coverage
+        if: matrix.gate == 'coverage'
         run: go test ./... -coverprofile=cover.out -covermode=atomic -coverpkg=./...
 
-      - name: check test coverage
+      - name: Check test coverage
+        if: matrix.gate == 'coverage'
         id: coverage
         uses: vladopajic/go-test-coverage@v2
         with:
           config: ./.testcoverage.yaml
-          ## when token is not specified (value '') this feature is turend off
-          ## in this example badge is created and committed only for main brach
           git-token: ${{ github.ref_name == 'main' && secrets.GITHUB_TOKEN || '' }}
-          ## name of branch where badges are stored
-          ## ideally this should be orphan branch (see below how to create this branch)
           git-branch: badges
 
-      - name: test with race detection
+      - name: Test with race detection
+        if: matrix.gate == 'race'
         run: go test -race ./... -v

@@ -38,15 +38,7 @@ func GetLogLevel() wool.Loglevel {
 }
 
 func Init(ctx context.Context) (*wool.Provider, error) {
-	var err error
-	root, err = os.Getwd()
-	if err != nil {
-		return nil, err
-	}
-
-	err = LoadEnvironmentVariables()
-
-	if err != nil {
+	if err := LoadEnvironmentVariables(); err != nil {
 		return nil, err
 	}
 	// For logging before we get the runningService
@@ -68,7 +60,6 @@ func Init(ctx context.Context) (*wool.Provider, error) {
 	return provider, nil
 }
 
-var root string
 var runningCtx context.Context
 
 // Context returns the provider-injected context built by Init (so wool.Get sees

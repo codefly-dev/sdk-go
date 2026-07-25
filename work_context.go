@@ -505,8 +505,8 @@ func (v *WorkContextVerifier) Verify(token WorkContextToken, expected WorkContex
 	probe := struct {
 		KeyID string `json:"key_id"`
 	}{}
-	if err := json.Unmarshal(payload, &probe); err != nil {
-		return nil, fmt.Errorf("%w: decode key id: %v", ErrWorkContextInvalid, err)
+	if decodeErr := json.Unmarshal(payload, &probe); decodeErr != nil {
+		return nil, fmt.Errorf("%w: decode key id: %v", ErrWorkContextInvalid, decodeErr)
 	}
 	publicKey, ok := v.publicKeys[probe.KeyID]
 	if !ok {

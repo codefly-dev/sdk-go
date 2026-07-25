@@ -321,9 +321,9 @@ func (q *Query) localConfigurationValue(infoName string, key string, secret bool
 	if q.service == "" {
 		return "", w.NewError("service is not set")
 	}
-	workspace, err := resources.FindWorkspaceUp(q.ctx)
-	if err != nil {
-		return "", err
+	workspace, workspaceErr := resources.FindWorkspaceUp(q.ctx)
+	if workspaceErr != nil {
+		return "", workspaceErr
 	}
 	if workspace == nil {
 		return "", w.NewError("workspace not found")
@@ -331,19 +331,19 @@ func (q *Query) localConfigurationValue(infoName string, key string, secret bool
 
 	var svc *resources.Service
 	if q.module != "" {
-		mod, err := workspace.LoadModuleFromName(q.ctx, q.module)
-		if err != nil {
-			return "", err
+		mod, moduleErr := workspace.LoadModuleFromName(q.ctx, q.module)
+		if moduleErr != nil {
+			return "", moduleErr
 		}
-		svc, err = mod.LoadServiceFromName(q.ctx, q.service)
-		if err != nil {
-			return "", err
+		svc, moduleErr = mod.LoadServiceFromName(q.ctx, q.service)
+		if moduleErr != nil {
+			return "", moduleErr
 		}
 	} else {
-		var err error
-		svc, _, err = workspace.FindUniqueModuleServiceByName(q.ctx, q.service)
-		if err != nil {
-			return "", err
+		var findErr error
+		svc, _, findErr = workspace.FindUniqueModuleServiceByName(q.ctx, q.service)
+		if findErr != nil {
+			return "", findErr
 		}
 	}
 
