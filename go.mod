@@ -1,8 +1,6 @@
 module github.com/codefly-dev/sdk-go
 
-go 1.25.0
-
-toolchain go1.26.4
+go 1.27.0
 
 require (
 	github.com/codefly-dev/core v0.2.33
