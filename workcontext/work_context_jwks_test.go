@@ -252,6 +252,58 @@ func TestNewWorkContextJWKSVerifierRejectsUnsafeConfiguration(t *testing.T) {
 	}
 }
 
+func TestWorkContextJWKSVerifierRefreshWarmsCacheAtBoot(t *testing.T) {
+	publicKey, privateKey := workContextJWKSKey(1)
+	var requests atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+		requests.Add(1)
+		writer.Header().Set("Content-Type", "application/json")
+		_, _ = writer.Write(workContextJWKSJSON(t, map[string]ed25519.PublicKey{"key-1": publicKey}))
+	}))
+	t.Cleanup(server.Close)
+
+	verifier, err := NewWorkContextJWKSVerifier(WorkContextJWKSVerifierOptions{
+		URL: server.URL, Now: func() time.Time { return workContextTestTime },
+	})
+	require.NoError(t, err)
+
+	require.NoError(t, verifier.Refresh(t.Context()))
+	require.EqualValues(t, 1, requests.Load())
+
+	// The warmed cache serves the first Verify without another fetch.
+	_, err = verifier.Verify(
+		t.Context(),
+		workContextJWKSToken(t, "key-1", privateKey),
+		WorkContextExpectations{},
+	)
+	require.NoError(t, err)
+	require.EqualValues(t, 1, requests.Load())
+}
+
+func TestWorkContextJWKSVerifierRefreshFailsClosedOnUnreachableEndpoint(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+		writer.WriteHeader(http.StatusServiceUnavailable)
+	}))
+	t.Cleanup(server.Close)
+
+	verifier, err := NewWorkContextJWKSVerifier(WorkContextJWKSVerifierOptions{
+		URL: server.URL, Now: func() time.Time { return workContextTestTime },
+	})
+	require.NoError(t, err)
+	require.Error(t, verifier.Refresh(t.Context()))
+}
+
+func TestWorkContextJWKSVerifierRefreshRejectsNilReceiverAndContext(t *testing.T) {
+	verifier, err := NewWorkContextJWKSVerifier(WorkContextJWKSVerifierOptions{
+		URL: "https://accounts.example.test/keys", Now: func() time.Time { return workContextTestTime },
+	})
+	require.NoError(t, err)
+	require.Error(t, verifier.Refresh(nil))
+
+	var nilVerifier *WorkContextJWKSVerifier
+	require.Error(t, nilVerifier.Refresh(context.Background()))
+}
+
 func workContextJWKSKey(seedByte byte) (ed25519.PublicKey, ed25519.PrivateKey) {
 	privateKey := workContextJWKSPrivateForSeed(seedByte)
 	return privateKey.Public().(ed25519.PublicKey), privateKey
