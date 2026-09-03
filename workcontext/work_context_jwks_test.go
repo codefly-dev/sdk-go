@@ -280,6 +280,49 @@ func TestWorkContextJWKSVerifierRefreshWarmsCacheAtBoot(t *testing.T) {
 	require.EqualValues(t, 1, requests.Load())
 }
 
+func TestWorkContextJWKSVerifierRefreshPreservesRotationRefreshBudget(t *testing.T) {
+	firstPublic, _ := workContextJWKSKey(1)
+	secondPublic, secondPrivate := workContextJWKSKey(2)
+	var requests atomic.Int32
+	var rotated atomic.Bool
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+		requests.Add(1)
+		keys := map[string]ed25519.PublicKey{"key-1": firstPublic}
+		if rotated.Load() {
+			keys = map[string]ed25519.PublicKey{"key-2": secondPublic}
+		}
+		writer.Header().Set("Content-Type", "application/json")
+		_, _ = writer.Write(workContextJWKSJSON(t, keys))
+	}))
+	t.Cleanup(server.Close)
+
+	verifier, err := NewWorkContextJWKSVerifier(WorkContextJWKSVerifierOptions{
+		URL: server.URL, Now: func() time.Time { return workContextTestTime },
+	})
+	require.NoError(t, err)
+
+	require.NoError(t, verifier.Refresh(t.Context()))
+	require.EqualValues(t, 1, requests.Load())
+
+	// After a manual Refresh opens a fresh generation, one unknown key ID must
+	// still force exactly one rotation refresh, and no more.
+	rotated.Store(true)
+	second := workContextJWKSToken(t, "key-2", secondPrivate)
+	_, err = verifier.Verify(t.Context(), second, WorkContextExpectations{})
+	require.NoError(t, err)
+	require.EqualValues(t, 2, requests.Load())
+
+	for index := range 20 {
+		_, err = verifier.Verify(
+			t.Context(),
+			workContextJWKSToken(t, fmt.Sprintf("unknown-%d", index), secondPrivate),
+			WorkContextExpectations{},
+		)
+		require.Error(t, err)
+	}
+	require.EqualValues(t, 2, requests.Load())
+}
+
 func TestWorkContextJWKSVerifierRefreshFailsClosedOnUnreachableEndpoint(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
 		writer.WriteHeader(http.StatusServiceUnavailable)

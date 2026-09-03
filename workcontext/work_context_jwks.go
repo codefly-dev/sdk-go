@@ -141,6 +141,11 @@ func (v *WorkContextJWKSVerifier) Verify(
 // Refresh fetches and installs the key set immediately, warming the cache so a
 // service can fail closed at boot: call it during startup and treat a non-nil
 // error as fatal rather than letting the first requests race the initial fetch.
+//
+// Each call always performs a fetch and is not deduplicated: it forces a live
+// fetch so the caller can prove the endpoint is reachable now. Concurrent calls
+// serialize on the same lock and each fetch independently, so call it once at
+// boot rather than fanning it out across goroutines.
 func (v *WorkContextJWKSVerifier) Refresh(ctx context.Context) error {
 	if v == nil {
 		return fmt.Errorf("%w: nil JWKS verifier", ErrWorkContextInvalid)
