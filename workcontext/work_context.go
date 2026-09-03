@@ -785,8 +785,10 @@ func validateWorkContext(context *basev0.WorkContextV1) error {
 		}
 	}
 	// These proto fields are optional, but each declares min_len=1: absent is
-	// allowed, present-but-empty is not. Enforcing this keeps cross-language
-	// verifiers from disagreeing on the same wire bytes.
+	// allowed, present-but-empty is not. min_len is a length rule, so the guard
+	// is emptiness, not whitespace-trimming — a proto-generated verifier in
+	// another language accepts a one-character value, and this one must agree on
+	// the same wire bytes.
 	for name, value := range map[string]*string{
 		"parent_session_id": context.ParentSessionId,
 		"workspace_id":      context.WorkspaceId,
@@ -795,7 +797,10 @@ func validateWorkContext(context *basev0.WorkContextV1) error {
 		if value == nil {
 			continue
 		}
-		if err := validateBounded(name, *value, workContextMaxIDBytes, true); err != nil {
+		if *value == "" {
+			return fmt.Errorf("%w: %s must not be empty when present", ErrWorkContextInvalid, name)
+		}
+		if err := validateBounded(name, *value, workContextMaxIDBytes, false); err != nil {
 			return err
 		}
 	}

@@ -302,9 +302,27 @@ func TestWorkContextGoldenRejectsPresentButEmptyOptionalFields(t *testing.T) {
 			require.NoError(t, err)
 			_, err = verifier.Verify(token, WorkContextExpectations{})
 			require.ErrorIs(t, err, ErrWorkContextInvalid)
-			require.Contains(t, err.Error(), field)
+			require.ErrorContains(t, err, field+" must not be empty when present")
+			require.NotContains(t, err.Error(), "signature", "must be rejected by validation, not signature failure")
 		})
 	}
+}
+
+// A present optional field satisfies min_len=1 at length one; a proto-generated
+// verifier accepts a single-space value, so this one must not reject it for
+// emptiness.
+func TestWorkContextAcceptsSingleCharacterOptionalFields(t *testing.T) {
+	input := workContextTestInput()
+	input.WorkspaceID = " "
+	input.ProjectID = " "
+
+	token, _, err := workContextTestSigner(t, workContextTestTime).StartTask(input)
+	require.NoError(t, err)
+
+	verified, err := workContextTestVerifier(t, workContextTestTime).Verify(token, WorkContextExpectations{})
+	require.NoError(t, err)
+	require.Equal(t, " ", verified.GetWorkspaceId())
+	require.Equal(t, " ", verified.GetProjectId())
 }
 
 func TestWorkContextRejectsForgeryAndClaimSubstitution(t *testing.T) {
