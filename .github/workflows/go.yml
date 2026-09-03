@@ -18,22 +18,23 @@ jobs:
     name: module-consistency
     runs-on: ubuntu-latest
     timeout-minutes: 5
+    strategy:
+      matrix:
+        module: [ ".", "workcontext" ]
     steps:
       - name: Checkout
         uses: actions/checkout@v7
       - name: Set up Go
         uses: actions/setup-go@v7
         with:
-          go-version-file: go.mod
+          go-version-file: ${{ matrix.module }}/go.mod
           cache: true
+          cache-dependency-path: ${{ matrix.module }}/go.sum
       - name: Download modules
+        working-directory: ${{ matrix.module }}
         run: go mod download
       - name: Check module consistency
-        run: |
-          go mod tidy
-          git diff --exit-code -- go.mod go.sum
-      - name: Check workcontext module consistency
-        working-directory: workcontext
+        working-directory: ${{ matrix.module }}
         run: |
           go mod tidy
           git diff --exit-code -- go.mod go.sum
@@ -42,25 +43,26 @@ jobs:
     name: lint
     runs-on: ubuntu-latest
     timeout-minutes: 5
+    strategy:
+      matrix:
+        module: [ ".", "workcontext" ]
     steps:
       - name: Checkout
         uses: actions/checkout@v7
       - name: Set up Go
         uses: actions/setup-go@v7
         with:
-          go-version-file: go.mod
+          go-version-file: ${{ matrix.module }}/go.mod
           cache: true
+          cache-dependency-path: ${{ matrix.module }}/go.sum
       - name: Download modules
+        working-directory: ${{ matrix.module }}
         run: go mod download
       - name: Lint
         uses: golangci/golangci-lint-action@v9
         with:
           version: v2.13.2
-      - name: Lint workcontext
-        uses: golangci/golangci-lint-action@v9
-        with:
-          version: v2.13.2
-          working-directory: workcontext
+          working-directory: ${{ matrix.module }}
 
   coverage:
     name: coverage
@@ -79,7 +81,7 @@ jobs:
       - name: Download modules
         run: go mod download
       - name: Test with coverage
-        run: go test ./... -coverprofile=cover.out -covermode=atomic -coverpkg=$(go list ./... | paste -sd, -)
+        run: go test ./... -coverprofile=cover.out -covermode=atomic -coverpkg=./...
       - name: Check test coverage
         id: coverage
         uses: vladopajic/go-test-coverage@v2
@@ -90,7 +92,7 @@ jobs:
       - name: Check workcontext test coverage
         working-directory: workcontext
         run: |
-          go test ./... -coverprofile=cover.out -covermode=atomic -coverpkg=$(go list ./... | paste -sd, -)
+          go test ./... -coverprofile=cover.out -covermode=atomic -coverpkg=./...
           total=$(go tool cover -func=cover.out | awk '/^total:/ {print substr($3, 1, length($3)-1)}')
           echo "workcontext total coverage: ${total}%"
           awk "BEGIN { exit !(${total} >= 75) }"
@@ -99,18 +101,21 @@ jobs:
     name: race
     runs-on: ubuntu-latest
     timeout-minutes: 5
+    strategy:
+      matrix:
+        module: [ ".", "workcontext" ]
     steps:
       - name: Checkout
         uses: actions/checkout@v7
       - name: Set up Go
         uses: actions/setup-go@v7
         with:
-          go-version-file: go.mod
+          go-version-file: ${{ matrix.module }}/go.mod
           cache: true
+          cache-dependency-path: ${{ matrix.module }}/go.sum
       - name: Download modules
+        working-directory: ${{ matrix.module }}
         run: go mod download
       - name: Test with race detection
-        run: go test -race ./... -v
-      - name: Test workcontext with race detection
-        working-directory: workcontext
+        working-directory: ${{ matrix.module }}
         run: go test -race ./... -v

@@ -4,12 +4,8 @@ go 1.27.0
 
 require (
 	github.com/codefly-dev/core v0.2.33
-	github.com/codefly-dev/sdk-go/workcontext v0.0.0
 	github.com/stretchr/testify v1.11.1
-	google.golang.org/grpc v1.80.0
 )
-
-replace github.com/codefly-dev/sdk-go/workcontext => ./workcontext
 
 require (
 	buf.build/gen/go/bufbuild/protovalidate/protocolbuffers/go v1.36.11-20260415201107-50325440f8f2.1 // indirect
@@ -53,6 +49,7 @@ require (
 	golang.org/x/text v0.39.0 // indirect
 	google.golang.org/genproto/googleapis/api v0.0.0-20260420184626-e10c466a9529 // indirect
 	google.golang.org/genproto/googleapis/rpc v0.0.0-20260420184626-e10c466a9529 // indirect
+	google.golang.org/grpc v1.80.0 // indirect
 	google.golang.org/protobuf v1.36.11 // indirect
 	gopkg.in/check.v1 v1.0.0-20201130134442-10cb98267c6c // indirect
 	gopkg.in/yaml.v3 v3.0.1 // indirect
