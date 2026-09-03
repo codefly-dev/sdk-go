@@ -784,12 +784,18 @@ func validateWorkContext(context *basev0.WorkContextV1) error {
 			return err
 		}
 	}
-	for name, value := range map[string]string{
-		"parent_session_id": context.GetParentSessionId(),
-		"workspace_id":      context.GetWorkspaceId(),
-		"project_id":        context.GetProjectId(),
+	// These proto fields are optional, but each declares min_len=1: absent is
+	// allowed, present-but-empty is not. Enforcing this keeps cross-language
+	// verifiers from disagreeing on the same wire bytes.
+	for name, value := range map[string]*string{
+		"parent_session_id": context.ParentSessionId,
+		"workspace_id":      context.WorkspaceId,
+		"project_id":        context.ProjectId,
 	} {
-		if err := validateBounded(name, value, workContextMaxIDBytes, false); err != nil {
+		if value == nil {
+			continue
+		}
+		if err := validateBounded(name, *value, workContextMaxIDBytes, true); err != nil {
 			return err
 		}
 	}
