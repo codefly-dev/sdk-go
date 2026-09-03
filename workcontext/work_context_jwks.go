@@ -5,6 +5,7 @@ import (
 	"crypto/ed25519"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"mime"
@@ -54,6 +55,7 @@ type WorkContextJWKSVerifier struct {
 	expiresAt                time.Time
 	generation               uint64
 	unknownRefreshGeneration uint64
+	outageRefreshGeneration  uint64
 }
 
 // NewWorkContextJWKSVerifier validates configuration without performing
@@ -165,6 +167,16 @@ func (v *WorkContextJWKSVerifier) refreshUnknown(
 		return v.verifier, cloneKeyIDs(v.keyIDs), v.generation, nil
 	}
 	if v.verifier != nil && v.unknownRefreshGeneration == v.generation {
+		// The single refresh this generation allows was already spent. If it
+		// failed because the key set was unreachable, the key still can't be
+		// obtained, so this stays an outage rather than degrading to an
+		// invalid-token rejection against the stale cache.
+		if v.outageRefreshGeneration == v.generation {
+			return nil, nil, v.generation, fmt.Errorf(
+				"%w: Work Context JWKS unreachable during key rotation",
+				ErrWorkContextUnavailable,
+			)
+		}
 		return v.verifier, cloneKeyIDs(v.keyIDs), v.generation, nil
 	}
 
@@ -174,6 +186,9 @@ func (v *WorkContextJWKSVerifier) refreshUnknown(
 	v.unknownRefreshGeneration = v.generation
 	verifier, keyIDs, generation, err := v.refreshLocked(ctx)
 	if err != nil {
+		if errors.Is(err, ErrWorkContextUnavailable) {
+			v.outageRefreshGeneration = v.generation
+		}
 		return nil, nil, generation, err
 	}
 	v.unknownRefreshGeneration = generation

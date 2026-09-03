@@ -269,6 +269,55 @@ func TestWorkContextJWKSVerifierReportsIssuerOutageAsUnavailable(t *testing.T) {
 	}
 }
 
+func TestWorkContextJWKSVerifierKeepsUnknownKeyOutageUnavailableAfterReservation(t *testing.T) {
+	firstPublic, firstPrivate := workContextJWKSKey(1)
+	_, secondPrivate := workContextJWKSKey(2)
+	var requests atomic.Int32
+	var down atomic.Bool
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+		requests.Add(1)
+		if down.Load() {
+			writer.WriteHeader(http.StatusServiceUnavailable)
+			return
+		}
+		writer.Header().Set("Content-Type", "application/json")
+		_, _ = writer.Write(workContextJWKSJSON(t, map[string]ed25519.PublicKey{"key-1": firstPublic}))
+	}))
+	t.Cleanup(server.Close)
+
+	verifier, err := NewWorkContextJWKSVerifier(WorkContextJWKSVerifierOptions{
+		URL: server.URL, Now: func() time.Time { return workContextTestTime },
+	})
+	require.NoError(t, err)
+	_, err = verifier.Verify(
+		t.Context(),
+		workContextJWKSToken(t, "key-1", firstPrivate),
+		WorkContextExpectations{},
+	)
+	require.NoError(t, err)
+	require.EqualValues(t, 1, requests.Load())
+
+	// Keys rotate to key-2 exactly as the issuer goes down, so the new key is
+	// unknown and its key set cannot be fetched.
+	down.Store(true)
+	rotated := workContextJWKSToken(t, "key-2", secondPrivate)
+	_, err = verifier.Verify(t.Context(), rotated, WorkContextExpectations{})
+	require.ErrorIs(t, err, ErrWorkContextUnavailable)
+	require.NotErrorIs(t, err, ErrWorkContextInvalid)
+	require.EqualValues(t, 2, requests.Load())
+
+	// The one-refresh-per-generation reservation is now spent, but the failure
+	// was an outage: repeat lookups must stay Unavailable rather than degrading
+	// to an invalid-token rejection against the stale cache, and must not spend
+	// another fetch.
+	for range 5 {
+		_, err = verifier.Verify(t.Context(), rotated, WorkContextExpectations{})
+		require.ErrorIs(t, err, ErrWorkContextUnavailable)
+		require.NotErrorIs(t, err, ErrWorkContextInvalid)
+	}
+	require.EqualValues(t, 2, requests.Load())
+}
+
 func TestNewWorkContextJWKSVerifierRejectsUnsafeConfiguration(t *testing.T) {
 	cases := []WorkContextJWKSVerifierOptions{
 		{},
