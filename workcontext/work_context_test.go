@@ -325,6 +325,25 @@ func TestWorkContextAcceptsSingleCharacterOptionalFields(t *testing.T) {
 	require.Equal(t, " ", verified.GetProjectId())
 }
 
+// StartTask omits the optional workspace_id/project_id when the caller passes an
+// empty string, so the signed context carries them as absent rather than
+// present-but-empty, and the verifier accepts an absent optional field. The
+// present-but-empty half of the contract is pinned by
+// TestWorkContextGoldenRejectsPresentButEmptyOptionalFields.
+func TestWorkContextStartTaskOmitsEmptyOptionalFields(t *testing.T) {
+	input := workContextTestInput()
+	input.WorkspaceID = ""
+	input.ProjectID = ""
+
+	token, claims, err := workContextTestSigner(t, workContextTestTime).StartTask(input)
+	require.NoError(t, err)
+	require.Nil(t, claims.WorkspaceId, "empty WorkspaceID must be omitted, not stored as present-but-empty")
+	require.Nil(t, claims.ProjectId, "empty ProjectID must be omitted, not stored as present-but-empty")
+
+	_, err = workContextTestVerifier(t, workContextTestTime).Verify(token, WorkContextExpectations{})
+	require.NoError(t, err, "a context with absent optional fields must verify")
+}
+
 func TestWorkContextRejectsForgeryAndClaimSubstitution(t *testing.T) {
 	token, _, err := workContextTestSigner(t, workContextTestTime).StartTask(workContextTestInput())
 	require.NoError(t, err)
