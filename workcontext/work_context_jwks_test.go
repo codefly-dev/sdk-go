@@ -208,7 +208,7 @@ func TestWorkContextJWKSVerifierBoundsAndValidatesRemoteKeys(t *testing.T) {
 		contentType string
 		body        []byte
 	}{
-		{name: "status", status: http.StatusServiceUnavailable, contentType: "application/json", body: []byte(`{}`)},
+		{name: "status", status: http.StatusNotFound, contentType: "application/json", body: []byte(`{}`)},
 		{name: "content type", status: http.StatusOK, contentType: "text/plain", body: []byte(`{}`)},
 		{name: "empty", status: http.StatusOK, contentType: "application/json", body: []byte(`{"keys":[]}`)},
 		{name: "wrong curve", status: http.StatusOK, contentType: "application/json", body: []byte(`{"keys":[{"kty":"OKP","crv":"X25519","kid":"key-1","x":"AA"}]}`)},
@@ -229,7 +229,42 @@ func TestWorkContextJWKSVerifierBoundsAndValidatesRemoteKeys(t *testing.T) {
 			})
 			require.NoError(t, err)
 			_, err = verifier.Verify(t.Context(), token, WorkContextExpectations{})
-			require.Error(t, err)
+			require.ErrorIs(t, err, ErrWorkContextInvalid)
+			require.NotErrorIs(t, err, ErrWorkContextUnavailable)
+		})
+	}
+}
+
+func TestWorkContextJWKSVerifierReportsIssuerOutageAsUnavailable(t *testing.T) {
+	_, privateKey := workContextJWKSKey(1)
+	token := workContextJWKSToken(t, "key-1", privateKey)
+
+	t.Run("transport failure", func(t *testing.T) {
+		server := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
+		endpoint := server.URL
+		server.Close()
+		verifier, err := NewWorkContextJWKSVerifier(WorkContextJWKSVerifierOptions{
+			URL: endpoint, Now: func() time.Time { return workContextTestTime },
+		})
+		require.NoError(t, err)
+		_, err = verifier.Verify(t.Context(), token, WorkContextExpectations{})
+		require.ErrorIs(t, err, ErrWorkContextUnavailable)
+		require.NotErrorIs(t, err, ErrWorkContextInvalid)
+	})
+
+	for _, status := range []int{http.StatusServiceUnavailable, http.StatusBadGateway, http.StatusTooManyRequests} {
+		t.Run(fmt.Sprintf("status %d", status), func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+				writer.WriteHeader(status)
+			}))
+			t.Cleanup(server.Close)
+			verifier, err := NewWorkContextJWKSVerifier(WorkContextJWKSVerifierOptions{
+				URL: server.URL, Now: func() time.Time { return workContextTestTime },
+			})
+			require.NoError(t, err)
+			_, err = verifier.Verify(t.Context(), token, WorkContextExpectations{})
+			require.ErrorIs(t, err, ErrWorkContextUnavailable)
+			require.NotErrorIs(t, err, ErrWorkContextInvalid)
 		})
 	}
 }

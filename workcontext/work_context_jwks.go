@@ -219,7 +219,7 @@ func (v *WorkContextJWKSVerifier) fetch(ctx context.Context) (map[string]ed25519
 	request.Header.Set("Accept", "application/json")
 	response, err := v.httpClient.Do(request)
 	if err != nil {
-		return nil, fmt.Errorf("%w: fetch Work Context JWKS: %v", ErrWorkContextInvalid, err)
+		return nil, fmt.Errorf("%w: fetch Work Context JWKS: %v", ErrWorkContextUnavailable, err)
 	}
 	defer func() {
 		_ = response.Body.Close()
@@ -230,9 +230,13 @@ func (v *WorkContextJWKSVerifier) fetch(ctx context.Context) (map[string]ed25519
 	}
 	if response.StatusCode != http.StatusOK {
 		_, _ = io.Copy(io.Discard, io.LimitReader(response.Body, 4*1024))
+		sentinel := ErrWorkContextInvalid
+		if response.StatusCode == http.StatusTooManyRequests || response.StatusCode >= 500 {
+			sentinel = ErrWorkContextUnavailable
+		}
 		return nil, fmt.Errorf(
 			"%w: Work Context JWKS returned HTTP %d",
-			ErrWorkContextInvalid,
+			sentinel,
 			response.StatusCode,
 		)
 	}
