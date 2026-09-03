@@ -7,3 +7,11 @@
 ![](docs/media/dragonfly.png)
 
 # codefly + go = sdk-go
+
+## Work Context verifier
+
+Services that only need to verify Codefly Work Contexts can import the leaf
+module `github.com/codefly-dev/sdk-go/workcontext` instead of the full SDK. It
+depends only on the shared `codefly/base/v0` proto types, so a consumer's
+`go.sum` stays a handful of entries rather than inheriting core's transitive
+tail.

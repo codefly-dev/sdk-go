@@ -6,10 +6,12 @@ import (
 	"strings"
 
 	"google.golang.org/grpc/metadata"
+
+	"github.com/codefly-dev/sdk-go/workcontext"
 )
 
 const (
-	workContextGRPCMetadataName = WorkContextHeaderName
+	workContextGRPCMetadataName = workcontext.WorkContextHeaderName
 	operationIDGRPCMetadataName = "x-codefly-operation-id"
 	maxOperationIDBytes         = 128
 )
@@ -20,17 +22,17 @@ const (
 // Callers construct it through NewExecutionContext and attach it through
 // WithGRPCExecutionContext. Carrier names remain SDK-owned.
 type ExecutionContext struct {
-	workContext WorkContextToken
+	workContext workcontext.WorkContextToken
 	operationID string
 }
 
 // NewExecutionContext validates and freezes one Work Context/operation pair.
 func NewExecutionContext(
-	workContext WorkContextToken,
+	workContext workcontext.WorkContextToken,
 	operationID string,
 ) (ExecutionContext, error) {
-	if workContext.empty() {
-		return ExecutionContext{}, fmt.Errorf("%w: empty Work Context", ErrWorkContextInvalid)
+	if workContext.Encoded() == "" {
+		return ExecutionContext{}, fmt.Errorf("%w: empty Work Context", workcontext.ErrWorkContextInvalid)
 	}
 	if err := validateOperationID(operationID); err != nil {
 		return ExecutionContext{}, err
@@ -43,7 +45,7 @@ func NewExecutionContext(
 
 // WorkContext returns the opaque signed capability. Trust decisions still
 // require WorkContextVerifier.
-func (execution ExecutionContext) WorkContext() WorkContextToken {
+func (execution ExecutionContext) WorkContext() workcontext.WorkContextToken {
 	return execution.workContext
 }
 
@@ -60,7 +62,7 @@ func WithGRPCExecutionContext(
 	execution ExecutionContext,
 ) (context.Context, error) {
 	if ctx == nil {
-		return nil, fmt.Errorf("%w: nil gRPC context", ErrWorkContextInvalid)
+		return nil, fmt.Errorf("%w: nil gRPC context", workcontext.ErrWorkContextInvalid)
 	}
 	validated, err := NewExecutionContext(execution.workContext, execution.operationID)
 	if err != nil {
@@ -68,15 +70,15 @@ func WithGRPCExecutionContext(
 	}
 	existing, _ := metadata.FromOutgoingContext(ctx)
 	if len(existing.Get(workContextGRPCMetadataName)) != 0 {
-		return nil, fmt.Errorf("%w: outgoing gRPC Work Context already set", ErrWorkContextInvalid)
+		return nil, fmt.Errorf("%w: outgoing gRPC Work Context already set", workcontext.ErrWorkContextInvalid)
 	}
 	if len(existing.Get(operationIDGRPCMetadataName)) != 0 {
-		return nil, fmt.Errorf("%w: outgoing gRPC operation ID already set", ErrWorkContextInvalid)
+		return nil, fmt.Errorf("%w: outgoing gRPC operation ID already set", workcontext.ErrWorkContextInvalid)
 	}
 	return metadata.AppendToOutgoingContext(
 		ctx,
 		workContextGRPCMetadataName,
-		validated.workContext.encoded,
+		validated.workContext.Encoded(),
 		operationIDGRPCMetadataName,
 		validated.operationID,
 	), nil
@@ -87,27 +89,27 @@ func WithGRPCExecutionContext(
 // does not verify Work Context trust.
 func GRPCExecutionContextFromIncoming(ctx context.Context) (ExecutionContext, error) {
 	if ctx == nil {
-		return ExecutionContext{}, fmt.Errorf("%w: nil gRPC context", ErrWorkContextInvalid)
+		return ExecutionContext{}, fmt.Errorf("%w: nil gRPC context", workcontext.ErrWorkContextInvalid)
 	}
 	values, ok := metadata.FromIncomingContext(ctx)
 	if !ok {
-		return ExecutionContext{}, fmt.Errorf("%w: missing incoming gRPC metadata", ErrWorkContextInvalid)
+		return ExecutionContext{}, fmt.Errorf("%w: missing incoming gRPC metadata", workcontext.ErrWorkContextInvalid)
 	}
 	workContexts := values.Get(workContextGRPCMetadataName)
 	if len(workContexts) != 1 {
 		return ExecutionContext{}, fmt.Errorf(
 			"%w: incoming gRPC Work Context requires exactly one value",
-			ErrWorkContextInvalid,
+			workcontext.ErrWorkContextInvalid,
 		)
 	}
 	operationIDs := values.Get(operationIDGRPCMetadataName)
 	if len(operationIDs) != 1 {
 		return ExecutionContext{}, fmt.Errorf(
 			"%w: incoming gRPC operation ID requires exactly one value",
-			ErrWorkContextInvalid,
+			workcontext.ErrWorkContextInvalid,
 		)
 	}
-	workContext, err := ParseWorkContextToken(workContexts[0])
+	workContext, err := workcontext.ParseWorkContextToken(workContexts[0])
 	if err != nil {
 		return ExecutionContext{}, err
 	}
@@ -121,7 +123,7 @@ func GRPCExecutionContextFromIncomingIfPresent(
 	ctx context.Context,
 ) (execution ExecutionContext, present bool, err error) {
 	if ctx == nil {
-		return ExecutionContext{}, false, fmt.Errorf("%w: nil gRPC context", ErrWorkContextInvalid)
+		return ExecutionContext{}, false, fmt.Errorf("%w: nil gRPC context", workcontext.ErrWorkContextInvalid)
 	}
 	values, ok := metadata.FromIncomingContext(ctx)
 	if !ok {
@@ -141,15 +143,15 @@ func GRPCExecutionContextFromIncomingIfPresent(
 
 func validateOperationID(operationID string) error {
 	if operationID == "" {
-		return fmt.Errorf("%w: operation ID is required", ErrWorkContextInvalid)
+		return fmt.Errorf("%w: operation ID is required", workcontext.ErrWorkContextInvalid)
 	}
 	if strings.TrimSpace(operationID) != operationID {
-		return fmt.Errorf("%w: operation ID is not canonical", ErrWorkContextInvalid)
+		return fmt.Errorf("%w: operation ID is not canonical", workcontext.ErrWorkContextInvalid)
 	}
 	if len(operationID) > maxOperationIDBytes {
 		return fmt.Errorf(
 			"%w: operation ID exceeds %d bytes",
-			ErrWorkContextInvalid,
+			workcontext.ErrWorkContextInvalid,
 			maxOperationIDBytes,
 		)
 	}
@@ -163,7 +165,7 @@ func validateOperationID(operationID string) error {
 		case '-', '_', '.', ':':
 			continue
 		default:
-			return fmt.Errorf("%w: operation ID contains unsupported characters", ErrWorkContextInvalid)
+			return fmt.Errorf("%w: operation ID contains unsupported characters", workcontext.ErrWorkContextInvalid)
 		}
 	}
 	return nil

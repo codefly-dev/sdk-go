@@ -8,12 +8,14 @@ import (
 
 	"github.com/stretchr/testify/require"
 	"google.golang.org/grpc/metadata"
+
+	"github.com/codefly-dev/sdk-go/workcontext"
 )
 
-func opaqueTestWorkContext(t *testing.T) WorkContextToken {
+func opaqueTestWorkContext(t *testing.T) workcontext.WorkContextToken {
 	t.Helper()
 	signature := base64.RawURLEncoding.EncodeToString(make([]byte, 64))
-	token, err := ParseWorkContextToken("e30." + signature)
+	token, err := workcontext.ParseWorkContextToken("e30." + signature)
 	require.NoError(t, err)
 	return token
 }
