@@ -89,6 +89,13 @@ jobs:
           config: ./.testcoverage.yaml
           git-token: ${{ github.ref_name == 'main' && secrets.GITHUB_TOKEN || '' }}
           git-branch: badges
+      - name: Check workcontext test coverage
+        working-directory: workcontext
+        run: |
+          go test ./... -coverprofile=cover.out -covermode=atomic -coverpkg=./...
+          total=$(go tool cover -func=cover.out | awk '/^total:/ {print substr($3, 1, length($3)-1)}')
+          echo "workcontext total coverage: ${total}%"
+          awk "BEGIN { exit !(${total} >= 75) }"
 
   race:
     name: race
