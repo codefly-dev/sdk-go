@@ -19,7 +19,7 @@ linters:
     rules:
       - linters:
           - staticcheck
-        path: ^runtime_environment_file\.go$
+        path: ^work_context\.go$
         text: "ST1005:"
     paths:
       - .*\.pb\.go
