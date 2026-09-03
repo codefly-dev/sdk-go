@@ -325,6 +325,21 @@ func TestWorkContextAcceptsSingleCharacterOptionalFields(t *testing.T) {
 	require.Equal(t, " ", verified.GetProjectId())
 }
 
+func TestWorkContextAcceptsAbsentOptionalFields(t *testing.T) {
+	input := workContextTestInput()
+	input.WorkspaceID = ""
+	input.ProjectID = ""
+	signer := workContextTestSigner(t, workContextTestTime)
+	token, claims, err := signer.StartTask(input)
+	require.NoError(t, err)
+	require.Nil(t, claims.WorkspaceId)
+	require.Nil(t, claims.ProjectId)
+	require.Nil(t, claims.ParentSessionId)
+
+	_, err = workContextTestVerifier(t, workContextTestTime).Verify(token, WorkContextExpectations{})
+	require.NoError(t, err, "an absent optional field is valid; only a present-but-empty one is not")
+}
+
 func TestWorkContextRejectsForgeryAndClaimSubstitution(t *testing.T) {
 	token, _, err := workContextTestSigner(t, workContextTestTime).StartTask(workContextTestInput())
 	require.NoError(t, err)
