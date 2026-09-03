@@ -208,7 +208,7 @@ func TestWorkContextJWKSVerifierBoundsAndValidatesRemoteKeys(t *testing.T) {
 		contentType string
 		body        []byte
 	}{
-		{name: "status", status: http.StatusServiceUnavailable, contentType: "application/json", body: []byte(`{}`)},
+		{name: "status", status: http.StatusNotFound, contentType: "application/json", body: []byte(`{}`)},
 		{name: "content type", status: http.StatusOK, contentType: "text/plain", body: []byte(`{}`)},
 		{name: "empty", status: http.StatusOK, contentType: "application/json", body: []byte(`{"keys":[]}`)},
 		{name: "wrong curve", status: http.StatusOK, contentType: "application/json", body: []byte(`{"keys":[{"kty":"OKP","crv":"X25519","kid":"key-1","x":"AA"}]}`)},
@@ -229,9 +229,93 @@ func TestWorkContextJWKSVerifierBoundsAndValidatesRemoteKeys(t *testing.T) {
 			})
 			require.NoError(t, err)
 			_, err = verifier.Verify(t.Context(), token, WorkContextExpectations{})
-			require.Error(t, err)
+			require.ErrorIs(t, err, ErrWorkContextInvalid)
+			require.NotErrorIs(t, err, ErrWorkContextUnavailable)
 		})
 	}
+}
+
+func TestWorkContextJWKSVerifierReportsIssuerOutageAsUnavailable(t *testing.T) {
+	_, privateKey := workContextJWKSKey(1)
+	token := workContextJWKSToken(t, "key-1", privateKey)
+
+	t.Run("transport failure", func(t *testing.T) {
+		server := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
+		endpoint := server.URL
+		server.Close()
+		verifier, err := NewWorkContextJWKSVerifier(WorkContextJWKSVerifierOptions{
+			URL: endpoint, Now: func() time.Time { return workContextTestTime },
+		})
+		require.NoError(t, err)
+		_, err = verifier.Verify(t.Context(), token, WorkContextExpectations{})
+		require.ErrorIs(t, err, ErrWorkContextUnavailable)
+		require.NotErrorIs(t, err, ErrWorkContextInvalid)
+	})
+
+	for _, status := range []int{http.StatusServiceUnavailable, http.StatusBadGateway, http.StatusTooManyRequests} {
+		t.Run(fmt.Sprintf("status %d", status), func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+				writer.WriteHeader(status)
+			}))
+			t.Cleanup(server.Close)
+			verifier, err := NewWorkContextJWKSVerifier(WorkContextJWKSVerifierOptions{
+				URL: server.URL, Now: func() time.Time { return workContextTestTime },
+			})
+			require.NoError(t, err)
+			_, err = verifier.Verify(t.Context(), token, WorkContextExpectations{})
+			require.ErrorIs(t, err, ErrWorkContextUnavailable)
+			require.NotErrorIs(t, err, ErrWorkContextInvalid)
+		})
+	}
+}
+
+func TestWorkContextJWKSVerifierKeepsUnknownKeyOutageUnavailableAfterReservation(t *testing.T) {
+	firstPublic, firstPrivate := workContextJWKSKey(1)
+	_, secondPrivate := workContextJWKSKey(2)
+	var requests atomic.Int32
+	var down atomic.Bool
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+		requests.Add(1)
+		if down.Load() {
+			writer.WriteHeader(http.StatusServiceUnavailable)
+			return
+		}
+		writer.Header().Set("Content-Type", "application/json")
+		_, _ = writer.Write(workContextJWKSJSON(t, map[string]ed25519.PublicKey{"key-1": firstPublic}))
+	}))
+	t.Cleanup(server.Close)
+
+	verifier, err := NewWorkContextJWKSVerifier(WorkContextJWKSVerifierOptions{
+		URL: server.URL, Now: func() time.Time { return workContextTestTime },
+	})
+	require.NoError(t, err)
+	_, err = verifier.Verify(
+		t.Context(),
+		workContextJWKSToken(t, "key-1", firstPrivate),
+		WorkContextExpectations{},
+	)
+	require.NoError(t, err)
+	require.EqualValues(t, 1, requests.Load())
+
+	// Keys rotate to key-2 exactly as the issuer goes down, so the new key is
+	// unknown and its key set cannot be fetched.
+	down.Store(true)
+	rotated := workContextJWKSToken(t, "key-2", secondPrivate)
+	_, err = verifier.Verify(t.Context(), rotated, WorkContextExpectations{})
+	require.ErrorIs(t, err, ErrWorkContextUnavailable)
+	require.NotErrorIs(t, err, ErrWorkContextInvalid)
+	require.EqualValues(t, 2, requests.Load())
+
+	// The one-refresh-per-generation reservation is now spent, but the failure
+	// was an outage: repeat lookups must stay Unavailable rather than degrading
+	// to an invalid-token rejection against the stale cache, and must not spend
+	// another fetch.
+	for range 5 {
+		_, err = verifier.Verify(t.Context(), rotated, WorkContextExpectations{})
+		require.ErrorIs(t, err, ErrWorkContextUnavailable)
+		require.NotErrorIs(t, err, ErrWorkContextInvalid)
+	}
+	require.EqualValues(t, 2, requests.Load())
 }
 
 func TestNewWorkContextJWKSVerifierRejectsUnsafeConfiguration(t *testing.T) {

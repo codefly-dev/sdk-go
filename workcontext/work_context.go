@@ -46,7 +46,12 @@ var (
 	WorkContextClockSkew  = time.Minute
 
 	ErrWorkContextInvalid = errors.New("invalid Codefly Work Context")
-	ErrWorkContextDenied  = errors.New("Codefly Work Context scope denied")
+	// ErrWorkContextUnavailable marks a fail-closed rejection caused by the key
+	// set being unreachable (transport failure or an issuer 5xx/429) rather than
+	// by the token itself. Callers should treat it as retryable — HTTP 503, not
+	// 401 — since an otherwise-valid context must not be dropped during an outage.
+	ErrWorkContextUnavailable = errors.New("Codefly Work Context verification unavailable")
+	ErrWorkContextDenied      = errors.New("Codefly Work Context scope denied")
 )
 
 // WorkContextToken is an opaque signed capability. Its encoded representation
