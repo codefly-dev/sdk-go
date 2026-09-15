@@ -307,7 +307,7 @@ func TestWorkspaceConfigurationUsesSDKBoundary(t *testing.T) {
 	_, err = codefly.For(ctx).WorkspaceValue("security", "missing")
 	assert.Error(t, err)
 	assert.True(t, codefly.IsLocal())
-	assert.Equal(t, "dogfood", codefly.Fixture())
+	assert.Equal(t, "dogfood", string(codefly.Fixture()))
 	assert.True(t, codefly.WithFixture("dogfood"))
 	assert.Equal(t, "scoped", codefly.ScopedAuthSecret())
 }
