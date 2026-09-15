@@ -218,12 +218,12 @@ func ServiceVersion() string {
 
 // Fixture returns the fixture selected by the Codefly runtime. Product code
 // must not depend on the runtime's environment-variable representation.
-func Fixture() string {
-	return os.Getenv(resources.FixturePrefix)
+func Fixture() FixtureSelection {
+	return FixtureSelection(os.Getenv(resources.FixturePrefix))
 }
 
 func WithFixture(fixture string) bool {
-	return resources.Match(Fixture(), fixture)
+	return resources.Match(string(Fixture()), fixture)
 }
 
 // Environment returns the Codefly environment selected for this process. The
