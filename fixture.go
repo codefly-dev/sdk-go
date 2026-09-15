@@ -21,6 +21,12 @@ type FixtureSelection string
 // Principal returns the identity the selected fixture seeds for role. Resolving
 // by role means a renamed or dropped principal fails here, against the package
 // version the solution composed, rather than at login.
+//
+// Only modules that resolve to a local directory are read. A pinned module
+// lives in an artifact the Codefly CLI materializes, so a fixture it declares
+// is invisible here: an unresolved name reports those modules, and a name that
+// a local module also declares resolves to the local one without reporting the
+// ambiguity.
 func (fixture FixtureSelection) Principal(ctx context.Context, role string) (*composition.FixturePrincipal, error) {
 	name := strings.TrimSpace(string(fixture))
 	if name == "" {
