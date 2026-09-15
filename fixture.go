@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 
 	"github.com/codefly-dev/core/composition"
@@ -63,11 +64,21 @@ func composedPackages(ctx context.Context) ([]*composition.PackageManifest, []st
 	}
 	var manifests []*composition.PackageManifest
 	var pinned []string
+	loaded := make(map[string]bool, len(resolutions))
 	for _, resolution := range resolutions {
 		if resolution.Dir == "" {
 			pinned = append(pinned, resolution.Module)
 			continue
 		}
+		// Two references can name one directory: a module listed twice, or an
+		// alias carrying a path override. Loading it once per reference would
+		// present a single package to the resolver as two, which comes back as
+		// that package colliding with itself.
+		directory := filepath.Clean(resolution.Dir)
+		if loaded[directory] {
+			continue
+		}
+		loaded[directory] = true
 		manifest, err := composition.LoadPackageManifest(resolution.Dir)
 		if errors.Is(err, os.ErrNotExist) {
 			continue

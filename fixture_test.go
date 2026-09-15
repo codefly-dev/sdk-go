@@ -91,6 +91,21 @@ func TestFixturePrincipalWithoutSelectedFixture(t *testing.T) {
 	assert.Contains(t, err.Error(), "no fixture is selected")
 }
 
+func TestFixturePrincipalResolvesWhenOneDirectoryIsReferencedTwice(t *testing.T) {
+	root := t.TempDir()
+	writeFile(t, filepath.Join(root, "workspace.codefly.yaml"),
+		"name: solution\nlayout: modules\nmodules:\n  - name: saas-starter\n  - name: alias\n    path: modules/saas-starter\n")
+	writeFile(t, filepath.Join(root, "modules", "saas-starter", composition.PackageManifestFileName), devAdminPackage)
+	writeFile(t, filepath.Join(root, "modules", "saas-starter", "services", ".keep"), "")
+	t.Chdir(root)
+	t.Setenv(resources.FixturePrefix, "dev-admin")
+
+	principal, err := codefly.Fixture().Principal(t.Context(), "super_admin")
+
+	require.NoError(t, err)
+	assert.Equal(t, "dev-admin", principal.ID)
+}
+
 func TestFixturePrincipalNamesPinnedModulesItCannotRead(t *testing.T) {
 	root := t.TempDir()
 	writeFile(t, filepath.Join(root, "workspace.codefly.yaml"),
