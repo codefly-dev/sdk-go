@@ -1,10 +1,13 @@
 name: codefly go SDK
 
 on:
+  # compat/** carries the release lines consumers pin when main holds an
+  # unreleased breaking change. A branch whose commits are pinned by a consumer
+  # is a published artifact, so it is built like one.
   push:
-    branches: [ main ]
+    branches: [ main, 'compat/**' ]
   pull_request:
-    branches: [ main ]
+    branches: [ main, 'compat/**' ]
 
 concurrency:
   group: sdk-go-${{ github.workflow }}-${{ github.ref }}
