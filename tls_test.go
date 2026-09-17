@@ -186,3 +186,78 @@ func TestServerAndClientTLSConfigServeRotatedLeaf(t *testing.T) {
 		t.Fatal("server served the same leaf after rotation")
 	}
 }
+
+// TestWithFileReaderReValidatesEveryReload proves the caller's reader, not
+// os.ReadFile, sees both the boot-time pair and every rotated pair: a rotation
+// the reader rejects keeps the last good leaf serving, and once the reader
+// accepts the files the rotated leaf is served.
+func TestWithFileReaderReValidatesEveryReload(t *testing.T) {
+	dir := t.TempDir()
+	certFile, keyFile := filepath.Join(dir, "tls.crt"), filepath.Join(dir, "tls.key")
+	first, _ := writeLeaf(t, certFile, keyFile, 1)
+
+	var reads []string
+	// privateOnly mirrors a projected-file reader: it refuses a file readable
+	// beyond the owner, and records every path it is asked for.
+	privateOnly := func(path string) ([]byte, error) {
+		reads = append(reads, filepath.Base(path))
+		info, err := os.Stat(path)
+		if err != nil {
+			return nil, err
+		}
+		if info.Mode().Perm()&0o077 != 0 {
+			return nil, fmt.Errorf("%s: not private", filepath.Base(path))
+		}
+		return os.ReadFile(path)
+	}
+
+	r, err := codefly.NewCertificateReloader(certFile, keyFile, codefly.WithFileReader(privateOnly))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(reads) != 2 {
+		t.Fatalf("boot-time pair read through the caller's reader %d times, want 2", len(reads))
+	}
+	if string(r.Certificate().Certificate[0]) != string(first) {
+		t.Fatal("boot-time leaf not served")
+	}
+
+	// A rotation that lands world-readable is refused by the reader; the reader
+	// was consulted (stat saw the change) and the last good leaf keeps serving.
+	second, _ := writeLeaf(t, certFile, keyFile, 2)
+	for _, path := range []string{certFile, keyFile} {
+		if err := os.Chmod(path, 0o644); err != nil {
+			t.Fatal(err)
+		}
+		bump(t, path)
+	}
+	before := len(reads)
+	if string(r.Certificate().Certificate[0]) != string(first) {
+		t.Fatal("a pair the reader rejected was served")
+	}
+	if len(reads) == before {
+		t.Fatal("rotation was not offered to the caller's reader")
+	}
+
+	// Once the files satisfy the reader, the rotated leaf is served.
+	for _, path := range []string{certFile, keyFile} {
+		if err := os.Chmod(path, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		bump(t, path)
+	}
+	if string(r.Certificate().Certificate[0]) != string(second) {
+		t.Fatal("accepted rotation not served")
+	}
+
+	// The reader also gates startup.
+	if err := os.Chmod(keyFile, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := codefly.NewCertificateReloader(certFile, keyFile, codefly.WithFileReader(privateOnly)); err == nil {
+		t.Fatal("startup accepted a pair the reader rejects")
+	}
+	if _, err := codefly.ServerTLSConfig(certFile, keyFile, nil, codefly.WithFileReader(privateOnly)); err == nil {
+		t.Fatal("ServerTLSConfig accepted a pair the reader rejects")
+	}
+}
