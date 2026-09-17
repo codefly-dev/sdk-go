@@ -27,6 +27,7 @@ import (
 // handshake the process could otherwise complete.
 type CertificateReloader struct {
 	certFile, keyFile string
+	read              func(string) ([]byte, error)
 
 	mu      sync.RWMutex
 	current *tls.Certificate
@@ -36,11 +37,33 @@ type CertificateReloader struct {
 	checkMu sync.Mutex
 }
 
+// ReloaderOption adjusts how a CertificateReloader reads its mounted pair.
+type ReloaderOption func(*CertificateReloader)
+
+// WithFileReader reads the certificate and key files through read instead of
+// os.ReadFile, at startup and on every reload. A service whose projected files
+// must satisfy checks beyond "parses as a key pair" (permission bits, a size
+// bound, the path's shape) passes the reader it already applies at startup, so a
+// rotated pair is re-validated exactly as the boot-time pair was; a replacement
+// the reader rejects is treated like a malformed one and the last good pair keeps
+// serving. Rotation is still detected by stat, so read is called only when a
+// file's modification time advanced.
+func WithFileReader(read func(string) ([]byte, error)) ReloaderOption {
+	return func(r *CertificateReloader) {
+		if read != nil {
+			r.read = read
+		}
+	}
+}
+
 // NewCertificateReloader loads the initial pair once. A startup failure is
 // returned to the caller: a listener or dialer must never come up without a
 // valid leaf.
-func NewCertificateReloader(certFile, keyFile string) (*CertificateReloader, error) {
-	r := &CertificateReloader{certFile: certFile, keyFile: keyFile}
+func NewCertificateReloader(certFile, keyFile string, options ...ReloaderOption) (*CertificateReloader, error) {
+	r := &CertificateReloader{certFile: certFile, keyFile: keyFile, read: os.ReadFile}
+	for _, option := range options {
+		option(r)
+	}
 	if err := r.load(); err != nil {
 		return nil, err
 	}
@@ -48,7 +71,15 @@ func NewCertificateReloader(certFile, keyFile string) (*CertificateReloader, err
 }
 
 func (r *CertificateReloader) load() error {
-	pair, err := tls.LoadX509KeyPair(r.certFile, r.keyFile)
+	certPEM, err := r.read(r.certFile)
+	if err != nil {
+		return err
+	}
+	keyPEM, err := r.read(r.keyFile)
+	if err != nil {
+		return err
+	}
+	pair, err := tls.X509KeyPair(certPEM, keyPEM)
 	if err != nil {
 		return err
 	}
@@ -118,15 +149,15 @@ func (r *CertificateReloader) GetClientCertificate(*tls.CertificateRequestInfo) 
 // server requires and verifies a client certificate against it (mutual TLS);
 // when nil it performs server-authenticated TLS only. The floor is TLS 1.3; a
 // caller needing different settings can instead build its own config around a
-// CertificateReloader.
+// CertificateReloader. options apply to that reloader (see WithFileReader).
 //
 // Only GetCertificate is set, deliberately: a server that also populates
 // Certificates would have Go consult GetCertificate only when the client sent an
 // SNI name (see (*tls.Config).getCertificate). Peers addressed by IP send no
 // SNI, so a config carrying both would silently serve the static boot-time leaf
 // to them and defeat the reload. GetCertificate alone is always consulted.
-func ServerTLSConfig(certFile, keyFile string, clientCAs *x509.CertPool) (*tls.Config, error) {
-	reloader, err := NewCertificateReloader(certFile, keyFile)
+func ServerTLSConfig(certFile, keyFile string, clientCAs *x509.CertPool, options ...ReloaderOption) (*tls.Config, error) {
+	reloader, err := NewCertificateReloader(certFile, keyFile, options...)
 	if err != nil {
 		return nil, err
 	}
@@ -146,8 +177,8 @@ func ServerTLSConfig(certFile, keyFile string, clientCAs *x509.CertPool) (*tls.C
 // against roots (nil uses the system roots). The floor is TLS 1.3. Only
 // GetClientCertificate is set, so the current leaf is presented on every
 // (re)dial without a static copy shadowing it.
-func ClientTLSConfig(certFile, keyFile string, roots *x509.CertPool) (*tls.Config, error) {
-	reloader, err := NewCertificateReloader(certFile, keyFile)
+func ClientTLSConfig(certFile, keyFile string, roots *x509.CertPool, options ...ReloaderOption) (*tls.Config, error) {
+	reloader, err := NewCertificateReloader(certFile, keyFile, options...)
 	if err != nil {
 		return nil, err
 	}
