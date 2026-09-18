@@ -57,11 +57,16 @@ every job against the matrix `[".", "workcontext"]` except coverage.
 
 ```bash
 go test ./...                                             # the suite
+CODEFLY_TEST_POSTGRES_DSN=postgres://… go test ./receipts/...  # the receipts store
 go test -race ./...                                       # CI runs this separately
 go mod tidy && git diff --exit-code -- go.mod go.sum      # module consistency
 golangci-lint run                                         # v2.13.2, config .golangci.yaml
 go test ./... -coverprofile=cover.out -covermode=atomic -coverpkg=./...
 ```
+
+The receipts store's tests **skip** without `CODEFLY_TEST_POSTGRES_DSN`, and a
+skipped test is green. CI's `coverage` and `race` jobs run a Postgres service
+and set it; a local run that does not is not the gate.
 
 Run each of those a second time from `workcontext/` — it is a separate module
 with its own `go.mod` and `go.sum`, so nothing at the root covers it. Lint finds
@@ -88,6 +93,8 @@ package line.
 | `runtime_environment_file.go` | loading a runtime-written env file |
 | `fixture.go` | the selected fixture, and resolving its principals by role |
 | `tls.go` | workload leaf certificates, reloaded on rotation |
+| `receipts/` | effect receipts: the store, the digest, the replay/conflict interceptor |
+| `receipts/grpctransport/`, `receipts/connecttransport/` | the two transport adapters, split so neither drags the other's dependency in |
 | `workcontext/` | **separate leaf module**: Work Context signing and verification |
 | `workcontext/grpctransport/` | the gRPC carrier, so verify-only consumers never compile grpc |
 
@@ -106,6 +113,10 @@ dependency to it is a design change, not a detail — see the skill below.
 - **An empty injected value is not a value.** A composition templating an unset
   variable ships the name with an empty string; `RuntimeValue` reports `false`
   so it cannot shadow the configuration a caller falls back to. Keep that.
+- **A receipt is written inside the transaction that commits its effect.** A
+  receipt written after the commit leaves a window where the effect exists and
+  the receipt does not, and a recovery landing there reads "no receipt" for an
+  effect that already happened. That is why `receipts.Record` takes a `Tx`.
 - **`compat/**` branches are published artifacts.** Consumers pin them when
   `main` holds an unreleased breaking change, so CI builds them like `main`.
 
