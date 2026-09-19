@@ -73,6 +73,26 @@ jobs:
     timeout-minutes: 5
     permissions:
       contents: write
+    # The receipts store is written in the caller's transaction, admits on a
+    # Postgres advisory lock and is idempotent on a primary key. Its tests skip
+    # without a database, so the job that would report them green is the job
+    # that has to provide one.
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_USER: codefly
+          POSTGRES_PASSWORD: codefly
+          POSTGRES_DB: receipts
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U codefly -d receipts"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      CODEFLY_TEST_POSTGRES_DSN: postgres://codefly:codefly@localhost:5432/receipts?sslmode=disable
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
@@ -107,6 +127,26 @@ jobs:
     strategy:
       matrix:
         module: [ ".", "workcontext" ]
+    # The receipts store is written in the caller's transaction, admits on a
+    # Postgres advisory lock and is idempotent on a primary key. Its tests skip
+    # without a database, so the job that would report them green is the job
+    # that has to provide one.
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_USER: codefly
+          POSTGRES_PASSWORD: codefly
+          POSTGRES_DB: receipts
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U codefly -d receipts"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      CODEFLY_TEST_POSTGRES_DSN: postgres://codefly:codefly@localhost:5432/receipts?sslmode=disable
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
