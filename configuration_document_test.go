@@ -24,9 +24,10 @@ func TestConfigurationDocumentsReachSDKFromFilesAndRuntimeCarrier(t *testing.T) 
 	secret := `{"credentials":{"token":"private-sentinel"}}`
 	require.NoError(t, os.WriteFile(filepath.Join(dir, "settings.yaml"), []byte(public), 0o600))
 	require.NoError(t, os.WriteFile(filepath.Join(dir, "credentials.secret.yaml"), []byte(secret), 0o600))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "overrides.yaml"), []byte("null\n"), 0o600))
 	infos, err := configurations.LoadConfigurationInformationsFromFiles(ctx, dir)
 	require.NoError(t, err)
-	require.Len(t, infos, 2)
+	require.Len(t, infos, 3)
 	manager := resources.NewEnvironmentVariableManager()
 	manager.SetEnvironment(&basev0.Environment{Name: "staging"})
 	require.NoError(t, manager.AddConfigurations(ctx, &basev0.Configuration{Origin: "app/api", Infos: infos}))
@@ -59,11 +60,46 @@ func TestConfigurationDocumentsReachSDKFromFilesAndRuntimeCarrier(t *testing.T) 
 	err = query.DecodeSecretDocument("credentials", &incompatible)
 	require.Error(t, err)
 	require.NotContains(t, err.Error(), "private-sentinel")
+	data, err = query.ConfigurationDocument("overrides")
+	require.NoError(t, err)
+	require.Equal(t, "null", string(data))
+	kept := map[string]any{"kept": true}
+	err = query.DecodeConfigurationDocument("overrides", &kept)
+	require.ErrorIs(t, err, codefly.ErrConfigurationDocumentNull)
+	require.Equal(t, map[string]any{"kept": true}, kept, "an explicit null must not overwrite the destination")
 	_, err = codefly.For(ctx).Service("other").ConfigurationDocument("settings")
-	require.Error(t, err)
+	require.ErrorIs(t, err, codefly.ErrConfigurationDocumentMissing)
 	t.Setenv(resources.EnvironmentPrefix, "production")
 	_, err = query.ConfigurationDocument("settings")
-	require.Error(t, err)
+	require.ErrorIs(t, err, codefly.ErrConfigurationDocumentMissing)
+}
+
+func TestUnreadableConfigurationDocumentCarriersAreDistinctFromMissingOnes(t *testing.T) {
+	t.Cleanup(func() { require.NoError(t, codefly.LoadEnvironmentVariables()) })
+	t.Setenv(resources.EnvironmentPrefix, "staging")
+	truncated := resources.ConfigurationDocumentKey(resources.ConfigurationWorkspace, "credentials", "staging", true)
+	t.Setenv(truncated, `{"schema":"`+resources.ConfigurationDocumentSchema+
+		`","origin":"`+resources.ConfigurationWorkspace+
+		`","name":"credentials","environment":"staging","secret":true,"content":{"token":"private-sentinel"`)
+	future := resources.ConfigurationDocumentKey(resources.ConfigurationWorkspace, "policy", "staging", false)
+	t.Setenv(future, `{"schema":"codefly/configuration-document/v2","origin":"`+resources.ConfigurationWorkspace+
+		`","name":"policy","environment":"staging","secret":false,"content":{"token":"private-sentinel"}}`)
+	require.NoError(t, codefly.LoadEnvironmentVariables())
+	query := codefly.For(context.Background())
+
+	_, err := query.WorkspaceSecretDocument("credentials")
+	require.ErrorIs(t, err, codefly.ErrConfigurationDocumentUnreadable)
+	require.NotErrorIs(t, err, codefly.ErrConfigurationDocumentMissing)
+	require.NotContains(t, err.Error(), "private-sentinel")
+
+	_, err = query.WorkspaceConfigurationDocument("policy")
+	require.ErrorIs(t, err, codefly.ErrConfigurationDocumentUnreadable)
+	require.NotContains(t, err.Error(), "private-sentinel")
+
+	var destination map[string]any
+	err = query.DecodeWorkspaceSecretDocument("credentials", &destination)
+	require.ErrorIs(t, err, codefly.ErrConfigurationDocumentUnreadable)
+	require.NotContains(t, err.Error(), "private-sentinel")
 }
 
 func TestInjectConfigurationDocumentsIsAtomicAndSeparatesWorkspaceScope(t *testing.T) {
@@ -91,9 +127,15 @@ func TestInjectConfigurationDocumentsIsAtomicAndSeparatesWorkspaceScope(t *testi
 	data, err = query.WorkspaceConfigurationDocument("policy")
 	require.NoError(t, err)
 	require.Equal(t, `{"enabled":true}`, string(data))
+	conf.Infos[0].Data.Kind = "toml"
+	conf.Infos[0].Data.Content = []byte(`enabled = true`)
+	require.Error(t, codefly.InjectConfigurations(conf))
+	data, err = query.WorkspaceConfigurationDocument("policy")
+	require.NoError(t, err)
+	require.Equal(t, `{"enabled":true}`, string(data))
 	require.NoError(t, codefly.InjectConfigurations())
 	_, err = query.WorkspaceConfigurationDocument("policy")
-	require.Error(t, err)
+	require.ErrorIs(t, err, codefly.ErrConfigurationDocumentMissing)
 }
 
 func TestWorkspaceSecretDocumentHasIndependentTypedScope(t *testing.T) {

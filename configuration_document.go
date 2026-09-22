@@ -3,11 +3,33 @@ package codefly
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"strings"
 
 	"github.com/codefly-dev/core/resources"
+)
+
+// A document lookup reports one of these outcomes so a caller can tell an
+// absent document from a broken one, and both from a document that exists and
+// carries an explicit JSON null.
+var (
+	// ErrConfigurationDocumentMissing reports that the selected scope carries
+	// no document. An empty carrier is absent, not an empty document.
+	ErrConfigurationDocumentMissing = errors.New("no document is provisioned in the selected scope")
+
+	// ErrConfigurationDocumentUnreadable reports that the selected scope
+	// carries a document this SDK cannot read: a malformed carrier, one whose
+	// scope does not match the request, or one declaring a schema this SDK
+	// does not implement. The reported reason carries no document content.
+	ErrConfigurationDocumentUnreadable = errors.New("document carrier cannot be read")
+
+	// ErrConfigurationDocumentNull reports an explicit JSON null to a typed
+	// decoder, which would otherwise leave the destination at its zero value
+	// and look like a document that was never provisioned. The raw accessors
+	// return the document's null bytes instead.
+	ErrConfigurationDocumentNull = errors.New("document is an explicit JSON null")
 )
 
 // ConfigurationDocument returns an independent JSON document from the selected
@@ -39,7 +61,7 @@ func (q *Query) DecodeConfigurationDocument(name string, destination any) error 
 	if err != nil {
 		return err
 	}
-	return decodeDocument(content, destination)
+	return decodeDocument(name, content, destination)
 }
 
 // DecodeSecretDocument decodes a service secret without including its contents
@@ -49,7 +71,7 @@ func (q *Query) DecodeSecretDocument(name string, destination any) error {
 	if err != nil {
 		return err
 	}
-	return decodeDocument(content, destination)
+	return decodeDocument(name, content, destination)
 }
 
 // DecodeWorkspaceConfigurationDocument decodes a public workspace document.
@@ -58,7 +80,7 @@ func (q *Query) DecodeWorkspaceConfigurationDocument(name string, destination an
 	if err != nil {
 		return err
 	}
-	return decodeDocument(content, destination)
+	return decodeDocument(name, content, destination)
 }
 
 // DecodeWorkspaceSecretDocument decodes a secret workspace document without
@@ -68,14 +90,17 @@ func (q *Query) DecodeWorkspaceSecretDocument(name string, destination any) erro
 	if err != nil {
 		return err
 	}
-	return decodeDocument(content, destination)
+	return decodeDocument(name, content, destination)
 }
 
-func decodeDocument(content json.RawMessage, destination any) error {
+func decodeDocument(name string, content json.RawMessage, destination any) error {
+	if string(bytes.TrimSpace(content)) == "null" {
+		return fmt.Errorf("configuration document %q: %w", name, ErrConfigurationDocumentNull)
+	}
 	decoder := json.NewDecoder(bytes.NewReader(content))
 	decoder.UseNumber()
 	if err := decoder.Decode(destination); err != nil {
-		return fmt.Errorf("configuration document does not match the requested destination")
+		return fmt.Errorf("configuration document %q does not match the requested destination", name)
 	}
 	return nil
 }
@@ -96,7 +121,11 @@ func (q *Query) configurationDocument(origin, name string, secret bool) (json.Ra
 		found = err == nil
 	}
 	if !found || strings.TrimSpace(value) == "" {
-		return nil, fmt.Errorf("configuration document %q is not available in the selected scope", name)
+		return nil, fmt.Errorf("configuration document %q: %w", name, ErrConfigurationDocumentMissing)
 	}
-	return resources.DecodeConfigurationDocument(value, origin, name, environment, secret)
+	content, err := resources.DecodeConfigurationDocument(value, origin, name, environment, secret)
+	if err != nil {
+		return nil, fmt.Errorf("configuration document %q: %w: %v", name, ErrConfigurationDocumentUnreadable, err)
+	}
+	return content, nil
 }
