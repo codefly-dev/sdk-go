@@ -77,6 +77,11 @@ func TestInjectConfigurationDocumentsIsAtomicAndSeparatesWorkspaceScope(t *testi
 	data, err := query.WorkspaceConfigurationDocument("policy")
 	require.NoError(t, err)
 	require.Equal(t, `{"enabled":true}`, string(data))
+	var policy struct {
+		Enabled bool `json:"enabled"`
+	}
+	require.NoError(t, query.DecodeWorkspaceConfigurationDocument("policy", &policy))
+	require.True(t, policy.Enabled)
 	_, err = query.ConfigurationDocument("policy")
 	require.Error(t, err)
 	conf.Infos[0].Data.Content = []byte(`{"private-sentinel":`)
@@ -89,4 +94,25 @@ func TestInjectConfigurationDocumentsIsAtomicAndSeparatesWorkspaceScope(t *testi
 	require.NoError(t, codefly.InjectConfigurations())
 	_, err = query.WorkspaceConfigurationDocument("policy")
 	require.Error(t, err)
+}
+
+func TestWorkspaceSecretDocumentHasIndependentTypedScope(t *testing.T) {
+	t.Setenv(resources.EnvironmentPrefix, "staging")
+	t.Cleanup(func() { require.NoError(t, codefly.InjectConfigurations()) })
+	conf := &basev0.Configuration{Origin: resources.ConfigurationWorkspace, Infos: []*basev0.ConfigurationInformation{{
+		Name: "credentials", Data: &basev0.ConfigurationData{Kind: "json", Secret: true, Content: []byte(`{"token":"private-sentinel"}`)},
+	}}}
+	require.NoError(t, codefly.InjectConfigurations(conf))
+	query := codefly.For(context.Background())
+	var credentials struct {
+		Token string `json:"token"`
+	}
+	require.NoError(t, query.DecodeWorkspaceSecretDocument("credentials", &credentials))
+	require.Equal(t, "private-sentinel", credentials.Token)
+	_, err := query.WorkspaceConfigurationDocument("credentials")
+	require.Error(t, err)
+	var incompatible int
+	err = query.DecodeWorkspaceSecretDocument("credentials", &incompatible)
+	require.Error(t, err)
+	require.NotContains(t, err.Error(), "private-sentinel")
 }
