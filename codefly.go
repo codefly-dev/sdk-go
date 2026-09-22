@@ -129,8 +129,16 @@ func InjectConfigurations(configurations ...*basev0.Configuration) error {
 				}
 			}
 		}
-		envs := resources.ConfigurationAsEnvironmentVariables(configuration, false)
-		envs = append(envs, resources.ConfigurationAsEnvironmentVariables(configuration, true)...)
+		environment := localConfigurationEnvironmentName()
+		envs, err := resources.ConfigurationAsEnvironmentVariables(configuration, environment, false)
+		if err != nil {
+			return err
+		}
+		secrets, err := resources.ConfigurationAsEnvironmentVariables(configuration, environment, true)
+		if err != nil {
+			return err
+		}
+		envs = append(envs, secrets...)
 		for _, env := range envs {
 			if env == nil || strings.TrimSpace(env.Key) == "" {
 				continue
