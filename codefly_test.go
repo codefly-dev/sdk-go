@@ -72,8 +72,10 @@ func TestEnvironmentVariables(t *testing.T) {
 			},
 		},
 	}
-	secretEnvs := resources.ConfigurationAsEnvironmentVariables(outputConf, true)
-	envs := resources.ConfigurationAsEnvironmentVariables(outputConf, false)
+	secretEnvs, err := resources.ConfigurationAsEnvironmentVariables(outputConf, "local", true)
+	assert.NoError(t, err)
+	envs, err := resources.ConfigurationAsEnvironmentVariables(outputConf, "local", false)
+	assert.NoError(t, err)
 
 	for _, e := range secretEnvs {
 		err = os.Setenv(e.Key, e.ValueAsString())
