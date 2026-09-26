@@ -57,6 +57,12 @@ func (execution ExecutionContext) OperationID() string {
 // WithGRPCExecutionContext attaches one execution context to outgoing gRPC
 // metadata while preserving unrelated metadata. Existing carrier values are
 // rejected rather than overwritten or joined.
+//
+// A Work Context is bound to one audience. A service calling another service
+// attaches a context the authority exchanged for the callee's audience
+// (ExchangeWorkContextAudience), never the one it received: the callee's
+// audience check rejects a forwarded context. Nothing here reads incoming
+// metadata, so this helper never forwards on its own.
 func WithGRPCExecutionContext(
 	ctx context.Context,
 	execution ExecutionContext,
