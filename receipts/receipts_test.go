@@ -305,9 +305,9 @@ func TestMemoryStoreRefusesAnIncompleteReceipt(t *testing.T) {
 // that rather than queueing behind an attempt whose answer it can no longer use.
 func TestSerializeStopsWaitingWhenTheCallerGivesUp(t *testing.T) {
 	store := receipts.NewMemoryStore()
-	release, err := store.Serialize(t.Context(), testTenant, "effect-1", fixture.OperationMethod)
+	held, err := store.Serialize(t.Context(), testTenant, "effect-1", fixture.OperationMethod)
 	require.NoError(t, err)
-	defer release()
+	defer held.Release()
 
 	waiting, cancel := context.WithTimeout(t.Context(), 50*time.Millisecond)
 	defer cancel()

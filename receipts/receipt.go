@@ -99,13 +99,25 @@ type Store interface {
 	// Lookup reads the receipt of one effect.
 	Lookup(ctx context.Context, tenant, effectID, method string) (*Receipt, bool, error)
 	// Serialize blocks until this process holds the right to attempt one
-	// effect, and returns the release to call once the attempt has finished.
-	// Two concurrent first attempts of one effect therefore do not both find no
-	// receipt and both run the handler.
-	Serialize(ctx context.Context, tenant, effectID, method string) (release func(), err error)
+	// effect. Two concurrent first attempts of one effect therefore do not both
+	// find no receipt and both run the handler. The holder reads the receipt
+	// through the Held it returns, never through Lookup: a store that pins a
+	// connection for the hold must not need a second one to read under it, or
+	// attempts that each hold one exhaust a bounded pool and wait on each other
+	// for ever.
+	Serialize(ctx context.Context, tenant, effectID, method string) (Held, error)
 	// Sweep removes receipts committed before the cutoff and reports how many
 	// it removed. See the package documentation before choosing a cutoff.
 	Sweep(ctx context.Context, olderThan time.Time) (int64, error)
+}
+
+// Held is the right to attempt one effect, from Serialize until Release.
+type Held interface {
+	// Lookup reads the effect's receipt under the hold, on whatever the hold
+	// already occupies.
+	Lookup(ctx context.Context) (*Receipt, bool, error)
+	// Release gives up the right. It is safe to call more than once.
+	Release()
 }
 
 func validateEffectKey(tenant, effectID, method string) error {

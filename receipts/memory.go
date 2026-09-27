@@ -74,7 +74,7 @@ func (s *MemoryStore) Lookup(_ context.Context, tenant, effectID, method string)
 // Serialize hands out the right to attempt one effect, waiting for the holder
 // to release it. Waiting is interruptible so a caller whose deadline passes
 // reports that rather than queueing behind an attempt it can no longer use.
-func (s *MemoryStore) Serialize(ctx context.Context, tenant, effectID, method string) (func(), error) {
+func (s *MemoryStore) Serialize(ctx context.Context, tenant, effectID, method string) (Held, error) {
 	if err := validateEffectKey(tenant, effectID, method); err != nil {
 		return nil, err
 	}
@@ -86,12 +86,12 @@ func (s *MemoryStore) Serialize(ctx context.Context, tenant, effectID, method st
 			released := make(chan struct{})
 			s.held[key] = released
 			s.mutex.Unlock()
-			return sync.OnceFunc(func() {
+			return &memoryHold{store: s, key: key, release: sync.OnceFunc(func() {
 				s.mutex.Lock()
 				delete(s.held, key)
 				s.mutex.Unlock()
 				close(released)
-			}), nil
+			})}, nil
 		}
 		s.mutex.Unlock()
 		select {
@@ -128,3 +128,15 @@ type noRows struct{}
 
 func (noRows) LastInsertId() (int64, error) { return 0, nil }
 func (noRows) RowsAffected() (int64, error) { return 0, nil }
+
+type memoryHold struct {
+	store   *MemoryStore
+	key     effectKey
+	release func()
+}
+
+func (h *memoryHold) Lookup(ctx context.Context) (*Receipt, bool, error) {
+	return h.store.Lookup(ctx, h.key.tenant, h.key.effectID, h.key.method)
+}
+
+func (h *memoryHold) Release() { h.release() }

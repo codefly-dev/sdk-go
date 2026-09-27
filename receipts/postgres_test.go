@@ -295,3 +295,47 @@ func committingHandler(
 		return committed, nil
 	}
 }
+
+// An attempt occupies exactly one of the store's connections from Serialize to
+// Release: it reads the receipt under the hold on the connection the hold pins.
+// A store whose pool has room for one attempt and its handler's transaction
+// therefore serves any number of concurrent first attempts. Reading on a
+// second pooled connection instead makes every holder wait for a connection
+// only another holder can give back, and the attempts wait on each other until
+// their deadline.
+func TestPostgresAttemptsNeverWaitOnEachOtherForAConnection(t *testing.T) {
+	store, db := postgres(t)
+	db.SetMaxOpenConns(2) // one hold, one handler transaction
+	built := registry(t, fixture.Operation())
+	tenant := tenantOf(t)
+	guard, err := receipts.New(receipts.Options{
+		Store:  store,
+		Tenant: func(context.Context) (string, error) { return tenant, nil },
+		Files:  built.Files,
+		Types:  built.Types,
+	})
+	require.NoError(t, err)
+
+	ctx, cancel := context.WithTimeout(t.Context(), 20*time.Second)
+	defer cancel()
+	calls := &atomic.Int64{}
+	const attempts = 8
+	errs := make([]error, attempts)
+	start := make(chan struct{})
+	group := sync.WaitGroup{}
+	group.Add(attempts)
+	for index := range attempts {
+		go func() {
+			defer group.Done()
+			<-start
+			_, errs[index] = guard.Handle(ctx, fixture.OperationMethod, "effect-1",
+				request(t, built, "in"), committingHandler(t, built, store, db, calls))
+		}()
+	}
+	close(start)
+	group.Wait()
+	for index, attemptErr := range errs {
+		require.NoError(t, attemptErr, "attempt %d", index)
+	}
+	require.Equal(t, int64(1), calls.Load(), "the effect ran more than once")
+}
