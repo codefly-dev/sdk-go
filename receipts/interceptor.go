@@ -112,13 +112,13 @@ func (i *Interceptor) Handle(
 		return nil, err
 	}
 
-	release, err := i.store.Serialize(ctx, tenant, effectID, method)
+	held, err := i.store.Serialize(ctx, tenant, effectID, method)
 	if err != nil {
 		return nil, err
 	}
-	defer release()
+	defer held.Release()
 
-	committed, found, err := i.store.Lookup(ctx, tenant, effectID, method)
+	committed, found, err := held.Lookup(ctx)
 	if err != nil {
 		return nil, err
 	}
