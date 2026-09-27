@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"os"
 	"strings"
 
 	"github.com/codefly-dev/core/resources"
@@ -113,7 +112,10 @@ func (q *Query) configurationDocument(origin, name string, secret bool) (json.Ra
 	key := resources.ConfigurationDocumentKey(origin, name, environment, secret)
 	value, found := injectedEnvironmentValue(key)
 	if !found || strings.TrimSpace(value) == "" {
-		value, found = os.LookupEnv(key)
+		var err error
+		if value, found, err = processValue(key); err != nil {
+			return nil, fmt.Errorf("configuration document %q: %w: %v", name, ErrConfigurationDocumentUnreadable, err)
+		}
 	}
 	if !found || strings.TrimSpace(value) == "" {
 		var err error

@@ -98,6 +98,15 @@ func LoadEnvironmentVariables() error {
 		// first-match lookups then returned the stale value forever.
 		values[name] = value
 	}
+	// A value delivered by file is part of the snapshot like any other: its
+	// carrier names the file, and the value is what the file holds.
+	carried, err := fileCarriedValues(os.Environ())
+	if err != nil {
+		return err
+	}
+	for name, value := range carried {
+		values[name] = value
+	}
 	environmentVariablesMu.Lock()
 	processEnvironmentVariables = values
 	rebuildEnvironmentSnapshotLocked()
