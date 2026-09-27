@@ -221,8 +221,8 @@ func (q *Query) Configuration(key string, name string) (string, error) {
 	legacyKey := fmt.Sprintf("%s__%s__%s",
 		resources.ServiceConfigurationEnvironmentKeyPrefixFromUnique(unique),
 		strings.ToUpper(key), strings.ToUpper(name))
-	if value, ok := runtimeServiceConfigurationValue(q.ctx, envKey, legacyKey, strings.ReplaceAll(legacyKey, "-", "_")); ok {
-		return value, nil
+	if value, ok, err := runtimeServiceConfigurationValue(q.ctx, envKey, legacyKey, strings.ReplaceAll(legacyKey, "-", "_")); err != nil || ok {
+		return value, err
 	}
 	return q.localConfigurationValue(key, name, false)
 }
@@ -234,13 +234,13 @@ func (q *Query) Secret(key string, name string) (string, error) {
 	legacyKey := fmt.Sprintf("%s__%s__%s",
 		resources.ServiceSecretConfigurationEnvironmentKeyPrefixFromUnique(unique),
 		strings.ToUpper(key), strings.ToUpper(name))
-	if value, ok := runtimeServiceConfigurationValue(q.ctx, envKey, legacyKey, strings.ReplaceAll(legacyKey, "-", "_")); ok {
-		return value, nil
+	if value, ok, err := runtimeServiceConfigurationValue(q.ctx, envKey, legacyKey, strings.ReplaceAll(legacyKey, "-", "_")); err != nil || ok {
+		return value, err
 	}
 	return q.localConfigurationValue(key, name, true)
 }
 
-func runtimeServiceConfigurationValue(ctx context.Context, candidates ...string) (string, bool) {
+func runtimeServiceConfigurationValue(ctx context.Context, candidates ...string) (string, bool, error) {
 	// Capability names historically preserved '-' while released runtime
 	// agents normalize it to '_'. Prefer the current canonical spelling, then
 	// accept the legacy carrier so SDK users remain independent of agent version.
@@ -251,16 +251,16 @@ func runtimeServiceConfigurationValue(ctx context.Context, candidates ...string)
 		}
 		seen[candidate] = struct{}{}
 		if value, ok := injectedEnvironmentValue(candidate); ok {
-			return value, true
+			return value, true, nil
 		}
-		if value, ok := os.LookupEnv(candidate); ok && value != "" {
-			return value, true
+		if value, ok, err := processValue(candidate); err != nil || ok {
+			return value, ok, err
 		}
 		if value, err := resources.FindValueInEnvironmentVariables(ctx, candidate, codeflyEnvironmentVariables()); err == nil && value != "" {
-			return value, true
+			return value, true, nil
 		}
 	}
-	return "", false
+	return "", false, nil
 }
 
 // WorkspaceConfiguration returns one non-secret workspace configuration value.
@@ -299,8 +299,8 @@ func (q *Query) workspaceConfigurationValue(prefix string, name string, key stri
 		if value, ok := injectedEnvironmentValue(envKey); ok {
 			return value, nil
 		}
-		if value, ok := os.LookupEnv(envKey); ok && value != "" {
-			return value, nil
+		if value, ok, err := processValue(envKey); err != nil || ok {
+			return value, err
 		}
 		if value, err := resources.FindValueInEnvironmentVariables(q.ctx, envKey, codeflyEnvironmentVariables()); err == nil && value != "" {
 			return value, nil
