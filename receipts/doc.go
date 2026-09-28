@@ -36,4 +36,24 @@
 // treats as inconclusive rather than as "the effect did not happen". Retention
 // must therefore exceed the runtime's maximum recovery horizon: sweeping at
 // DefaultRetention is safe only while that horizon stays shorter than it.
+//
+// # Row-level security
+//
+// Every statement the Postgres store issues filters by tenant. A module that
+// also puts the receipts table under a row-level security policy — one that
+// reads a transaction-local tenant setting — must let the store bind that
+// setting, or the policy hides every receipt from the store's own reads and a
+// recovery reads "no receipt" for an effect that committed:
+//
+//	store, err := receipts.NewPostgresStore(db, receipts.WithTenantScope(
+//	        func(ctx context.Context, tx *sql.Tx, tenant string) error {
+//	                _, err := tx.ExecContext(ctx,
+//	                        `SELECT set_config('app.current_tenant', $1, true)`, tenant)
+//	                return err
+//	        }))
+//
+// Record is unaffected: it writes in the handler's transaction, which the
+// handler binds as it binds its effect. Sweep removes every tenant's receipts
+// in one statement, which such a policy mostly refuses; sweep each tenant with
+// SweepTenant instead, or run Sweep as a role the policies admit.
 package receipts
