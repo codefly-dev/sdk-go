@@ -15,3 +15,16 @@ module `github.com/codefly-dev/sdk-go/workcontext` instead of the full SDK. It
 depends only on the shared `codefly/base/v0` proto types, so a consumer's
 `go.sum` stays a handful of entries rather than inheriting core's transitive
 tail.
+
+## Tenant-scoped effect receipts
+
+Services whose receipt table uses row-level security should construct their
+Postgres receipt store with `receipts.WithTenantScope`. The hook binds the
+verified tenant with transaction-local settings before `Lookup`,
+`Held.Lookup`, or `SweepTenant` runs; a failed binding fails the call.
+`Record` continues to use the caller's already-bound effect transaction.
+
+Use `SweepTenant` for tenant-by-tenant retention. `Sweep` remains an unscoped,
+all-tenant operation and needs a role the table's policies admit. See the
+[receipts package documentation](receipts/doc.go) for the binding example
+and retention requirements.
