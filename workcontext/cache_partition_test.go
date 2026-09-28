@@ -381,3 +381,96 @@ func TestAuthorizationViewDigestCanonicalizesScopeOrder(t *testing.T) {
 	_, err = DeriveCachePartition(VerifiedWorkContext{claims: ordered}, nil, ByAuthorizationView())
 	require.NoError(t, err)
 }
+
+// viewerPartition is the partition for a token under ByViewer, verified like
+// every other partition a property test derives.
+func (w *partitionWorld) viewerPartition(token WorkContextToken) CachePartition {
+	w.t.Helper()
+	viewer, err := DeriveCachePartition(w.verify(token), ByViewer())
+	require.NoError(w.t, err)
+	require.False(w.t, viewer.WriteAround)
+	return viewer
+}
+
+// Two callers with the same tenant, the same scopes and the same authorization
+// revision are still different callers. A service that authorizes per subject —
+// per-subject resource grants, or a row predicate over the caller's identity —
+// computes a different result for each, so they must not share a partition.
+// Under ByAuthorizationView they do, which is why anything viewer-dependent
+// needs ByViewer: every reader of a wiki holds documents:[read], and a revision
+// is a number they share.
+func TestDeriveCachePartitionByViewerSeparatesSubjectsSharingAView(t *testing.T) {
+	world := newPartitionWorld(t)
+	random := rand.New(rand.NewPCG(11, 3))
+	for iteration := range partitionPropertyIterations {
+		tenant := fmt.Sprintf("tenant-%d", iteration)
+		revision := random.Uint64()
+		scopes := randomScopes(random)
+
+		first := partitionStartInput(random, tenant, revision, scopes)
+		first.OwnerPrincipalID = "viewer-one"
+		second := first
+		second.OwnerPrincipalID = "viewer-two"
+
+		firstToken, _, err := world.signer.StartTask(first)
+		require.NoError(t, err)
+		secondToken, _, err := world.signer.StartTask(second)
+		require.NoError(t, err)
+
+		// Identical under the coarser options: same tenant, same scopes, same
+		// revision. That is the collision ByViewer exists to remove.
+		firstTenant, firstView := world.partitions(firstToken)
+		secondTenant, secondView := world.partitions(secondToken)
+		require.Equal(t, firstTenant.Key, secondTenant.Key, "iteration %d", iteration)
+		require.Equal(t, firstView.Key, secondView.Key, "iteration %d", iteration)
+
+		require.NotEqual(t, world.viewerPartition(firstToken).Key, world.viewerPartition(secondToken).Key,
+			"two subjects sharing a view must not share a viewer partition, iteration %d", iteration)
+
+		// Same subject, same view: still one partition, or ByViewer would make
+		// the cache useless rather than safe.
+		repeat := first
+		repeat.TaskID = fmt.Sprintf("task-%d", random.Uint64())
+		repeat.SessionID = fmt.Sprintf("session-%d", random.Uint64())
+		repeatToken, _, err := world.signer.StartTask(repeat)
+		require.NoError(t, err)
+		require.Equal(t, world.viewerPartition(firstToken).Key, world.viewerPartition(repeatToken).Key,
+			"iteration %d", iteration)
+	}
+}
+
+// A delegated actor is the caller. Two agents acting for one owner with the
+// same granted scopes are different viewers, and the owner is a third — so a
+// per-subject result computed for one must not be served to the others.
+func TestDeriveCachePartitionByViewerFollowsTheEffectiveActor(t *testing.T) {
+	world := newPartitionWorld(t)
+	random := rand.New(rand.NewPCG(13, 5))
+	scopes := randomScopes(random)
+	owner, _, err := world.signer.StartTask(partitionStartInput(random, "tenant", 9, scopes))
+	require.NoError(t, err)
+
+	child := func(principal string) WorkContextToken {
+		token, _, err := world.signer.StartChildSession(owner, StartChildSessionInput{
+			SessionID: "child-" + principal,
+			Actor: &basev0.WorkActorV1{
+				PrincipalId: principal, PrincipalKind: "agent", DelegationId: "delegation",
+				GrantedScopes: scopes,
+			},
+		})
+		require.NoError(t, err)
+		return token
+	}
+	first, second := child("agent-one"), child("agent-two")
+
+	// The view is identical: same scopes, same revision, same tenant.
+	_, ownerView := world.partitions(owner)
+	_, firstView := world.partitions(first)
+	require.Equal(t, ownerView.Key, firstView.Key)
+
+	ownerViewer := world.viewerPartition(owner).Key
+	firstViewer := world.viewerPartition(first).Key
+	secondViewer := world.viewerPartition(second).Key
+	require.NotEqual(t, firstViewer, secondViewer, "two agents are two viewers")
+	require.NotEqual(t, ownerViewer, firstViewer, "an agent acting for an owner is not the owner")
+	require.NotEqual(t, ownerViewer, secondViewer)
+}
