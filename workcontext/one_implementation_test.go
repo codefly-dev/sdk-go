@@ -75,6 +75,13 @@ var mintEndpointJSONTypes = []string{"mintRequest", "mintResponse"}
 // JSON-encode a capability, nothing may declare a type or function that reads
 // as a second WorkContext surface, and the verification entrypoint this module
 // exports is driven by core's own conformance fixtures.
+//
+// It guards the tree it runs in, which is all a test can do: a branch's CI run
+// uses that branch's own tree, so this file never executes on the release lines
+// that still carry the deleted implementation.
+// scripts/check-one-implementation.sh is the other half — it reads every ref CI
+// builds out of the object database — and docs/cutover.md says when those refs
+// are retired and by whom.
 func TestNoSecondWorkContextImplementation(t *testing.T) {
 	files := moduleFiles(t)
 	require.NotEmpty(t, files, "the gate scanned no files, so it would pass for an empty module")

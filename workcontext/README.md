@@ -74,6 +74,17 @@ signature failure, which is the misdiagnosis the whole rule exists to prevent.
 That is why the gate lives here, in the consumer: core cannot see who
 re-implements it.
 
+**And one sweep, because a test guards only its own tree.** A branch's CI run
+uses that branch's own tree and workflow, so neither test above executes on the
+release lines under `compat/**`, which still carry the deleted implementation in
+full — deliberately, because back-porting the deletion would break the consumer
+a release line exists for. `scripts/check-one-implementation.sh` (the
+`one implementation` workflow) reads every ref CI builds out of the object
+database and names the ones carrying a signer or a verifier. It is **red by
+design** until those refs are retired, which is a visible countdown rather than
+a silence; `docs/cutover.md` holds the precondition and the commands, and the
+retirement is the owner's act at the cutover.
+
 ## The model: mint once, sealed, verified exactly
 
 A module process obtains its credential **once per execution**, bound to the

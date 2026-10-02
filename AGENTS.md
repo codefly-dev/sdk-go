@@ -126,7 +126,11 @@ see the skill below.
   the entry point we export. A claim added to the wire is added to the proto in
   core, never to an encoder here. This repository once held a second
   implementation signing hand-written JSON: a token from either format failed
-  *signature* verification in the other, which reads like a rotated key.
+  *signature* verification in the other, which reads like a rotated key. A test
+  guards only its own tree, so `scripts/check-one-implementation.sh` sweeps
+  every ref CI builds; it is **red by design** while a release line still
+  carries the old implementation — `docs/cutover.md` says who retires those and
+  when, and it is never an agent.
 - **A credential is sealed or it is not a credential.** Every field of
   `workcontext.Seal` is required at mint and at verify, an operation binding
   carries its id, revision and incarnation or none of them, and `Attach`
@@ -141,6 +145,8 @@ see the skill below.
   effect that already happened. That is why `receipts.Record` takes a `Tx`.
 - **`compat/**` branches are published artifacts.** Consumers pin them when
   `main` holds an unreleased breaking change, so CI builds them like `main`.
+  Never back-port a breaking deletion into one: it breaks the consumer the line
+  exists for. A line is retired, by the owner, once its last consumer repins.
 
 ## Procedures
 
