@@ -19,12 +19,13 @@ type Options struct {
 	Store Store
 	// Tenant reads the tenant of the caller's verified Work Context.
 	//
-	// Receipts never verifies a Work Context itself — the verifier is the
-	// separate github.com/codefly-dev/sdk-go/workcontext module, which the root
-	// SDK must not depend on — so the module's own authentication interceptor,
-	// which has already verified the context by the time this one runs, says
-	// where the tenant is. Required: a receipt without a tenant would let one
-	// tenant read another's outcome.
+	// Receipts never verifies a Work Context itself — the verifier is
+	// github.com/codefly-dev/core/workcontext, the capability's one
+	// implementation, which the service reaches through the separate
+	// github.com/codefly-dev/sdk-go/workcontext module — so the service's own
+	// authentication interceptor, which has already verified the capability by
+	// the time this one runs, says where the tenant is. Required: a receipt
+	// without a tenant would let one tenant read another's outcome.
 	Tenant func(ctx context.Context) (string, error)
 	// Files is where the operation option is read from. Nil means
 	// protoregistry.GlobalFiles, which is what the module's own generated code
