@@ -52,6 +52,16 @@ var (
 	// 401 — since an otherwise-valid context must not be dropped during an outage.
 	ErrWorkContextUnavailable = errors.New("Codefly Work Context verification unavailable")
 	ErrWorkContextDenied      = errors.New("Codefly Work Context scope denied")
+	// ErrWorkContextSuperseded marks a credential that was sound when it was
+	// minted and has been overtaken since: the principal epoch, the
+	// installation revision or the binding revision has moved on. It is
+	// distinct from ErrWorkContextInvalid because the two need opposite
+	// responses — a superseded credential is replaced by minting again, and
+	// the holder can do that unaided, while an invalid one never becomes
+	// valid. It is equally distinct from ErrWorkContextUnavailable: nothing is
+	// unreachable, so retrying the same credential is guaranteed to fail and a
+	// retry loop is the one thing a caller must not do.
+	ErrWorkContextSuperseded = errors.New("Codefly Work Context superseded")
 )
 
 // WorkContextToken is an opaque signed capability. Its encoded representation
@@ -79,8 +89,20 @@ func ParseWorkContextToken(encoded string) (WorkContextToken, error) {
 	return WorkContextToken{encoded: encoded}, nil
 }
 
-// AttachWorkContext installs a token without exposing the carrier name to
-// application code.
+// AttachWorkContext installs a credential on an outbound request without
+// exposing the carrier names to application code. It sets the signed
+// capability and, beside it, the installation the capability is sealed to, so
+// every outbound request carries the installation the host will re-check the
+// call against.
+//
+// The installation headers are a pre-check the host may refuse on cheaply.
+// They are not authority and no verifier may prefer them: they are read out of
+// the token here without checking its signature, which is sound only because
+// nothing downstream trusts them. The installation that governs a call is the
+// sealed one.
+//
+// A token with no readable seal is refused rather than attached bare. There is
+// no request on which an unsealed credential is better than no credential.
 func AttachWorkContext(request *http.Request, token WorkContextToken) error {
 	if request == nil {
 		return fmt.Errorf("%w: nil HTTP request", ErrWorkContextInvalid)
@@ -88,8 +110,35 @@ func AttachWorkContext(request *http.Request, token WorkContextToken) error {
 	if token.empty() {
 		return fmt.Errorf("%w: empty token", ErrWorkContextInvalid)
 	}
+	_, seal, _, err := readSealedToken(token)
+	if err != nil {
+		return err
+	}
 	request.Header.Set(WorkContextHeaderName, token.encoded)
+	request.Header.Set(InstallationIDHeaderName, seal.InstallationID)
+	request.Header.Set(InstallationRevisionHeaderName, decimal(seal.InstallationRevision))
 	return nil
+}
+
+// readSealedToken reads a token's own content without checking its signature.
+// It exists for the two jobs a holder has to do with a credential it was just
+// handed: know when to renew it, and name its installation on the way out.
+// Neither is a trust decision, and nothing in this package authorizes from its
+// result — VerifyWorkContext is the only thing that does that, and it checks
+// the signature first.
+func readSealedToken(token WorkContextToken) (*basev0.WorkContextV1, Seal, *OperationBinding, error) {
+	payload, _, err := decodeWorkContextToken(token.encoded)
+	if err != nil {
+		return nil, Seal{}, nil, err
+	}
+	sealed, err := unmarshalWorkContext(payload)
+	if err != nil {
+		return nil, Seal{}, nil, err
+	}
+	if err := validateSealedContext(sealed); err != nil {
+		return nil, Seal{}, nil, err
+	}
+	return sealed.context, sealed.seal, sealed.binding, nil
 }
 
 // WorkContextFromHeaders extracts an opaque token. It does not verify it.
@@ -148,9 +197,22 @@ func NewWorkContextSigner(options WorkContextSignerOptions) (*WorkContextSigner,
 
 // StartTaskInput creates a Task and its first root Session capability.
 type StartTaskInput struct {
-	Audience              string
-	TenantID              string
-	OwnerPrincipalID      string
+	Audience         string
+	TenantID         string
+	OwnerPrincipalID string
+	// OwnerPrincipalKind is the sort of principal the owner is. It is required:
+	// the principal id namespaces are independent, so a user and an agent may
+	// share an id string without being the same caller, and a verifier that
+	// cannot tell them apart cannot check the delegating principal at all.
+	OwnerPrincipalKind string
+	// OwnerAgentID is the owner's agent manifest identity. Required when
+	// OwnerPrincipalKind is "agent" and refused otherwise.
+	OwnerAgentID string
+	// Seal binds this credential to the execution it is minted for. Required.
+	Seal Seal
+	// OperationBinding seals the credential to exactly one binding. Set it only
+	// for an operation context.
+	OperationBinding      *OperationBinding
 	TaskID                string
 	SessionID             string
 	AuthorizationRevision uint64
@@ -206,13 +268,24 @@ func (s *WorkContextSigner) StartTask(input StartTaskInput) (WorkContextToken, *
 		ActorChain:            cloneActors(input.ActorChain),
 		AttributionTeamIds:    append([]string(nil), input.AttributionTeamIDs...),
 	}
+	if input.OwnerPrincipalKind != "" {
+		context.OwnerPrincipalKind = stringPointer(input.OwnerPrincipalKind)
+	}
+	if input.OwnerAgentID != "" {
+		context.OwnerAgentId = stringPointer(input.OwnerAgentID)
+	}
 	if input.WorkspaceID != "" {
 		context.WorkspaceId = stringPointer(input.WorkspaceID)
 	}
 	if input.ProjectID != "" {
 		context.ProjectId = stringPointer(input.ProjectID)
 	}
-	return s.sign(context)
+	binding := input.OperationBinding
+	if binding != nil {
+		copied := *binding
+		binding = &copied
+	}
+	return s.sign(sealedContext{context: context, seal: input.Seal, binding: binding})
 }
 
 // StartRootSessionInput exchanges a valid capability for another root Session
@@ -248,12 +321,12 @@ func (s *WorkContextSigner) ExchangeWorkContextAudience(
 	if err != nil {
 		return WorkContextToken{}, nil, err
 	}
-	next := cloneContext(verified)
+	next := verified.clone()
 	if input.AttenuatedScopes != nil {
 		attenuated := cloneScopes(input.AttenuatedScopes)
 		canonicalizeScopes(attenuated)
-		effective := verified.GetAuthorityScopes()
-		if actors := verified.GetActorChain(); len(actors) > 0 {
+		effective := verified.context.GetAuthorityScopes()
+		if actors := verified.context.GetActorChain(); len(actors) > 0 {
 			effective = actors[len(actors)-1].GetGrantedScopes()
 		}
 		if !scopesAttenuate(effective, attenuated) {
@@ -262,10 +335,10 @@ func (s *WorkContextSigner) ExchangeWorkContextAudience(
 				ErrWorkContextInvalid,
 			)
 		}
-		if actors := next.GetActorChain(); len(actors) > 0 {
+		if actors := next.context.GetActorChain(); len(actors) > 0 {
 			actors[len(actors)-1].GrantedScopes = attenuated
 		} else {
-			next.AuthorityScopes = attenuated
+			next.context.AuthorityScopes = attenuated
 		}
 	}
 	return s.exchange(
@@ -281,9 +354,9 @@ func (s *WorkContextSigner) StartSession(parent WorkContextToken, input StartRoo
 	if err != nil {
 		return WorkContextToken{}, nil, err
 	}
-	next := cloneContext(verified)
-	next.SessionId = input.SessionID
-	next.ParentSessionId = nil
+	next := verified.clone()
+	next.context.SessionId = input.SessionID
+	next.context.ParentSessionId = nil
 	return s.exchange(next, input.Audience, input.ReplayPolicy, input.TTL)
 }
 
@@ -302,14 +375,20 @@ func (s *WorkContextSigner) StartChildSession(parent WorkContextToken, input Sta
 	if err != nil {
 		return WorkContextToken{}, nil, err
 	}
-	next := cloneContext(verified)
-	next.ParentSessionId = stringPointer(verified.SessionId)
-	next.SessionId = input.SessionID
-	next.ActorChain = append(next.ActorChain, cloneActor(input.Actor))
+	next := verified.clone()
+	next.context.ParentSessionId = stringPointer(verified.context.SessionId)
+	next.context.SessionId = input.SessionID
+	next.context.ActorChain = append(next.context.ActorChain, cloneActor(input.Actor))
 	return s.exchange(next, input.Audience, input.ReplayPolicy, input.TTL)
 }
 
-func (s *WorkContextSigner) exchange(context *basev0.WorkContextV1, audience, replayPolicy string, ttl time.Duration) (WorkContextToken, *basev0.WorkContextV1, error) {
+// exchange re-signs a verified credential for another audience, session or
+// actor. The seal travels unchanged: an exchange moves authority between
+// boundaries inside one execution, and the execution is exactly what the seal
+// names. A hop that could restate the seal would be a hop that could move a
+// credential onto another build or another installation.
+func (s *WorkContextSigner) exchange(sealed sealedContext, audience, replayPolicy string, ttl time.Duration) (WorkContextToken, *basev0.WorkContextV1, error) {
+	context := sealed.context
 	now := s.now().UTC().Truncate(time.Second)
 	if ttl == 0 {
 		ttl = WorkContextDefaultTTL
@@ -334,31 +413,44 @@ func (s *WorkContextSigner) exchange(context *basev0.WorkContextV1, audience, re
 	context.ExpiresAtUnix = now.Add(ttl).Unix()
 	context.Nonce = nonce
 	context.ReplayPolicy = replayPolicy
-	return s.sign(context)
+	return s.sign(sealed)
 }
 
-func (s *WorkContextSigner) verifyOwn(token WorkContextToken) (*basev0.WorkContextV1, error) {
+// verifyOwn re-reads a credential this signer issued before deriving from it.
+// It checks the signature and shape, deliberately not the seal: the authority
+// re-signing its own credential is not the party that holds the installation
+// revision, and refusing here would make an exchange fail for a reason the
+// exchanging authority cannot act on. The seal is what travels, and the
+// verifier at the far end is where it is held to the current revision.
+func (s *WorkContextSigner) verifyOwn(token WorkContextToken) (sealedContext, error) {
 	publicKey, ok := s.privateKey.Public().(ed25519.PublicKey)
 	if !ok {
-		return nil, fmt.Errorf("%w: signer has no Ed25519 public key", ErrWorkContextInvalid)
+		return sealedContext{}, fmt.Errorf("%w: signer has no Ed25519 public key", ErrWorkContextInvalid)
 	}
 	verifier, err := NewWorkContextVerifier(WorkContextVerifierOptions{
 		PublicKeys: map[string]ed25519.PublicKey{s.keyID: publicKey},
 		Now:        s.now,
 	})
 	if err != nil {
-		return nil, err
+		return sealedContext{}, err
 	}
-	return verifier.Verify(token, WorkContextExpectations{Issuer: s.issuer})
+	sealed, err := verifier.decode(token)
+	if err != nil {
+		return sealedContext{}, err
+	}
+	if sealed.context.GetIssuer() != s.issuer {
+		return sealedContext{}, fmt.Errorf("%w: issuer mismatch", ErrWorkContextInvalid)
+	}
+	return sealed, nil
 }
 
-func (s *WorkContextSigner) sign(context *basev0.WorkContextV1) (WorkContextToken, *basev0.WorkContextV1, error) {
-	canonical := cloneContext(context)
-	canonicalizeWorkContext(canonical)
-	if err := validateWorkContext(canonical); err != nil {
+func (s *WorkContextSigner) sign(sealed sealedContext) (WorkContextToken, *basev0.WorkContextV1, error) {
+	canonical := sealed.clone()
+	canonicalizeWorkContext(canonical.context)
+	if err := validateSealedContext(canonical); err != nil {
 		return WorkContextToken{}, nil, err
 	}
-	payload, err := marshalWorkContext(canonical)
+	payload, err := marshalWorkContext(canonical.context, canonical.seal, canonical.binding)
 	if err != nil {
 		return WorkContextToken{}, nil, err
 	}
@@ -368,7 +460,7 @@ func (s *WorkContextSigner) sign(context *basev0.WorkContextV1) (WorkContextToke
 	if len(encoded) > WorkContextMaxTokenBytes {
 		return WorkContextToken{}, nil, fmt.Errorf("%w: token exceeds %d bytes", ErrWorkContextInvalid, WorkContextMaxTokenBytes)
 	}
-	return WorkContextToken{encoded: encoded}, canonical, nil
+	return WorkContextToken{encoded: encoded}, canonical.context, nil
 }
 
 type WorkContextVerifier struct {
@@ -411,15 +503,55 @@ func NewWorkContextVerifier(options WorkContextVerifierOptions) (*WorkContextVer
 	return &WorkContextVerifier{publicKeys: keys, now: now, clockSkew: clockSkew}, nil
 }
 
+// WorkContextExpectations is what a verifier holds as current. Identity
+// expectations that are left empty are not checked, as before. The seal is
+// different: it is required, because a verifier that does not state which
+// installation revision and build it is on cannot refuse a credential from an
+// earlier one, and a credential nobody holds to an installation is a bearer
+// token.
 type WorkContextExpectations struct {
 	Issuer                string
 	Audience              string
 	TenantID              string
-	OwnerPrincipalID      string
 	TaskID                string
 	SessionID             string
 	ParentSessionID       *string
 	AuthorizationRevision *uint64
+
+	// The delegating principal. OwnerPrincipalKind is checked separately from
+	// OwnerPrincipalID: the two id namespaces are independent, so matching an
+	// id without its kind matches a different principal that happens to spell
+	// the same string.
+	OwnerPrincipalID   string
+	OwnerPrincipalKind string
+
+	// Delegation describes the calling principal — the final actor of a
+	// delegated credential — and is checked separately from the owner above.
+	//
+	// nil means this verifier accepts direct owner calls only, and a credential
+	// carrying an actor chain is refused. That is deliberate: a service that
+	// never considered delegation would otherwise accept a delegated caller
+	// silently, having checked only the principal that delegated rather than
+	// the one that is actually calling.
+	Delegation *DelegationExpectations
+
+	// Seal is required. See SealExpectations.
+	Seal SealExpectations
+
+	// OperationBinding names the one binding an operation context may be
+	// presented for. nil means no binding was named, and a credential sealed
+	// to one is refused rather than accepted as if it were an ordinary
+	// credential that happens to carry extra fields.
+	OperationBinding *OperationBindingExpectations
+}
+
+// DelegationExpectations is what a verifier holds about the calling principal.
+// Empty fields are not checked; the presence of the struct is itself the
+// statement that a delegated credential is acceptable here.
+type DelegationExpectations struct {
+	PrincipalID   string
+	PrincipalKind string
+	DelegationID  string
 }
 
 // WorkContextScopeRequirement identifies one exact capability a verified Work
@@ -437,15 +569,22 @@ type WorkContextScopeRequirement struct {
 // authority scopes apply to a direct owner call; when actors are present, only
 // the final actor's monotonically attenuated granted scopes are effective.
 //
-// Call this only after signature, time, issuer, and audience verification.
-// The claims are structurally validated again so a caller cannot accidentally
-// authorize from a hand-constructed or mutated protobuf.
+// It takes a verified credential rather than claims. Taking claims meant a
+// caller could authorize from a hand-constructed protobuf or from a token that
+// was parsed and never verified, and the defensive re-validation that used to
+// stand here could not tell those apart from a real one — it checked the shape
+// of the claims, not where they came from.
+//
+// Scope is the last question, not the first: the credential has already been
+// held to its seal and its binding by the time this runs. A scope that would
+// admit the call never widens the binding it was granted under.
 func RequireWorkContextScope(
-	claims *basev0.WorkContextV1,
+	verified VerifiedWorkContext,
 	requirement WorkContextScopeRequirement,
 ) error {
-	if err := validateWorkContext(claims); err != nil {
-		return err
+	claims := verified.sealed.context
+	if claims == nil {
+		return fmt.Errorf("%w: scope check requires a verified Work Context", ErrWorkContextInvalid)
 	}
 	if err := validateBounded(
 		"required resource_kind",
@@ -499,41 +638,53 @@ func RequireWorkContextScope(
 	)
 }
 
-func (v *WorkContextVerifier) Verify(token WorkContextToken, expected WorkContextExpectations) (*basev0.WorkContextV1, error) {
+// decode checks the signature, the structural rules and the lifetime, and
+// returns the sealed content. It is not verification: nothing here holds the
+// credential to an installation, a build or a caller, so its result must not
+// escape this package except through VerifyWorkContext.
+func (v *WorkContextVerifier) decode(token WorkContextToken) (sealedContext, error) {
 	if v == nil {
-		return nil, fmt.Errorf("%w: nil verifier", ErrWorkContextInvalid)
+		return sealedContext{}, fmt.Errorf("%w: nil verifier", ErrWorkContextInvalid)
 	}
 	payload, signature, err := decodeWorkContextToken(token.encoded)
 	if err != nil {
-		return nil, err
+		return sealedContext{}, err
 	}
 	probe := struct {
 		KeyID string `json:"key_id"`
 	}{}
 	if decodeErr := json.Unmarshal(payload, &probe); decodeErr != nil {
-		return nil, fmt.Errorf("%w: decode key id: %v", ErrWorkContextInvalid, decodeErr)
+		return sealedContext{}, fmt.Errorf("%w: decode key id: %v", ErrWorkContextInvalid, decodeErr)
 	}
 	publicKey, ok := v.publicKeys[probe.KeyID]
 	if !ok {
-		return nil, fmt.Errorf("%w: unknown key id %q", ErrWorkContextInvalid, probe.KeyID)
+		return sealedContext{}, fmt.Errorf("%w: unknown key id %q", ErrWorkContextInvalid, probe.KeyID)
+	}
+	// ed25519.Verify panics on a key that is not PublicKeySize bytes. The key
+	// is selected by the untrusted token's key id, so one malformed entry would
+	// turn every token naming it into a crash of this process, on demand for
+	// anyone who learns that key id. NewWorkContextVerifier rejects such a key,
+	// which is what makes this a belt rather than the only guard.
+	if len(publicKey) != ed25519.PublicKeySize {
+		return sealedContext{}, fmt.Errorf(
+			"%w: verification key %q is %d bytes, not %d",
+			ErrWorkContextInvalid, probe.KeyID, len(publicKey), ed25519.PublicKeySize,
+		)
 	}
 	if !ed25519.Verify(publicKey, payload, signature) {
-		return nil, fmt.Errorf("%w: signature verification failed", ErrWorkContextInvalid)
+		return sealedContext{}, fmt.Errorf("%w: signature verification failed", ErrWorkContextInvalid)
 	}
-	context, err := unmarshalWorkContext(payload)
+	sealed, err := unmarshalWorkContext(payload)
 	if err != nil {
-		return nil, err
+		return sealedContext{}, err
 	}
-	if err := validateWorkContext(context); err != nil {
-		return nil, err
+	if err := validateSealedContext(sealed); err != nil {
+		return sealedContext{}, err
 	}
-	if err := v.validateTime(context); err != nil {
-		return nil, err
+	if err := v.validateTime(sealed.context); err != nil {
+		return sealedContext{}, err
 	}
-	if err := matchWorkContext(context, expected); err != nil {
-		return nil, err
-	}
-	return context, nil
+	return sealed, nil
 }
 
 func (v *WorkContextVerifier) validateTime(context *basev0.WorkContextV1) error {
@@ -553,7 +704,8 @@ func (v *WorkContextVerifier) validateTime(context *basev0.WorkContextV1) error 
 	return nil
 }
 
-func matchWorkContext(context *basev0.WorkContextV1, expected WorkContextExpectations) error {
+func matchWorkContext(sealed sealedContext, expected WorkContextExpectations) error {
+	context := sealed.context
 	checks := []struct {
 		name string
 		got  string
@@ -563,6 +715,7 @@ func matchWorkContext(context *basev0.WorkContextV1, expected WorkContextExpecta
 		{"audience", context.Audience, expected.Audience},
 		{"tenant", context.TenantId, expected.TenantID},
 		{"owner", context.OwnerPrincipalId, expected.OwnerPrincipalID},
+		{"owner kind", context.GetOwnerPrincipalKind(), expected.OwnerPrincipalKind},
 		{"task", context.TaskId, expected.TaskID},
 		{"session", context.SessionId, expected.SessionID},
 	}
@@ -576,6 +729,47 @@ func matchWorkContext(context *basev0.WorkContextV1, expected WorkContextExpecta
 	}
 	if expected.AuthorizationRevision != nil && context.AuthorizationRevision != *expected.AuthorizationRevision {
 		return fmt.Errorf("%w: authorization revision mismatch", ErrWorkContextInvalid)
+	}
+	if err := matchDelegation(context, expected.Delegation); err != nil {
+		return err
+	}
+	if err := matchSeal(sealed.seal, expected.Seal); err != nil {
+		return err
+	}
+	return matchOperationBinding(sealed.binding, expected.OperationBinding)
+}
+
+// matchDelegation checks the calling principal. The owner was already checked
+// above; this is the separate check, and the two are not interchangeable — a
+// credential whose owner is the one this verifier expects may still be
+// presented by a delegate it does not.
+func matchDelegation(context *basev0.WorkContextV1, expected *DelegationExpectations) error {
+	actors := context.GetActorChain()
+	if expected == nil {
+		if len(actors) > 0 {
+			return fmt.Errorf(
+				"%w: credential is delegated through %d actor(s) where only a direct owner call is accepted",
+				ErrWorkContextInvalid, len(actors),
+			)
+		}
+		return nil
+	}
+	if len(actors) == 0 {
+		return fmt.Errorf("%w: a delegated credential was expected and this one carries no actor", ErrWorkContextInvalid)
+	}
+	caller := actors[len(actors)-1]
+	for _, check := range []struct {
+		name string
+		got  string
+		want string
+	}{
+		{"caller", caller.GetPrincipalId(), expected.PrincipalID},
+		{"caller kind", caller.GetPrincipalKind(), expected.PrincipalKind},
+		{"delegation", caller.GetDelegationId(), expected.DelegationID},
+	} {
+		if check.want != "" && check.got != check.want {
+			return fmt.Errorf("%w: %s mismatch", ErrWorkContextInvalid, check.name)
+		}
 	}
 	return nil
 }
@@ -604,6 +798,22 @@ type workContextPayload struct {
 	AttributionTeamIDs    []string           `json:"attribution_team_ids"`
 	WorkspaceID           *string            `json:"workspace_id,omitempty"`
 	ProjectID             *string            `json:"project_id,omitempty"`
+	OwnerPrincipalKind    string             `json:"owner_principal_kind"`
+	OwnerAgentID          *string            `json:"owner_agent_id,omitempty"`
+
+	// The seal. These are not claims the owner delegated; they are the binding
+	// between this credential and the one execution it was issued to, and
+	// every one of them is required.
+	PrincipalEpoch       string `json:"owner_principal_epoch"`
+	InstallationID       string `json:"installation_id"`
+	InstallationRevision string `json:"installation_revision"`
+	BuildIncarnation     string `json:"build_incarnation"`
+
+	// The operation binding. Present together or absent together: a partial
+	// binding would resolve to a binding identity the verifier never approved.
+	OperationBindingID          *string `json:"operation_binding_id,omitempty"`
+	OperationBindingRevision    *string `json:"operation_binding_revision,omitempty"`
+	OperationBindingIncarnation *string `json:"operation_binding_incarnation,omitempty"`
 }
 
 type workContextScope struct {
@@ -619,8 +829,31 @@ type workContextActor struct {
 	GrantedScopes []workContextScope `json:"granted_scopes"`
 }
 
-func marshalWorkContext(context *basev0.WorkContextV1) ([]byte, error) {
-	payload := payloadFromContext(context)
+// sealedContext is the complete signed content of one credential: the
+// delegation claims, the seal binding them to a single execution, and the
+// operation binding when the credential is an operation context.
+//
+// Nothing constructs one without a seal. The seal is not an addition to a Work
+// Context that may be left out — it is the half that says which process, build
+// and installation the other half was issued to, and a credential carrying
+// only the other half is a bearer token for anything that holds it.
+type sealedContext struct {
+	context *basev0.WorkContextV1
+	seal    Seal
+	binding *OperationBinding
+}
+
+func (c sealedContext) clone() sealedContext {
+	cloned := sealedContext{context: cloneContext(c.context), seal: c.seal}
+	if c.binding != nil {
+		binding := *c.binding
+		cloned.binding = &binding
+	}
+	return cloned
+}
+
+func marshalWorkContext(context *basev0.WorkContextV1, seal Seal, binding *OperationBinding) ([]byte, error) {
+	payload := payloadFromContext(context, seal, binding)
 	encoded, err := json.Marshal(payload)
 	if err != nil {
 		return nil, fmt.Errorf("%w: encode payload: %v", ErrWorkContextInvalid, err)
@@ -628,29 +861,87 @@ func marshalWorkContext(context *basev0.WorkContextV1) ([]byte, error) {
 	return encoded, nil
 }
 
-func unmarshalWorkContext(encoded []byte) (*basev0.WorkContextV1, error) {
+func unmarshalWorkContext(encoded []byte) (sealedContext, error) {
 	var payload workContextPayload
 	decoder := json.NewDecoder(bytes.NewReader(encoded))
 	decoder.DisallowUnknownFields()
 	if err := decoder.Decode(&payload); err != nil {
-		return nil, fmt.Errorf("%w: decode payload: %v", ErrWorkContextInvalid, err)
+		return sealedContext{}, fmt.Errorf("%w: decode payload: %v", ErrWorkContextInvalid, err)
 	}
 	var trailing any
 	if err := decoder.Decode(&trailing); !errors.Is(err, io.EOF) {
 		if err == nil {
-			return nil, fmt.Errorf("%w: trailing JSON value", ErrWorkContextInvalid)
+			return sealedContext{}, fmt.Errorf("%w: trailing JSON value", ErrWorkContextInvalid)
 		}
-		return nil, fmt.Errorf("%w: trailing JSON: %v", ErrWorkContextInvalid, err)
+		return sealedContext{}, fmt.Errorf("%w: trailing JSON: %v", ErrWorkContextInvalid, err)
 	}
 	revision, err := strconv.ParseUint(payload.AuthorizationRevision, 10, 64)
 	if err != nil {
-		return nil, fmt.Errorf("%w: authorization_revision must be uint64 decimal", ErrWorkContextInvalid)
+		return sealedContext{}, fmt.Errorf("%w: authorization_revision must be uint64 decimal", ErrWorkContextInvalid)
 	}
-	return contextFromPayload(payload, revision), nil
+	seal, binding, err := sealFromPayload(payload)
+	if err != nil {
+		return sealedContext{}, err
+	}
+	return sealedContext{
+		context: contextFromPayload(payload, revision),
+		seal:    seal,
+		binding: binding,
+	}, nil
 }
 
-func payloadFromContext(context *basev0.WorkContextV1) workContextPayload {
-	return workContextPayload{
+// sealFromPayload reads the seal off the wire. A credential whose seal cannot
+// be read is rejected here rather than treated as unsealed: "no seal" and
+// "a seal I could not parse" must reach the same refusal, because the second
+// is what an attacker produces when trying to reach the first.
+func sealFromPayload(payload workContextPayload) (Seal, *OperationBinding, error) {
+	epoch, err := parseDecimal("owner_principal_epoch", payload.PrincipalEpoch)
+	if err != nil {
+		return Seal{}, nil, err
+	}
+	installationRevision, err := parseDecimal("installation_revision", payload.InstallationRevision)
+	if err != nil {
+		return Seal{}, nil, err
+	}
+	seal := Seal{
+		PrincipalEpoch:       epoch,
+		InstallationID:       payload.InstallationID,
+		InstallationRevision: installationRevision,
+		BuildIncarnation:     payload.BuildIncarnation,
+	}
+	present := 0
+	for _, field := range []*string{
+		payload.OperationBindingID,
+		payload.OperationBindingRevision,
+		payload.OperationBindingIncarnation,
+	} {
+		if field != nil {
+			present++
+		}
+	}
+	switch present {
+	case 0:
+		return seal, nil, nil
+	case 3:
+	default:
+		return Seal{}, nil, fmt.Errorf(
+			"%w: an operation binding needs its id, revision and incarnation together",
+			ErrWorkContextInvalid,
+		)
+	}
+	bindingRevision, err := parseDecimal("operation_binding_revision", *payload.OperationBindingRevision)
+	if err != nil {
+		return Seal{}, nil, err
+	}
+	return seal, &OperationBinding{
+		BindingID:          *payload.OperationBindingID,
+		BindingRevision:    bindingRevision,
+		BindingIncarnation: *payload.OperationBindingIncarnation,
+	}, nil
+}
+
+func payloadFromContext(context *basev0.WorkContextV1, seal Seal, binding *OperationBinding) workContextPayload {
+	payload := workContextPayload{
 		Typ:                   context.Typ,
 		Algorithm:             context.Algorithm,
 		KeyID:                 context.KeyId,
@@ -672,7 +963,19 @@ func payloadFromContext(context *basev0.WorkContextV1) workContextPayload {
 		AttributionTeamIDs:    append([]string{}, context.AttributionTeamIds...),
 		WorkspaceID:           cloneStringPointer(context.WorkspaceId),
 		ProjectID:             cloneStringPointer(context.ProjectId),
+		OwnerPrincipalKind:    context.GetOwnerPrincipalKind(),
+		OwnerAgentID:          cloneStringPointer(context.OwnerAgentId),
+		PrincipalEpoch:        decimal(seal.PrincipalEpoch),
+		InstallationID:        seal.InstallationID,
+		InstallationRevision:  decimal(seal.InstallationRevision),
+		BuildIncarnation:      seal.BuildIncarnation,
 	}
+	if binding != nil {
+		payload.OperationBindingID = stringPointer(binding.BindingID)
+		payload.OperationBindingRevision = stringPointer(decimal(binding.BindingRevision))
+		payload.OperationBindingIncarnation = stringPointer(binding.BindingIncarnation)
+	}
+	return payload
 }
 
 func payloadScopes(scopes []*basev0.WorkScopeV1) []workContextScope {
@@ -731,6 +1034,8 @@ func contextFromPayload(payload workContextPayload, revision uint64) *basev0.Wor
 		AttributionTeamIds:    append([]string(nil), payload.AttributionTeamIDs...),
 		WorkspaceId:           cloneStringPointer(payload.WorkspaceID),
 		ProjectId:             cloneStringPointer(payload.ProjectID),
+		OwnerPrincipalKind:    stringPointer(payload.OwnerPrincipalKind),
+		OwnerAgentId:          cloneStringPointer(payload.OwnerAgentID),
 	}
 	return context
 }
@@ -758,6 +1063,29 @@ func contextActors(actors []workContextActor) []*basev0.WorkActorV1 {
 		})
 	}
 	return out
+}
+
+// PrincipalKindAgent is the owner kind that requires an agent manifest
+// identity beside the principal id.
+const PrincipalKindAgent = "agent"
+
+// validateSealedContext is the whole structural rule for a credential: the
+// delegation claims, the seal, and the operation binding when there is one.
+// Signing and verification both go through it, so a credential this module
+// would refuse is never one it hands out.
+func validateSealedContext(sealed sealedContext) error {
+	if err := validateWorkContext(sealed.context); err != nil {
+		return err
+	}
+	if err := sealed.seal.validate(); err != nil {
+		return err
+	}
+	if sealed.binding != nil {
+		if err := sealed.binding.validate(); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func validateWorkContext(context *basev0.WorkContextV1) error {
@@ -811,6 +1139,28 @@ func validateWorkContext(context *basev0.WorkContextV1) error {
 	}
 	if context.ParentSessionId != nil && context.GetParentSessionId() == context.SessionId {
 		return fmt.Errorf("%w: parent session equals session", ErrWorkContextInvalid)
+	}
+	if err := validateBounded(
+		"owner_principal_kind",
+		context.GetOwnerPrincipalKind(),
+		workContextMaxKindBytes,
+		true,
+	); err != nil {
+		return err
+	}
+	// The agent manifest identity and the agent kind are one fact stated twice.
+	// Allowing either without the other admits a credential that claims to be
+	// an agent nothing can name, or names an agent while presenting as a user.
+	switch {
+	case context.GetOwnerPrincipalKind() == PrincipalKindAgent:
+		if err := validateBounded("owner_agent_id", context.GetOwnerAgentId(), workContextMaxIDBytes, true); err != nil {
+			return err
+		}
+	case context.OwnerAgentId != nil:
+		return fmt.Errorf(
+			"%w: owner_agent_id is set on a %q owner",
+			ErrWorkContextInvalid, context.GetOwnerPrincipalKind(),
+		)
 	}
 	if context.ReplayPolicy != WorkContextReplayIdempotent && context.ReplayPolicy != WorkContextReplaySingleUse {
 		return fmt.Errorf("%w: unsupported replay policy %q", ErrWorkContextInvalid, context.ReplayPolicy)
@@ -1074,6 +1424,8 @@ func cloneContext(context *basev0.WorkContextV1) *basev0.WorkContextV1 {
 		AttributionTeamIds:    append([]string(nil), context.AttributionTeamIds...),
 		WorkspaceId:           cloneStringPointer(context.WorkspaceId),
 		ProjectId:             cloneStringPointer(context.ProjectId),
+		OwnerPrincipalKind:    cloneStringPointer(context.OwnerPrincipalKind),
+		OwnerAgentId:          cloneStringPointer(context.OwnerAgentId),
 	}
 }
 

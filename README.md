@@ -8,13 +8,28 @@
 
 # codefly + go = sdk-go
 
-## Work Context verifier
+## Work Context: mint once, sealed, verified exactly
 
-Services that only need to verify Codefly Work Contexts can import the leaf
-module `github.com/codefly-dev/sdk-go/workcontext` instead of the full SDK. It
-depends only on the shared `codefly/base/v0` proto types, so a consumer's
-`go.sum` stays a handful of entries rather than inheriting core's transitive
-tail.
+A module process obtains its credential once per execution, sealed to the build
+it is and the installation it serves, and never announces itself again. The leaf
+module `github.com/codefly-dev/sdk-go/workcontext` holds the mint client, the
+signer and the verifier; it depends only on the shared `codefly/base/v0` proto
+types, so a consumer that only verifies keeps a `go.sum` of a handful of entries
+rather than inheriting core's transitive tail.
+
+See [`workcontext/README.md`](workcontext/README.md) for the model, the sealed
+fields, the four refusals a caller must tell apart, and what a consumer has to
+stop doing — there is no heartbeat, no registration call, and no self-reported
+build or installation.
+
+## Authority-bearing configuration
+
+A principal, binding or audience is read once, at boot, through
+`codefly.ReadAuthority`, and the SDK refuses a runtime change to one: the host
+is the authority for these values, and a value that drifts under a running
+process is an error rather than a reload — the process has already minted a
+credential sealed to the old one. `For(ctx).WorkspaceValue` answers from that
+boot read for a pinned name, so the ordinary accessor is not a way around it.
 
 ## Tenant-scoped effect receipts
 

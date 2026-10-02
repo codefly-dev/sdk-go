@@ -21,60 +21,85 @@ const cachePartitionViewDomain = "codefly.work-context.cache-partition.view.v1\n
 // can never be made to spell a view.
 const cachePartitionViewerDomain = "codefly.work-context.cache-partition.viewer.v1\n"
 
-// VerifiedWorkContext is a Work Context whose signature, lifetime and
-// expectations a verifier has checked. Only VerifyWorkContext on a verifier
-// constructs one, so code holding it cannot be holding a hand-built protobuf or
-// a token that was parsed but never verified. Its zero value is not verified
-// and every consumer rejects it.
+// VerifiedWorkContext is a credential whose signature, lifetime, expectations
+// and seal a verifier has checked. VerifyWorkContext is the only thing that
+// constructs one, so code holding it cannot be holding a hand-built protobuf, a
+// token that was parsed but never verified, or a credential nobody held to an
+// installation. Its zero value is not verified and every consumer rejects it.
+//
+// It is the single verification result in this module. There is no accessor
+// that returns bare claims from a token, because a caller that can obtain
+// claims without the seal will eventually authorize from them.
 type VerifiedWorkContext struct {
-	claims *basev0.WorkContextV1
+	sealed sealedContext
 }
 
-// Claims returns a copy of the verified claims. Mutating the copy changes
-// nothing this value derives.
+// Claims returns a copy of the verified delegation claims. Mutating the copy
+// changes nothing this value derives.
 func (v VerifiedWorkContext) Claims() *basev0.WorkContextV1 {
-	return cloneContext(v.claims)
+	return cloneContext(v.sealed.context)
 }
 
-// VerifyWorkContext is Verify, returning a value that can only have come from
-// verification. Use it wherever the result feeds a trust-sensitive derivation
-// such as DeriveCachePartition.
+// Seal returns the execution this credential is bound to.
+func (v VerifiedWorkContext) Seal() Seal {
+	return v.sealed.seal
+}
+
+// OperationBinding returns the one binding this credential may act through, or
+// nil when it is not an operation context.
+func (v VerifiedWorkContext) OperationBinding() *OperationBinding {
+	if v.sealed.binding == nil {
+		return nil
+	}
+	binding := *v.sealed.binding
+	return &binding
+}
+
+// VerifyWorkContext establishes trust in a credential: signature, structure,
+// lifetime, the stated expectations, the seal, and the operation binding by
+// exact identity. It is the only verification entry point.
 func (v *WorkContextVerifier) VerifyWorkContext(
 	token WorkContextToken,
 	expected WorkContextExpectations,
 ) (VerifiedWorkContext, error) {
-	claims, err := v.Verify(token, expected)
+	sealed, err := v.decode(token)
 	if err != nil {
 		return VerifiedWorkContext{}, err
 	}
-	return VerifiedWorkContext{claims: claims}, nil
+	if err := matchWorkContext(sealed, expected); err != nil {
+		return VerifiedWorkContext{}, err
+	}
+	return VerifiedWorkContext{sealed: sealed}, nil
 }
 
-// VerifyWorkContext is Verify, returning a value that can only have come from
-// verification. Use it wherever the result feeds a trust-sensitive derivation
-// such as DeriveCachePartition.
+// VerifyWorkContext establishes trust using the current cached key set,
+// refreshing once for an unknown key id so a rotation is picked up without a
+// request stampede.
 func (v *WorkContextJWKSVerifier) VerifyWorkContext(
 	ctx context.Context,
 	token WorkContextToken,
 	expected WorkContextExpectations,
 ) (VerifiedWorkContext, error) {
-	claims, err := v.Verify(ctx, token, expected)
+	verifier, err := v.verifierFor(ctx, token)
 	if err != nil {
 		return VerifiedWorkContext{}, err
 	}
-	return VerifiedWorkContext{claims: claims}, nil
+	return verifier.VerifyWorkContext(token, expected)
 }
 
 // CachePartition is the identity partition a cache stack scopes its entries
 // to. It is plain data on purpose: the cache takes it as an opaque value built
 // from these two fields and never learns what a Work Context is.
 type CachePartition struct {
-	// Key is stable for one tenant (and, with ByAuthorizationView, one
-	// effective authorization view). It contains only base64url, hex and ':'.
+	// Key is stable for one tenant on one installation revision (and, with
+	// ByAuthorizationView, one effective authorization view). It contains only
+	// base64url, hex and ':'.
 	Key string
 	// WriteAround asks the stack to bypass cached reads and writes for this
-	// call. It is always false today: the approval-grant hop that should set it
-	// does not exist in WorkContextV1 yet (codefly-dev/core#658).
+	// call. It is always false today. WorkContextV1 has carried the
+	// approval-grant hop since core v0.5.10, but this module's signed payload
+	// does not yet encode it, so no credential reaching here can be carrying
+	// one; wiring it is codefly-dev/sdk-go#41 item 4.
 	WriteAround bool
 }
 
@@ -120,16 +145,25 @@ func ByViewer() CachePartitionOption {
 	}
 }
 
-// DeriveCachePartition computes the cache partition for a verified Work
-// Context. The key always carries the tenant. It never carries the session,
-// task, nonce or audience: those identify an execution, not an authorization,
-// so a child session or an audience exchange with the same effective view
-// shares its parent's partition instead of fragmenting the cache per hop.
+// DeriveCachePartition computes the cache partition for a verified credential.
+// The key always carries the tenant and the sealed installation at its sealed
+// revision. It never carries the session, task, nonce or audience: those
+// identify an execution, not an authorization, so a child session or an
+// audience exchange with the same effective view shares its parent's partition
+// instead of fragmenting the cache per hop.
+//
+// The installation revision is in the key, not optional, and that is the whole
+// point of it being there: an answer computed while the host held revision N
+// was computed under the authority of revision N, and nothing about it survives
+// the host moving to N+1. A revision bump therefore lands every caller in a
+// fresh partition, which is a cache miss by design and never a stale hit. The
+// installation id travels with the revision because revision numbers are
+// per-installation and two installations share their small integers.
 func DeriveCachePartition(
 	verified VerifiedWorkContext,
 	options ...CachePartitionOption,
 ) (CachePartition, error) {
-	claims := verified.claims
+	claims := verified.sealed.context
 	if claims == nil {
 		return CachePartition{}, fmt.Errorf("%w: cache partition requires a verified Work Context", ErrWorkContextInvalid)
 	}
@@ -139,9 +173,19 @@ func DeriveCachePartition(
 			option(&settings)
 		}
 	}
-	// Tenant IDs are free-form, so the key encodes rather than embeds them: no
-	// tenant can contain the delimiter and spell another tenant's view key.
-	key := "wc1:t:" + base64.RawURLEncoding.EncodeToString([]byte(claims.TenantId))
+	seal := verified.sealed.seal
+	// Tenant and installation IDs are free-form, so the key encodes rather than
+	// embeds them: no tenant or installation can contain the delimiter and
+	// spell another one's view key.
+	//
+	// The "wc2" prefix is not decoration. A shared cache that outlives the
+	// deploy — Redis, a warehouse table — still holds "wc1" keys computed
+	// without an installation revision in them, and those keys would otherwise
+	// be reachable by a process that now partitions correctly. Changing the
+	// prefix orphans them instead.
+	key := "wc2:t:" + base64.RawURLEncoding.EncodeToString([]byte(claims.TenantId)) +
+		":i:" + base64.RawURLEncoding.EncodeToString([]byte(seal.InstallationID)) +
+		":r:" + strconv.FormatUint(seal.InstallationRevision, 10)
 	if settings.byAuthorizationView || settings.byViewer {
 		digest, err := authorizationViewDigest(claims)
 		if err != nil {
@@ -166,17 +210,16 @@ func DeriveCachePartition(
 // namespaces are independent: a user and an agent may share an id string
 // without being the same caller.
 func viewerDigest(claims *basev0.WorkContextV1) (string, error) {
-	// The owner carries no kind at this module's core pin, so an owner-derived
-	// viewer is marked instead of left blank: without it, an owner whose id is
-	// "x" and a delegated agent whose id is "x" would digest identically, and
-	// the two id namespaces are independent. codefly-dev/sdk-go#41 replaces the
-	// marker with the real owner_principal_kind when it adopts core v0.5.10.
+	// The kind travels with the id because the two namespaces are independent:
+	// an owner whose id is "x" and a delegated agent whose id is "x" are
+	// different callers. The owner's kind is the real one now that it is
+	// required on the wire, so no placeholder stands in for it.
 	viewer := struct {
 		PrincipalID   string `json:"principal_id"`
 		PrincipalKind string `json:"principal_kind"`
 	}{
 		PrincipalID:   claims.GetOwnerPrincipalId(),
-		PrincipalKind: "owner",
+		PrincipalKind: claims.GetOwnerPrincipalKind(),
 	}
 	if actors := claims.GetActorChain(); len(actors) > 0 {
 		last := actors[len(actors)-1]

@@ -37,11 +37,56 @@ func workContextTestSigner(t *testing.T, now time.Time) *WorkContextSigner {
 	return signer
 }
 
+// workContextTestSeal is the execution every fixture credential is sealed to.
+func workContextTestSeal() Seal {
+	return Seal{
+		PrincipalEpoch:       7,
+		InstallationID:       "installation-0a9f",
+		InstallationRevision: 41,
+		BuildIncarnation:     "build-incarnation-2026-07-23-a",
+	}
+}
+
+// workContextTestExpected is what a verifier on the same installation,
+// revision and build holds. Every verification in these tests starts from it,
+// because a verifier that states none of this refuses every credential — which
+// is the behaviour, not an inconvenience to work around.
+func workContextTestExpected() WorkContextExpectations {
+	seal := workContextTestSeal()
+	return WorkContextExpectations{
+		Seal: SealExpectations{
+			PrincipalEpoch:       seal.PrincipalEpoch,
+			InstallationID:       seal.InstallationID,
+			InstallationRevision: seal.InstallationRevision,
+			BuildIncarnation:     seal.BuildIncarnation,
+		},
+		// The fixture credential is delegated through one actor, so a verifier
+		// that accepted only direct owner calls would refuse it.
+		Delegation: &DelegationExpectations{},
+	}
+}
+
+// workContextTestExpectedWith keeps whatever a test states and fills in the
+// seal and the delegation the fixture credential carries, so a test about
+// audience mismatch stays a test about audience mismatch.
+func workContextTestExpectedWith(expected WorkContextExpectations) WorkContextExpectations {
+	baseline := workContextTestExpected()
+	if expected.Seal == (SealExpectations{}) {
+		expected.Seal = baseline.Seal
+	}
+	if expected.Delegation == nil {
+		expected.Delegation = baseline.Delegation
+	}
+	return expected
+}
+
 func workContextTestInput() StartTaskInput {
 	return StartTaskInput{
 		Audience:              "warden.evidence",
 		TenantID:              "tenant-codefly",
 		OwnerPrincipalID:      "principal-antoine",
+		OwnerPrincipalKind:    "user",
+		Seal:                  workContextTestSeal(),
 		TaskID:                "task-roadmap",
 		SessionID:             "session-root",
 		AuthorizationRevision: ^uint64(0),
@@ -110,17 +155,20 @@ func TestWorkContextStartTaskVerifyAndCanonicalize(t *testing.T) {
 	require.Equal(t, []string{"read", "write"}, claims.AuthorityScopes[1].Actions)
 	require.Equal(t, []string{"repo-codefly", "repo-warden"}, claims.AuthorityScopes[1].ResourceIds)
 
-	verified, err := workContextTestVerifier(t, workContextTestTime).Verify(token, WorkContextExpectations{
-		Issuer:           "https://accounts.codefly.dev/work-context",
-		Audience:         "warden.evidence",
-		TenantID:         "tenant-codefly",
-		OwnerPrincipalID: "principal-antoine",
-		TaskID:           "task-roadmap",
-		SessionID:        "session-root",
-	})
+	verified, err := workContextTestVerifier(t, workContextTestTime).VerifyWorkContext(token, workContextTestExpectedWith(WorkContextExpectations{
+		Issuer:             "https://accounts.codefly.dev/work-context",
+		Audience:           "warden.evidence",
+		TenantID:           "tenant-codefly",
+		OwnerPrincipalID:   "principal-antoine",
+		OwnerPrincipalKind: "user",
+		TaskID:             "task-roadmap",
+		SessionID:          "session-root",
+	}))
 	require.NoError(t, err)
-	require.Equal(t, ^uint64(0), verified.AuthorizationRevision, "uint64 revision must survive the JavaScript-safe wire representation")
-	require.Equal(t, "agent-claude-code", verified.ActorChain[0].PrincipalId)
+	require.Equal(t, ^uint64(0), verified.Claims().AuthorizationRevision, "uint64 revision must survive the JavaScript-safe wire representation")
+	require.Equal(t, "agent-claude-code", verified.Claims().ActorChain[0].PrincipalId)
+	require.Equal(t, workContextTestSeal(), verified.Seal(), "the seal survives the wire unchanged")
+	require.Nil(t, verified.OperationBinding())
 }
 
 func TestWorkContextAudienceExchangePreservesImmutableLineage(t *testing.T) {
@@ -157,18 +205,19 @@ func TestWorkContextAudienceExchangePreservesImmutableLineage(t *testing.T) {
 	require.Equal(t, parent.GetWorkspaceId(), exchanged.GetWorkspaceId())
 	require.Equal(t, parent.GetProjectId(), exchanged.GetProjectId())
 
-	verified, err := workContextTestVerifier(t, workContextTestTime).Verify(
+	verified, err := workContextTestVerifier(t, workContextTestTime).VerifyWorkContext(
 		exchangedToken,
-		WorkContextExpectations{
+		workContextTestExpectedWith(WorkContextExpectations{
 			Audience:         "warden.gateway",
 			TenantID:         parent.GetTenantId(),
 			OwnerPrincipalID: parent.GetOwnerPrincipalId(),
 			TaskID:           parent.GetTaskId(),
 			SessionID:        parent.GetSessionId(),
-		},
+		}),
 	)
 	require.NoError(t, err)
-	require.Equal(t, parent.GetActorChain(), verified.GetActorChain())
+	require.Equal(t, parent.GetActorChain(), verified.Claims().GetActorChain())
+	require.Equal(t, workContextTestSeal(), verified.Seal(), "an audience exchange carries the seal unchanged")
 }
 
 func TestWorkContextAudienceExchangeOnlyAttenuatesEffectiveScopes(t *testing.T) {
@@ -227,7 +276,9 @@ func TestWorkContextAudienceExchangeOnlyAttenuatesEffectiveScopes(t *testing.T) 
 }
 
 func TestRequireWorkContextScopeUsesFinalActorEffectiveAuthority(t *testing.T) {
-	_, claims, err := workContextTestSigner(t, workContextTestTime).StartTask(workContextTestInput())
+	token, _, err := workContextTestSigner(t, workContextTestTime).StartTask(workContextTestInput())
+	require.NoError(t, err)
+	claims, err := workContextTestVerifier(t, workContextTestTime).VerifyWorkContext(token, workContextTestExpected())
 	require.NoError(t, err)
 
 	require.NoError(t, RequireWorkContextScope(claims, WorkContextScopeRequirement{
@@ -260,20 +311,29 @@ func TestRequireWorkContextScopeUsesFinalActorEffectiveAuthority(t *testing.T) {
 	}
 }
 
-func TestRequireWorkContextScopeDistinguishesInvalidClaimsFromDenial(t *testing.T) {
-	err := RequireWorkContextScope(nil, WorkContextScopeRequirement{
+// A scope check can only be reached through verification now, so the two ways
+// it used to be reachable without one — nil claims, and claims mutated after
+// they were verified — are the two things this proves are gone.
+func TestRequireWorkContextScopeDistinguishesUnverifiedFromDenial(t *testing.T) {
+	err := RequireWorkContextScope(VerifiedWorkContext{}, WorkContextScopeRequirement{
 		ResourceKind: "evidence", Action: "append", ResourceID: "codefly.execution",
 	})
 	require.ErrorIs(t, err, ErrWorkContextInvalid)
 	require.NotErrorIs(t, err, ErrWorkContextDenied)
 
-	_, claims, err := workContextTestSigner(t, workContextTestTime).StartTask(workContextTestInput())
+	token, _, err := workContextTestSigner(t, workContextTestTime).StartTask(workContextTestInput())
 	require.NoError(t, err)
-	claims.ActorChain[0].GrantedScopes[0].Actions = []string{"write", "read"}
-	err = RequireWorkContextScope(claims, WorkContextScopeRequirement{
-		ResourceKind: "repository", Action: "read", ResourceID: "repo-warden",
-	})
-	require.ErrorIs(t, err, ErrWorkContextInvalid, "mutated non-canonical claims must fail closed")
+	verified, err := workContextTestVerifier(t, workContextTestTime).VerifyWorkContext(token, workContextTestExpected())
+	require.NoError(t, err)
+
+	// Claims hands back a copy, so widening the copy widens nothing. Before the
+	// scope check took a verified credential, this same mutation reached the
+	// authorizing code and had to be caught by re-validating the shape.
+	widened := verified.Claims()
+	widened.ActorChain[0].GrantedScopes[0].Actions = []string{"admin", "append", "read", "write"}
+	require.ErrorIs(t, RequireWorkContextScope(verified, WorkContextScopeRequirement{
+		ResourceKind: "repository", Action: "admin", ResourceID: "repo-warden",
+	}), ErrWorkContextDenied, "mutating a copy of the claims must not widen the credential")
 }
 
 func TestWorkContextWireGolden(t *testing.T) {
@@ -282,7 +342,7 @@ func TestWorkContextWireGolden(t *testing.T) {
 
 	// Shared with sdk-js. A byte-identical token proves payload field order,
 	// uint64 handling, sorting, base64url, and Ed25519 signing agree.
-	const expected = "eyJ0eXAiOiJjb2RlZmx5LndvcmstY29udGV4dC92MSIsImFsZ29yaXRobSI6IkVkMjU1MTkiLCJrZXlfaWQiOiJ3b3JrLWNvbnRleHQtdGVzdC0yMDI2LTA3IiwiaXNzdWVyIjoiaHR0cHM6Ly9hY2NvdW50cy5jb2RlZmx5LmRldi93b3JrLWNvbnRleHQiLCJhdWRpZW5jZSI6IndhcmRlbi5ldmlkZW5jZSIsIm5vdF9iZWZvcmVfdW5peCI6MTc4NDgxMDA5NiwiaXNzdWVkX2F0X3VuaXgiOjE3ODQ4MTAwOTYsImV4cGlyZXNfYXRfdW5peCI6MTc4NDgxMDM5Niwibm9uY2UiOiJub25jZS1maXhlZC1mb3ItZ29sZGVuIiwiYXV0aG9yaXphdGlvbl9yZXZpc2lvbiI6IjE4NDQ2NzQ0MDczNzA5NTUxNjE1IiwicmVwbGF5X3BvbGljeSI6ImlkZW1wb3RlbnQiLCJ0ZW5hbnRfaWQiOiJ0ZW5hbnQtY29kZWZseSIsIm93bmVyX3ByaW5jaXBhbF9pZCI6InByaW5jaXBhbC1hbnRvaW5lIiwidGFza19pZCI6InRhc2stcm9hZG1hcCIsInNlc3Npb25faWQiOiJzZXNzaW9uLXJvb3QiLCJhdXRob3JpdHlfc2NvcGVzIjpbeyJyZXNvdXJjZV9raW5kIjoiZXZpZGVuY2UiLCJhY3Rpb25zIjpbImFwcGVuZCJdLCJyZXNvdXJjZV9pZHMiOltdfSx7InJlc291cmNlX2tpbmQiOiJyZXBvc2l0b3J5IiwiYWN0aW9ucyI6WyJyZWFkIiwid3JpdGUiXSwicmVzb3VyY2VfaWRzIjpbInJlcG8tY29kZWZseSIsInJlcG8td2FyZGVuIl19XSwiYWN0b3JfY2hhaW4iOlt7InByaW5jaXBhbF9pZCI6ImFnZW50LWNsYXVkZS1jb2RlIiwicHJpbmNpcGFsX2tpbmQiOiJhZ2VudCIsImRlbGVnYXRpb25faWQiOiJkZWxlZ2F0aW9uLTEiLCJncmFudGVkX3Njb3BlcyI6W3sicmVzb3VyY2Vfa2luZCI6ImV2aWRlbmNlIiwiYWN0aW9ucyI6WyJhcHBlbmQiXSwicmVzb3VyY2VfaWRzIjpbXX0seyJyZXNvdXJjZV9raW5kIjoicmVwb3NpdG9yeSIsImFjdGlvbnMiOlsicmVhZCIsIndyaXRlIl0sInJlc291cmNlX2lkcyI6WyJyZXBvLXdhcmRlbiJdfV19XSwiYXR0cmlidXRpb25fdGVhbV9pZHMiOlsidGVhbS1haSIsInRlYW0tcGxhdGZvcm0iXSwid29ya3NwYWNlX2lkIjoid29ya3NwYWNlLWRldXMiLCJwcm9qZWN0X2lkIjoicHJvamVjdC13YXJkZW4ifQ.pVZhqvPljkv6SyFD9UAg_oKC4SPj4hIV1Ha0W33cCV04IeaayLDe0w8iVgbxy9wwE2AWY8dXbIMmvnVk0QQRAQ"
+	const expected = "eyJ0eXAiOiJjb2RlZmx5LndvcmstY29udGV4dC92MSIsImFsZ29yaXRobSI6IkVkMjU1MTkiLCJrZXlfaWQiOiJ3b3JrLWNvbnRleHQtdGVzdC0yMDI2LTA3IiwiaXNzdWVyIjoiaHR0cHM6Ly9hY2NvdW50cy5jb2RlZmx5LmRldi93b3JrLWNvbnRleHQiLCJhdWRpZW5jZSI6IndhcmRlbi5ldmlkZW5jZSIsIm5vdF9iZWZvcmVfdW5peCI6MTc4NDgxMDA5NiwiaXNzdWVkX2F0X3VuaXgiOjE3ODQ4MTAwOTYsImV4cGlyZXNfYXRfdW5peCI6MTc4NDgxMDM5Niwibm9uY2UiOiJub25jZS1maXhlZC1mb3ItZ29sZGVuIiwiYXV0aG9yaXphdGlvbl9yZXZpc2lvbiI6IjE4NDQ2NzQ0MDczNzA5NTUxNjE1IiwicmVwbGF5X3BvbGljeSI6ImlkZW1wb3RlbnQiLCJ0ZW5hbnRfaWQiOiJ0ZW5hbnQtY29kZWZseSIsIm93bmVyX3ByaW5jaXBhbF9pZCI6InByaW5jaXBhbC1hbnRvaW5lIiwidGFza19pZCI6InRhc2stcm9hZG1hcCIsInNlc3Npb25faWQiOiJzZXNzaW9uLXJvb3QiLCJhdXRob3JpdHlfc2NvcGVzIjpbeyJyZXNvdXJjZV9raW5kIjoiZXZpZGVuY2UiLCJhY3Rpb25zIjpbImFwcGVuZCJdLCJyZXNvdXJjZV9pZHMiOltdfSx7InJlc291cmNlX2tpbmQiOiJyZXBvc2l0b3J5IiwiYWN0aW9ucyI6WyJyZWFkIiwid3JpdGUiXSwicmVzb3VyY2VfaWRzIjpbInJlcG8tY29kZWZseSIsInJlcG8td2FyZGVuIl19XSwiYWN0b3JfY2hhaW4iOlt7InByaW5jaXBhbF9pZCI6ImFnZW50LWNsYXVkZS1jb2RlIiwicHJpbmNpcGFsX2tpbmQiOiJhZ2VudCIsImRlbGVnYXRpb25faWQiOiJkZWxlZ2F0aW9uLTEiLCJncmFudGVkX3Njb3BlcyI6W3sicmVzb3VyY2Vfa2luZCI6ImV2aWRlbmNlIiwiYWN0aW9ucyI6WyJhcHBlbmQiXSwicmVzb3VyY2VfaWRzIjpbXX0seyJyZXNvdXJjZV9raW5kIjoicmVwb3NpdG9yeSIsImFjdGlvbnMiOlsicmVhZCIsIndyaXRlIl0sInJlc291cmNlX2lkcyI6WyJyZXBvLXdhcmRlbiJdfV19XSwiYXR0cmlidXRpb25fdGVhbV9pZHMiOlsidGVhbS1haSIsInRlYW0tcGxhdGZvcm0iXSwid29ya3NwYWNlX2lkIjoid29ya3NwYWNlLWRldXMiLCJwcm9qZWN0X2lkIjoicHJvamVjdC13YXJkZW4iLCJvd25lcl9wcmluY2lwYWxfa2luZCI6InVzZXIiLCJvd25lcl9wcmluY2lwYWxfZXBvY2giOiI3IiwiaW5zdGFsbGF0aW9uX2lkIjoiaW5zdGFsbGF0aW9uLTBhOWYiLCJpbnN0YWxsYXRpb25fcmV2aXNpb24iOiI0MSIsImJ1aWxkX2luY2FybmF0aW9uIjoiYnVpbGQtaW5jYXJuYXRpb24tMjAyNi0wNy0yMy1hIn0.ew7SXOuSo919plScJDHI4kjafHK6V5JvJtBVrgCrhKVYMmdAN0hcnSEX1-jL9kiUmN2amkkAHGyAtokg77P6Aw"
 	require.Equal(t, expected, token.Encoded())
 }
 
@@ -291,16 +351,16 @@ func TestWorkContextWireGolden(t *testing.T) {
 // A conforming verifier in any language must reject all three.
 func TestWorkContextGoldenRejectsPresentButEmptyOptionalFields(t *testing.T) {
 	goldens := map[string]string{
-		"parent_session_id": "eyJ0eXAiOiJjb2RlZmx5LndvcmstY29udGV4dC92MSIsImFsZ29yaXRobSI6IkVkMjU1MTkiLCJrZXlfaWQiOiJ3b3JrLWNvbnRleHQtdGVzdC0yMDI2LTA3IiwiaXNzdWVyIjoiaHR0cHM6Ly9hY2NvdW50cy5jb2RlZmx5LmRldi93b3JrLWNvbnRleHQiLCJhdWRpZW5jZSI6IndhcmRlbi5ldmlkZW5jZSIsIm5vdF9iZWZvcmVfdW5peCI6MTc4NDgxMDA5NiwiaXNzdWVkX2F0X3VuaXgiOjE3ODQ4MTAwOTYsImV4cGlyZXNfYXRfdW5peCI6MTc4NDgxMDM5Niwibm9uY2UiOiJub25jZS1maXhlZC1mb3ItZ29sZGVuIiwiYXV0aG9yaXphdGlvbl9yZXZpc2lvbiI6IjE4NDQ2NzQ0MDczNzA5NTUxNjE1IiwicmVwbGF5X3BvbGljeSI6ImlkZW1wb3RlbnQiLCJ0ZW5hbnRfaWQiOiJ0ZW5hbnQtY29kZWZseSIsIm93bmVyX3ByaW5jaXBhbF9pZCI6InByaW5jaXBhbC1hbnRvaW5lIiwidGFza19pZCI6InRhc2stcm9hZG1hcCIsInNlc3Npb25faWQiOiJzZXNzaW9uLXJvb3QiLCJwYXJlbnRfc2Vzc2lvbl9pZCI6IiIsImF1dGhvcml0eV9zY29wZXMiOlt7InJlc291cmNlX2tpbmQiOiJldmlkZW5jZSIsImFjdGlvbnMiOlsiYXBwZW5kIl0sInJlc291cmNlX2lkcyI6W119LHsicmVzb3VyY2Vfa2luZCI6InJlcG9zaXRvcnkiLCJhY3Rpb25zIjpbInJlYWQiLCJ3cml0ZSJdLCJyZXNvdXJjZV9pZHMiOlsicmVwby1jb2RlZmx5IiwicmVwby13YXJkZW4iXX1dLCJhY3Rvcl9jaGFpbiI6W3sicHJpbmNpcGFsX2lkIjoiYWdlbnQtY2xhdWRlLWNvZGUiLCJwcmluY2lwYWxfa2luZCI6ImFnZW50IiwiZGVsZWdhdGlvbl9pZCI6ImRlbGVnYXRpb24tMSIsImdyYW50ZWRfc2NvcGVzIjpbeyJyZXNvdXJjZV9raW5kIjoiZXZpZGVuY2UiLCJhY3Rpb25zIjpbImFwcGVuZCJdLCJyZXNvdXJjZV9pZHMiOltdfSx7InJlc291cmNlX2tpbmQiOiJyZXBvc2l0b3J5IiwiYWN0aW9ucyI6WyJyZWFkIiwid3JpdGUiXSwicmVzb3VyY2VfaWRzIjpbInJlcG8td2FyZGVuIl19XX1dLCJhdHRyaWJ1dGlvbl90ZWFtX2lkcyI6WyJ0ZWFtLWFpIiwidGVhbS1wbGF0Zm9ybSJdLCJ3b3Jrc3BhY2VfaWQiOiJ3b3Jrc3BhY2UtZGV1cyIsInByb2plY3RfaWQiOiJwcm9qZWN0LXdhcmRlbiJ9.y4I8b_0ak8amI5-phVBK05RTeNSUmQWbhgoee6lKFfB7zbZvXSYZpnbJdJYLOVr2XQ9-vNcSfGKCa9CYhy8rAA",
-		"workspace_id":      "eyJ0eXAiOiJjb2RlZmx5LndvcmstY29udGV4dC92MSIsImFsZ29yaXRobSI6IkVkMjU1MTkiLCJrZXlfaWQiOiJ3b3JrLWNvbnRleHQtdGVzdC0yMDI2LTA3IiwiaXNzdWVyIjoiaHR0cHM6Ly9hY2NvdW50cy5jb2RlZmx5LmRldi93b3JrLWNvbnRleHQiLCJhdWRpZW5jZSI6IndhcmRlbi5ldmlkZW5jZSIsIm5vdF9iZWZvcmVfdW5peCI6MTc4NDgxMDA5NiwiaXNzdWVkX2F0X3VuaXgiOjE3ODQ4MTAwOTYsImV4cGlyZXNfYXRfdW5peCI6MTc4NDgxMDM5Niwibm9uY2UiOiJub25jZS1maXhlZC1mb3ItZ29sZGVuIiwiYXV0aG9yaXphdGlvbl9yZXZpc2lvbiI6IjE4NDQ2NzQ0MDczNzA5NTUxNjE1IiwicmVwbGF5X3BvbGljeSI6ImlkZW1wb3RlbnQiLCJ0ZW5hbnRfaWQiOiJ0ZW5hbnQtY29kZWZseSIsIm93bmVyX3ByaW5jaXBhbF9pZCI6InByaW5jaXBhbC1hbnRvaW5lIiwidGFza19pZCI6InRhc2stcm9hZG1hcCIsInNlc3Npb25faWQiOiJzZXNzaW9uLXJvb3QiLCJhdXRob3JpdHlfc2NvcGVzIjpbeyJyZXNvdXJjZV9raW5kIjoiZXZpZGVuY2UiLCJhY3Rpb25zIjpbImFwcGVuZCJdLCJyZXNvdXJjZV9pZHMiOltdfSx7InJlc291cmNlX2tpbmQiOiJyZXBvc2l0b3J5IiwiYWN0aW9ucyI6WyJyZWFkIiwid3JpdGUiXSwicmVzb3VyY2VfaWRzIjpbInJlcG8tY29kZWZseSIsInJlcG8td2FyZGVuIl19XSwiYWN0b3JfY2hhaW4iOlt7InByaW5jaXBhbF9pZCI6ImFnZW50LWNsYXVkZS1jb2RlIiwicHJpbmNpcGFsX2tpbmQiOiJhZ2VudCIsImRlbGVnYXRpb25faWQiOiJkZWxlZ2F0aW9uLTEiLCJncmFudGVkX3Njb3BlcyI6W3sicmVzb3VyY2Vfa2luZCI6ImV2aWRlbmNlIiwiYWN0aW9ucyI6WyJhcHBlbmQiXSwicmVzb3VyY2VfaWRzIjpbXX0seyJyZXNvdXJjZV9raW5kIjoicmVwb3NpdG9yeSIsImFjdGlvbnMiOlsicmVhZCIsIndyaXRlIl0sInJlc291cmNlX2lkcyI6WyJyZXBvLXdhcmRlbiJdfV19XSwiYXR0cmlidXRpb25fdGVhbV9pZHMiOlsidGVhbS1haSIsInRlYW0tcGxhdGZvcm0iXSwid29ya3NwYWNlX2lkIjoiIiwicHJvamVjdF9pZCI6InByb2plY3Qtd2FyZGVuIn0.dmtRxR3riehJonFGLLKfhI22mJB9Sw4GhPSz5r9YElBv4QN8kKLL4XQAmZx1tluPvobRS_rchAyEHvKYiD2rBw",
-		"project_id":        "eyJ0eXAiOiJjb2RlZmx5LndvcmstY29udGV4dC92MSIsImFsZ29yaXRobSI6IkVkMjU1MTkiLCJrZXlfaWQiOiJ3b3JrLWNvbnRleHQtdGVzdC0yMDI2LTA3IiwiaXNzdWVyIjoiaHR0cHM6Ly9hY2NvdW50cy5jb2RlZmx5LmRldi93b3JrLWNvbnRleHQiLCJhdWRpZW5jZSI6IndhcmRlbi5ldmlkZW5jZSIsIm5vdF9iZWZvcmVfdW5peCI6MTc4NDgxMDA5NiwiaXNzdWVkX2F0X3VuaXgiOjE3ODQ4MTAwOTYsImV4cGlyZXNfYXRfdW5peCI6MTc4NDgxMDM5Niwibm9uY2UiOiJub25jZS1maXhlZC1mb3ItZ29sZGVuIiwiYXV0aG9yaXphdGlvbl9yZXZpc2lvbiI6IjE4NDQ2NzQ0MDczNzA5NTUxNjE1IiwicmVwbGF5X3BvbGljeSI6ImlkZW1wb3RlbnQiLCJ0ZW5hbnRfaWQiOiJ0ZW5hbnQtY29kZWZseSIsIm93bmVyX3ByaW5jaXBhbF9pZCI6InByaW5jaXBhbC1hbnRvaW5lIiwidGFza19pZCI6InRhc2stcm9hZG1hcCIsInNlc3Npb25faWQiOiJzZXNzaW9uLXJvb3QiLCJhdXRob3JpdHlfc2NvcGVzIjpbeyJyZXNvdXJjZV9raW5kIjoiZXZpZGVuY2UiLCJhY3Rpb25zIjpbImFwcGVuZCJdLCJyZXNvdXJjZV9pZHMiOltdfSx7InJlc291cmNlX2tpbmQiOiJyZXBvc2l0b3J5IiwiYWN0aW9ucyI6WyJyZWFkIiwid3JpdGUiXSwicmVzb3VyY2VfaWRzIjpbInJlcG8tY29kZWZseSIsInJlcG8td2FyZGVuIl19XSwiYWN0b3JfY2hhaW4iOlt7InByaW5jaXBhbF9pZCI6ImFnZW50LWNsYXVkZS1jb2RlIiwicHJpbmNpcGFsX2tpbmQiOiJhZ2VudCIsImRlbGVnYXRpb25faWQiOiJkZWxlZ2F0aW9uLTEiLCJncmFudGVkX3Njb3BlcyI6W3sicmVzb3VyY2Vfa2luZCI6ImV2aWRlbmNlIiwiYWN0aW9ucyI6WyJhcHBlbmQiXSwicmVzb3VyY2VfaWRzIjpbXX0seyJyZXNvdXJjZV9raW5kIjoicmVwb3NpdG9yeSIsImFjdGlvbnMiOlsicmVhZCIsIndyaXRlIl0sInJlc291cmNlX2lkcyI6WyJyZXBvLXdhcmRlbiJdfV19XSwiYXR0cmlidXRpb25fdGVhbV9pZHMiOlsidGVhbS1haSIsInRlYW0tcGxhdGZvcm0iXSwid29ya3NwYWNlX2lkIjoid29ya3NwYWNlLWRldXMiLCJwcm9qZWN0X2lkIjoiIn0.x93RO6IxZaDujBg8NsmvQwiYW6FxkNdMUILIbHyKNU4rnjJZKLHo2I1o4_nTI811Kb0aHEgrk3dfqAE-Ev5eBw",
+		"parent_session_id": "eyJ0eXAiOiJjb2RlZmx5LndvcmstY29udGV4dC92MSIsImFsZ29yaXRobSI6IkVkMjU1MTkiLCJrZXlfaWQiOiJ3b3JrLWNvbnRleHQtdGVzdC0yMDI2LTA3IiwiaXNzdWVyIjoiaHR0cHM6Ly9hY2NvdW50cy5jb2RlZmx5LmRldi93b3JrLWNvbnRleHQiLCJhdWRpZW5jZSI6IndhcmRlbi5ldmlkZW5jZSIsIm5vdF9iZWZvcmVfdW5peCI6MTc4NDgxMDA5NiwiaXNzdWVkX2F0X3VuaXgiOjE3ODQ4MTAwOTYsImV4cGlyZXNfYXRfdW5peCI6MTc4NDgxMDM5Niwibm9uY2UiOiJub25jZS1maXhlZC1mb3ItZ29sZGVuIiwiYXV0aG9yaXphdGlvbl9yZXZpc2lvbiI6IjE4NDQ2NzQ0MDczNzA5NTUxNjE1IiwicmVwbGF5X3BvbGljeSI6ImlkZW1wb3RlbnQiLCJ0ZW5hbnRfaWQiOiJ0ZW5hbnQtY29kZWZseSIsIm93bmVyX3ByaW5jaXBhbF9pZCI6InByaW5jaXBhbC1hbnRvaW5lIiwidGFza19pZCI6InRhc2stcm9hZG1hcCIsInNlc3Npb25faWQiOiJzZXNzaW9uLXJvb3QiLCJwYXJlbnRfc2Vzc2lvbl9pZCI6IiIsImF1dGhvcml0eV9zY29wZXMiOlt7InJlc291cmNlX2tpbmQiOiJldmlkZW5jZSIsImFjdGlvbnMiOlsiYXBwZW5kIl0sInJlc291cmNlX2lkcyI6W119LHsicmVzb3VyY2Vfa2luZCI6InJlcG9zaXRvcnkiLCJhY3Rpb25zIjpbInJlYWQiLCJ3cml0ZSJdLCJyZXNvdXJjZV9pZHMiOlsicmVwby1jb2RlZmx5IiwicmVwby13YXJkZW4iXX1dLCJhY3Rvcl9jaGFpbiI6W3sicHJpbmNpcGFsX2lkIjoiYWdlbnQtY2xhdWRlLWNvZGUiLCJwcmluY2lwYWxfa2luZCI6ImFnZW50IiwiZGVsZWdhdGlvbl9pZCI6ImRlbGVnYXRpb24tMSIsImdyYW50ZWRfc2NvcGVzIjpbeyJyZXNvdXJjZV9raW5kIjoiZXZpZGVuY2UiLCJhY3Rpb25zIjpbImFwcGVuZCJdLCJyZXNvdXJjZV9pZHMiOltdfSx7InJlc291cmNlX2tpbmQiOiJyZXBvc2l0b3J5IiwiYWN0aW9ucyI6WyJyZWFkIiwid3JpdGUiXSwicmVzb3VyY2VfaWRzIjpbInJlcG8td2FyZGVuIl19XX1dLCJhdHRyaWJ1dGlvbl90ZWFtX2lkcyI6WyJ0ZWFtLWFpIiwidGVhbS1wbGF0Zm9ybSJdLCJ3b3Jrc3BhY2VfaWQiOiJ3b3Jrc3BhY2UtZGV1cyIsInByb2plY3RfaWQiOiJwcm9qZWN0LXdhcmRlbiIsIm93bmVyX3ByaW5jaXBhbF9raW5kIjoidXNlciIsIm93bmVyX3ByaW5jaXBhbF9lcG9jaCI6IjciLCJpbnN0YWxsYXRpb25faWQiOiJpbnN0YWxsYXRpb24tMGE5ZiIsImluc3RhbGxhdGlvbl9yZXZpc2lvbiI6IjQxIiwiYnVpbGRfaW5jYXJuYXRpb24iOiJidWlsZC1pbmNhcm5hdGlvbi0yMDI2LTA3LTIzLWEifQ.CxdrAx_gkJlVyjTSDpc4oty1Tg67D3n-mwfDVz7ShWJk3KtXI6yDZ1x_8HcgJItZ1vJAXh98aZvujOScfAbCBw",
+		"workspace_id":      "eyJ0eXAiOiJjb2RlZmx5LndvcmstY29udGV4dC92MSIsImFsZ29yaXRobSI6IkVkMjU1MTkiLCJrZXlfaWQiOiJ3b3JrLWNvbnRleHQtdGVzdC0yMDI2LTA3IiwiaXNzdWVyIjoiaHR0cHM6Ly9hY2NvdW50cy5jb2RlZmx5LmRldi93b3JrLWNvbnRleHQiLCJhdWRpZW5jZSI6IndhcmRlbi5ldmlkZW5jZSIsIm5vdF9iZWZvcmVfdW5peCI6MTc4NDgxMDA5NiwiaXNzdWVkX2F0X3VuaXgiOjE3ODQ4MTAwOTYsImV4cGlyZXNfYXRfdW5peCI6MTc4NDgxMDM5Niwibm9uY2UiOiJub25jZS1maXhlZC1mb3ItZ29sZGVuIiwiYXV0aG9yaXphdGlvbl9yZXZpc2lvbiI6IjE4NDQ2NzQ0MDczNzA5NTUxNjE1IiwicmVwbGF5X3BvbGljeSI6ImlkZW1wb3RlbnQiLCJ0ZW5hbnRfaWQiOiJ0ZW5hbnQtY29kZWZseSIsIm93bmVyX3ByaW5jaXBhbF9pZCI6InByaW5jaXBhbC1hbnRvaW5lIiwidGFza19pZCI6InRhc2stcm9hZG1hcCIsInNlc3Npb25faWQiOiJzZXNzaW9uLXJvb3QiLCJhdXRob3JpdHlfc2NvcGVzIjpbeyJyZXNvdXJjZV9raW5kIjoiZXZpZGVuY2UiLCJhY3Rpb25zIjpbImFwcGVuZCJdLCJyZXNvdXJjZV9pZHMiOltdfSx7InJlc291cmNlX2tpbmQiOiJyZXBvc2l0b3J5IiwiYWN0aW9ucyI6WyJyZWFkIiwid3JpdGUiXSwicmVzb3VyY2VfaWRzIjpbInJlcG8tY29kZWZseSIsInJlcG8td2FyZGVuIl19XSwiYWN0b3JfY2hhaW4iOlt7InByaW5jaXBhbF9pZCI6ImFnZW50LWNsYXVkZS1jb2RlIiwicHJpbmNpcGFsX2tpbmQiOiJhZ2VudCIsImRlbGVnYXRpb25faWQiOiJkZWxlZ2F0aW9uLTEiLCJncmFudGVkX3Njb3BlcyI6W3sicmVzb3VyY2Vfa2luZCI6ImV2aWRlbmNlIiwiYWN0aW9ucyI6WyJhcHBlbmQiXSwicmVzb3VyY2VfaWRzIjpbXX0seyJyZXNvdXJjZV9raW5kIjoicmVwb3NpdG9yeSIsImFjdGlvbnMiOlsicmVhZCIsIndyaXRlIl0sInJlc291cmNlX2lkcyI6WyJyZXBvLXdhcmRlbiJdfV19XSwiYXR0cmlidXRpb25fdGVhbV9pZHMiOlsidGVhbS1haSIsInRlYW0tcGxhdGZvcm0iXSwid29ya3NwYWNlX2lkIjoiIiwicHJvamVjdF9pZCI6InByb2plY3Qtd2FyZGVuIiwib3duZXJfcHJpbmNpcGFsX2tpbmQiOiJ1c2VyIiwib3duZXJfcHJpbmNpcGFsX2Vwb2NoIjoiNyIsImluc3RhbGxhdGlvbl9pZCI6Imluc3RhbGxhdGlvbi0wYTlmIiwiaW5zdGFsbGF0aW9uX3JldmlzaW9uIjoiNDEiLCJidWlsZF9pbmNhcm5hdGlvbiI6ImJ1aWxkLWluY2FybmF0aW9uLTIwMjYtMDctMjMtYSJ9.Nrs7RXdAEhxC_sEUZEFX5P5LJy7Az_1eeUie9a-DGHGyJ7nDP-Rm7seY221gmib9vGa21GtiFGl4CKo4U4iuDQ",
+		"project_id":        "eyJ0eXAiOiJjb2RlZmx5LndvcmstY29udGV4dC92MSIsImFsZ29yaXRobSI6IkVkMjU1MTkiLCJrZXlfaWQiOiJ3b3JrLWNvbnRleHQtdGVzdC0yMDI2LTA3IiwiaXNzdWVyIjoiaHR0cHM6Ly9hY2NvdW50cy5jb2RlZmx5LmRldi93b3JrLWNvbnRleHQiLCJhdWRpZW5jZSI6IndhcmRlbi5ldmlkZW5jZSIsIm5vdF9iZWZvcmVfdW5peCI6MTc4NDgxMDA5NiwiaXNzdWVkX2F0X3VuaXgiOjE3ODQ4MTAwOTYsImV4cGlyZXNfYXRfdW5peCI6MTc4NDgxMDM5Niwibm9uY2UiOiJub25jZS1maXhlZC1mb3ItZ29sZGVuIiwiYXV0aG9yaXphdGlvbl9yZXZpc2lvbiI6IjE4NDQ2NzQ0MDczNzA5NTUxNjE1IiwicmVwbGF5X3BvbGljeSI6ImlkZW1wb3RlbnQiLCJ0ZW5hbnRfaWQiOiJ0ZW5hbnQtY29kZWZseSIsIm93bmVyX3ByaW5jaXBhbF9pZCI6InByaW5jaXBhbC1hbnRvaW5lIiwidGFza19pZCI6InRhc2stcm9hZG1hcCIsInNlc3Npb25faWQiOiJzZXNzaW9uLXJvb3QiLCJhdXRob3JpdHlfc2NvcGVzIjpbeyJyZXNvdXJjZV9raW5kIjoiZXZpZGVuY2UiLCJhY3Rpb25zIjpbImFwcGVuZCJdLCJyZXNvdXJjZV9pZHMiOltdfSx7InJlc291cmNlX2tpbmQiOiJyZXBvc2l0b3J5IiwiYWN0aW9ucyI6WyJyZWFkIiwid3JpdGUiXSwicmVzb3VyY2VfaWRzIjpbInJlcG8tY29kZWZseSIsInJlcG8td2FyZGVuIl19XSwiYWN0b3JfY2hhaW4iOlt7InByaW5jaXBhbF9pZCI6ImFnZW50LWNsYXVkZS1jb2RlIiwicHJpbmNpcGFsX2tpbmQiOiJhZ2VudCIsImRlbGVnYXRpb25faWQiOiJkZWxlZ2F0aW9uLTEiLCJncmFudGVkX3Njb3BlcyI6W3sicmVzb3VyY2Vfa2luZCI6ImV2aWRlbmNlIiwiYWN0aW9ucyI6WyJhcHBlbmQiXSwicmVzb3VyY2VfaWRzIjpbXX0seyJyZXNvdXJjZV9raW5kIjoicmVwb3NpdG9yeSIsImFjdGlvbnMiOlsicmVhZCIsIndyaXRlIl0sInJlc291cmNlX2lkcyI6WyJyZXBvLXdhcmRlbiJdfV19XSwiYXR0cmlidXRpb25fdGVhbV9pZHMiOlsidGVhbS1haSIsInRlYW0tcGxhdGZvcm0iXSwid29ya3NwYWNlX2lkIjoid29ya3NwYWNlLWRldXMiLCJwcm9qZWN0X2lkIjoiIiwib3duZXJfcHJpbmNpcGFsX2tpbmQiOiJ1c2VyIiwib3duZXJfcHJpbmNpcGFsX2Vwb2NoIjoiNyIsImluc3RhbGxhdGlvbl9pZCI6Imluc3RhbGxhdGlvbi0wYTlmIiwiaW5zdGFsbGF0aW9uX3JldmlzaW9uIjoiNDEiLCJidWlsZF9pbmNhcm5hdGlvbiI6ImJ1aWxkLWluY2FybmF0aW9uLTIwMjYtMDctMjMtYSJ9.hZWBljC6rWAUf4T4nNlAcW76rceX1-KRk9tb_A4DNzB-fmHjvbDxVsM7ir0gDTUPmlWNA7XSEhxBB9bHHwwPAw",
 	}
 	verifier := workContextTestVerifier(t, workContextTestTime)
 	for field, encoded := range goldens {
 		t.Run(field, func(t *testing.T) {
 			token, err := ParseWorkContextToken(encoded)
 			require.NoError(t, err)
-			_, err = verifier.Verify(token, WorkContextExpectations{})
+			_, err = verifier.VerifyWorkContext(token, workContextTestExpected())
 			require.ErrorIs(t, err, ErrWorkContextInvalid)
 			require.ErrorContains(t, err, field+" must not be empty when present")
 			require.NotContains(t, err.Error(), "signature", "must be rejected by validation, not signature failure")
@@ -319,10 +379,10 @@ func TestWorkContextAcceptsSingleCharacterOptionalFields(t *testing.T) {
 	token, _, err := workContextTestSigner(t, workContextTestTime).StartTask(input)
 	require.NoError(t, err)
 
-	verified, err := workContextTestVerifier(t, workContextTestTime).Verify(token, WorkContextExpectations{})
+	verified, err := workContextTestVerifier(t, workContextTestTime).VerifyWorkContext(token, workContextTestExpected())
 	require.NoError(t, err)
-	require.Equal(t, " ", verified.GetWorkspaceId())
-	require.Equal(t, " ", verified.GetProjectId())
+	require.Equal(t, " ", verified.Claims().GetWorkspaceId())
+	require.Equal(t, " ", verified.Claims().GetProjectId())
 }
 
 // StartTask omits the optional workspace_id/project_id when the caller passes an
@@ -340,7 +400,7 @@ func TestWorkContextStartTaskOmitsEmptyOptionalFields(t *testing.T) {
 	require.Nil(t, claims.WorkspaceId, "empty WorkspaceID must be omitted, not stored as present-but-empty")
 	require.Nil(t, claims.ProjectId, "empty ProjectID must be omitted, not stored as present-but-empty")
 
-	_, err = workContextTestVerifier(t, workContextTestTime).Verify(token, WorkContextExpectations{})
+	_, err = workContextTestVerifier(t, workContextTestTime).VerifyWorkContext(token, workContextTestExpected())
 	require.NoError(t, err, "a context with absent optional fields must verify")
 }
 
@@ -355,7 +415,7 @@ func TestWorkContextRejectsForgeryAndClaimSubstitution(t *testing.T) {
 	payload[len(payload)/2] ^= 1
 	forged, err := ParseWorkContextToken(base64.RawURLEncoding.EncodeToString(payload) + "." + segments[1])
 	require.NoError(t, err)
-	_, err = verifier.Verify(forged, WorkContextExpectations{Audience: "warden.evidence"})
+	_, err = verifier.VerifyWorkContext(forged, workContextTestExpectedWith(WorkContextExpectations{Audience: "warden.evidence"}))
 	require.ErrorIs(t, err, ErrWorkContextInvalid)
 	require.Contains(t, err.Error(), "signature")
 
@@ -367,7 +427,7 @@ func TestWorkContextRejectsForgeryAndClaimSubstitution(t *testing.T) {
 		"session":  {SessionID: "session-other"},
 	} {
 		t.Run(name, func(t *testing.T) {
-			_, verifyErr := verifier.Verify(token, expected)
+			_, verifyErr := verifier.VerifyWorkContext(token, workContextTestExpectedWith(expected))
 			require.ErrorIs(t, verifyErr, ErrWorkContextInvalid)
 			require.Contains(t, verifyErr.Error(), "mismatch")
 		})
@@ -378,7 +438,7 @@ func TestWorkContextRejectsExpiredFutureAndExcessiveLifetime(t *testing.T) {
 	token, _, err := workContextTestSigner(t, workContextTestTime).StartTask(workContextTestInput())
 	require.NoError(t, err)
 
-	_, err = workContextTestVerifier(t, workContextTestTime.Add(7*time.Minute)).Verify(token, WorkContextExpectations{})
+	_, err = workContextTestVerifier(t, workContextTestTime.Add(7*time.Minute)).VerifyWorkContext(token, workContextTestExpected())
 	require.ErrorIs(t, err, ErrWorkContextInvalid)
 	require.Contains(t, err.Error(), "expired")
 
@@ -386,7 +446,7 @@ func TestWorkContextRejectsExpiredFutureAndExcessiveLifetime(t *testing.T) {
 	futureInput.NotBefore = workContextTestTime.Add(2 * time.Minute)
 	futureToken, _, err := workContextTestSigner(t, workContextTestTime).StartTask(futureInput)
 	require.NoError(t, err)
-	_, err = workContextTestVerifier(t, workContextTestTime).Verify(futureToken, WorkContextExpectations{})
+	_, err = workContextTestVerifier(t, workContextTestTime).VerifyWorkContext(futureToken, workContextTestExpected())
 	require.ErrorIs(t, err, ErrWorkContextInvalid)
 	require.Contains(t, err.Error(), "not active")
 
@@ -426,16 +486,16 @@ func TestWorkContextChildSessionPreservesOwnershipAndAttenuates(t *testing.T) {
 	require.Equal(t, "session-child", child.SessionId)
 	require.Len(t, child.ActorChain, 2)
 
-	verified, err := workContextTestVerifier(t, workContextTestTime).Verify(childToken, WorkContextExpectations{
+	verified, err := workContextTestVerifier(t, workContextTestTime).VerifyWorkContext(childToken, workContextTestExpectedWith(WorkContextExpectations{
 		Audience:         "warden.tools",
 		TenantID:         parentClaims.TenantId,
 		OwnerPrincipalID: parentClaims.OwnerPrincipalId,
 		TaskID:           parentClaims.TaskId,
 		SessionID:        "session-child",
 		ParentSessionID:  stringPointer("session-root"),
-	})
+	}))
 	require.NoError(t, err)
-	require.Equal(t, "tool-codefly-editor", verified.ActorChain[1].PrincipalId)
+	require.Equal(t, "tool-codefly-editor", verified.Claims().ActorChain[1].PrincipalId)
 }
 
 func TestWorkContextChildSessionRejectsScopeWidening(t *testing.T) {
@@ -492,7 +552,7 @@ func TestWorkContextMalformedTokensFailClosed(t *testing.T) {
 	for _, encoded := range []string{"", "one-segment", "a.b.c", "!!!.!!!"} {
 		token, parseErr := ParseWorkContextToken(encoded)
 		if parseErr == nil {
-			_, parseErr = verifier.Verify(token, WorkContextExpectations{})
+			_, parseErr = verifier.VerifyWorkContext(token, workContextTestExpected())
 		}
 		require.ErrorIs(t, parseErr, ErrWorkContextInvalid, encoded)
 	}

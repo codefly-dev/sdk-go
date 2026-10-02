@@ -2,11 +2,14 @@ package workcontext
 
 import (
 	"crypto/ed25519"
+	"encoding/base64"
 	"fmt"
 	"math/rand/v2"
 	"net/http"
 	"net/http/httptest"
+	"regexp"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -50,9 +53,19 @@ func newPartitionWorld(t *testing.T) *partitionWorld {
 	return world
 }
 
+// verify accepts both a direct owner call and a delegated one, because the
+// partition tests derive from both and the partition is the thing under test
+// here rather than the delegation check. A real verifier states one or the
+// other; stating both would defeat the point of the check.
 func (w *partitionWorld) verify(token WorkContextToken) VerifiedWorkContext {
 	w.t.Helper()
-	verified, err := w.verifier.VerifyWorkContext(token, WorkContextExpectations{})
+	expected := workContextTestExpected()
+	expected.Delegation = nil
+	verified, err := w.verifier.VerifyWorkContext(token, expected)
+	if err != nil {
+		expected.Delegation = &DelegationExpectations{}
+		verified, err = w.verifier.VerifyWorkContext(token, expected)
+	}
 	require.NoError(w.t, err)
 	return verified
 }
@@ -134,11 +147,23 @@ func partitionStartInput(random *rand.Rand, tenant string, revision uint64, scop
 		Audience:              fmt.Sprintf("service-%d", random.IntN(1000)),
 		TenantID:              tenant,
 		OwnerPrincipalID:      fmt.Sprintf("principal-%d", random.IntN(1000)),
+		OwnerPrincipalKind:    "user",
+		Seal:                  workContextTestSeal(),
 		TaskID:                fmt.Sprintf("task-%d", random.Uint64()),
 		SessionID:             fmt.Sprintf("session-%d", random.Uint64()),
 		AuthorizationRevision: revision,
 		AuthorityScopes:       scopes,
 	}
+}
+
+// partitionKeyPrefix is the tenant-and-installation half of every key these
+// tests assert on. The installation and its revision are always present, so a
+// test that spells the prefix by hand spells all three.
+func partitionKeyPrefix(tenant string) string {
+	seal := workContextTestSeal()
+	return "wc2:t:" + base64.RawURLEncoding.EncodeToString([]byte(tenant)) +
+		":i:" + base64.RawURLEncoding.EncodeToString([]byte(seal.InstallationID)) +
+		":r:" + strconv.FormatUint(seal.InstallationRevision, 10)
 }
 
 func TestDeriveCachePartitionIsStableAcrossHopsWithTheSameView(t *testing.T) {
@@ -260,8 +285,8 @@ func TestDeriveCachePartitionNeverCarriesExecutionIdentity(t *testing.T) {
 		}
 		require.True(t, strings.HasPrefix(partition.Key, tenant.Key))
 	}
-	require.Equal(t, "wc1:t:dGVuYW50LWNvZGVmbHk", tenant.Key)
-	require.Regexp(t, `^wc1:t:dGVuYW50LWNvZGVmbHk:v:[0-9a-f]{64}$`, view.Key)
+	require.Equal(t, partitionKeyPrefix("tenant-codefly"), tenant.Key)
+	require.Regexp(t, `^`+regexp.QuoteMeta(partitionKeyPrefix("tenant-codefly"))+`:v:[0-9a-f]{64}$`, view.Key)
 }
 
 func TestDeriveCachePartitionTenantEncodingCannotSpellAnotherView(t *testing.T) {
@@ -274,7 +299,7 @@ func TestDeriveCachePartitionTenantEncodingCannotSpellAnotherView(t *testing.T) 
 
 	// A tenant ID made of the victim's view key suffix must not produce the
 	// victim's key under tenant-only partitioning.
-	suffix := strings.TrimPrefix(victimView.Key, "wc1:t:")
+	suffix := strings.TrimPrefix(victimView.Key, "wc2:t:")
 	forger, _, err := world.signer.StartTask(partitionStartInput(random, "tenant-a:v:"+suffix, 1, scopes))
 	require.NoError(t, err)
 	forgerTenant, _ := world.partitions(forger)
@@ -304,11 +329,11 @@ func TestDeriveCachePartitionAcceptsOnlyVerifiedContexts(t *testing.T) {
 	require.NoError(t, err)
 	parsed, err := ParseWorkContextToken(forged.Encoded())
 	require.NoError(t, err)
-	_, err = world.verifier.VerifyWorkContext(parsed, WorkContextExpectations{})
+	_, err = world.verifier.VerifyWorkContext(parsed, workContextTestExpected())
 	require.ErrorIs(t, err, ErrWorkContextInvalid)
 
 	// Expectations still apply: a context for another audience is rejected.
-	_, err = world.verifier.VerifyWorkContext(token, WorkContextExpectations{Audience: "someone-else"})
+	_, err = world.verifier.VerifyWorkContext(token, workContextTestExpectedWith(WorkContextExpectations{Audience: "someone-else"}))
 	require.ErrorIs(t, err, ErrWorkContextInvalid)
 
 	// Claims hands out a copy; mutating it cannot move the partition.
@@ -337,13 +362,13 @@ func TestJWKSVerifierVerifyWorkContextFeedsThePartition(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	verified, err := verifier.VerifyWorkContext(t.Context(), workContextJWKSToken(t, "key-1", privateKey), WorkContextExpectations{})
+	verified, err := verifier.VerifyWorkContext(t.Context(), workContextJWKSToken(t, "key-1", privateKey), workContextTestExpected())
 	require.NoError(t, err)
 	partition, err := DeriveCachePartition(verified)
 	require.NoError(t, err)
-	require.Equal(t, "wc1:t:dGVuYW50LWNvZGVmbHk", partition.Key)
+	require.Equal(t, partitionKeyPrefix("tenant-codefly"), partition.Key)
 
-	_, err = verifier.VerifyWorkContext(t.Context(), workContextJWKSToken(t, "key-2", privateKey), WorkContextExpectations{})
+	_, err = verifier.VerifyWorkContext(t.Context(), workContextJWKSToken(t, "key-2", privateKey), workContextTestExpected())
 	require.ErrorIs(t, err, ErrWorkContextInvalid)
 }
 
@@ -378,7 +403,11 @@ func TestAuthorizationViewDigestCanonicalizesScopeOrder(t *testing.T) {
 	require.NotEqual(t, first, actorView)
 
 	// A nil option is ignored rather than dereferenced.
-	_, err = DeriveCachePartition(VerifiedWorkContext{claims: ordered}, nil, ByAuthorizationView())
+	_, err = DeriveCachePartition(
+		VerifiedWorkContext{sealed: sealedContext{context: ordered, seal: workContextTestSeal()}},
+		nil,
+		ByAuthorizationView(),
+	)
 	require.NoError(t, err)
 }
 
@@ -473,4 +502,63 @@ func TestDeriveCachePartitionByViewerFollowsTheEffectiveActor(t *testing.T) {
 	require.NotEqual(t, firstViewer, secondViewer, "two agents are two viewers")
 	require.NotEqual(t, ownerViewer, firstViewer, "an agent acting for an owner is not the owner")
 	require.NotEqual(t, ownerViewer, secondViewer)
+}
+
+// Deliverable 3's other half: the SDK never caches an authorization answer
+// across the installation revision it was given. An answer computed while the
+// host held revision N was computed under the authority of revision N, and
+// nothing about it survives the move to N+1 — so the move lands every caller
+// in a fresh partition, which is a cache miss by design and never a stale hit.
+func TestCachePartitionNeverSpansAnInstallationRevision(t *testing.T) {
+	world := newPartitionWorld(t)
+	random := rand.New(rand.NewPCG(47, 11))
+	scopes := randomScopes(random)
+
+	atRevision := func(revision uint64, installation string) (CachePartition, CachePartition, CachePartition) {
+		input := partitionStartInput(random, "tenant-codefly", 5, scopes)
+		input.OwnerPrincipalID = "principal-stable"
+		input.Audience = "service-stable"
+		input.Seal.InstallationRevision = revision
+		input.Seal.InstallationID = installation
+		token, _, err := world.signer.StartTask(input)
+		require.NoError(t, err)
+
+		expected := workContextTestExpected()
+		expected.Delegation = nil
+		expected.Seal.InstallationRevision = revision
+		expected.Seal.InstallationID = installation
+		verified, err := world.verifier.VerifyWorkContext(token, expected)
+		require.NoError(t, err)
+
+		tenant, err := DeriveCachePartition(verified)
+		require.NoError(t, err)
+		view, err := DeriveCachePartition(verified, ByAuthorizationView())
+		require.NoError(t, err)
+		viewer, err := DeriveCachePartition(verified, ByViewer())
+		require.NoError(t, err)
+		return tenant, view, viewer
+	}
+
+	beforeTenant, beforeView, beforeViewer := atRevision(41, "installation-0a9f")
+	afterTenant, afterView, afterViewer := atRevision(42, "installation-0a9f")
+	require.NotEqual(t, beforeTenant.Key, afterTenant.Key)
+	require.NotEqual(t, beforeView.Key, afterView.Key)
+	require.NotEqual(t, beforeViewer.Key, afterViewer.Key)
+
+	// Two installations share their small revision numbers, so the id has to
+	// travel with the revision or installation A at revision 41 and
+	// installation B at revision 41 would be one partition.
+	elsewhereTenant, _, _ := atRevision(41, "installation-b3c1")
+	require.NotEqual(t, beforeTenant.Key, elsewhereTenant.Key)
+
+	// Nothing else moved, so the same credential still derives the same keys.
+	againTenant, againView, againViewer := atRevision(41, "installation-0a9f")
+	require.Equal(t, beforeTenant.Key, againTenant.Key)
+	require.Equal(t, beforeView.Key, againView.Key)
+	require.Equal(t, beforeViewer.Key, againViewer.Key)
+
+	// The key shape changed with this credential, so a shared cache that
+	// outlived the deploy must not be reachable under the keys it still holds.
+	require.True(t, strings.HasPrefix(beforeTenant.Key, "wc2:"))
+	require.NotContains(t, beforeTenant.Key, "wc1:")
 }

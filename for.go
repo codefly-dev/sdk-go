@@ -279,7 +279,29 @@ func (q *Query) WorkspaceSecret(name string, key string) (string, error) {
 // WorkspaceValue resolves a workspace value from the public namespace first,
 // then the secret namespace. It is intended for settings whose sensitivity is
 // deployment-defined while preserving a single SDK-only lookup boundary.
+//
+// A value this process read as authority-bearing (see ReadAuthority) answers
+// from what was read at boot, and a live value that has since drifted is
+// refused with ErrAuthorityValueChanged rather than returned. Without that, a
+// process could seal its credential to the boot value and then authorize
+// against a different one through the ordinary accessor.
 func (q *Query) WorkspaceValue(name string, key string) (string, error) {
+	addressed := AuthorityValueName{Name: name, Key: key}.canonical()
+	pinned, isPinned := authorityPin(addressed)
+	value, err := q.workspaceValueLive(name, key)
+	if !isPinned {
+		return value, err
+	}
+	if err != nil || strings.TrimSpace(value) == "" {
+		return "", fmt.Errorf("%w: %s is no longer configured", ErrAuthorityValueChanged, addressed)
+	}
+	if value != pinned {
+		return "", fmt.Errorf("%w: %s", ErrAuthorityValueChanged, addressed)
+	}
+	return pinned, nil
+}
+
+func (q *Query) workspaceValueLive(name string, key string) (string, error) {
 	if value, err := q.WorkspaceConfiguration(name, key); err == nil && value != "" {
 		return value, nil
 	}

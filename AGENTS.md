@@ -89,13 +89,14 @@ package line.
 | --- | --- |
 | `codefly.go` | `Init`, the immutable env snapshot, `Inject*`, process-level accessors |
 | `for.go` | the `For(ctx)` query: endpoints, configuration, secrets, workspace values |
+| `authority.go` | authority-bearing values, read once at boot; a drift is refused, never reloaded |
 | `runtime_value.go` | `RuntimeValue`, for values the runtime injects directly |
 | `runtime_environment_file.go` | loading a runtime-written env file |
 | `fixture.go` | the selected fixture, and resolving its principals by role |
 | `tls.go` | workload leaf certificates, reloaded on rotation |
 | `receipts/` | effect receipts: the store, the digest, the replay/conflict interceptor |
 | `receipts/grpctransport/`, `receipts/connecttransport/` | the two transport adapters, split so neither drags the other's dependency in |
-| `workcontext/` | **separate leaf module**: Work Context signing and verification |
+| `workcontext/` | **separate leaf module**: the mint-once client, the seal, signing and verification |
 | `workcontext/grpctransport/` | the gRPC carrier, so verify-only consumers never compile grpc |
 
 `workcontext` exists to keep a verify-only consumer's `go.sum` small. Adding a
@@ -113,6 +114,17 @@ dependency to it is a design change, not a detail — see the skill below.
 - **An empty injected value is not a value.** A composition templating an unset
   variable ships the name with an empty string; `RuntimeValue` reports `false`
   so it cannot shadow the configuration a caller falls back to. Keep that.
+- **A credential is sealed or it is not a credential.** Every field of
+  `workcontext.Seal` is required, at sign time and at verify time, and
+  `AttachWorkContext` refuses an unsealed token. A claim added to the wire must
+  be added to the payload struct pair in `work_context.go`: the signed bytes are
+  hand-written JSON, so a field present only in the proto is dropped at mint and
+  absent at verify. `codefly-dev/core` has a second `workcontext` package that
+  signs protobuf; it is wire-incompatible and no live path uses it.
+- **An authority-bearing value is read once.** A principal, binding or audience
+  comes from `ReadAuthority` at boot. `WorkspaceValue` answers from that pin for
+  a pinned name, so a drift is an error rather than a reload — the process has
+  already minted a credential sealed to the old value.
 - **A receipt is written inside the transaction that commits its effect.** A
   receipt written after the commit leaves a window where the effect exists and
   the receipt does not, and a recovery landing there reads "no receipt" for an

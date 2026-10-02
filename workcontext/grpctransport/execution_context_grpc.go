@@ -12,8 +12,13 @@ import (
 
 const (
 	workContextGRPCMetadataName = workcontext.WorkContextHeaderName
-	operationIDGRPCMetadataName = "x-codefly-operation-id"
-	maxOperationIDBytes         = 128
+	// The installation carriers are the same names as on HTTP, because they
+	// are the same fact: gRPC metadata keys and HTTP header names are one
+	// namespace, and spelling them twice is how they drift.
+	installationIDGRPCMetadataName       = workcontext.InstallationIDHeaderName
+	installationRevisionGRPCMetadataName = workcontext.InstallationRevisionHeaderName
+	operationIDGRPCMetadataName          = "x-codefly-operation-id"
+	maxOperationIDBytes                  = 128
 )
 
 // ExecutionContext is the opaque authority and stable logical-operation
@@ -58,6 +63,12 @@ func (execution ExecutionContext) OperationID() string {
 // metadata while preserving unrelated metadata. Existing carrier values are
 // rejected rather than overwritten or joined.
 //
+// The sealed installation travels beside the capability on every call, so the
+// callee can re-check the installation the call is being made under without
+// decoding the token first. It is a pre-check and not authority: the
+// installation that governs the call is the sealed one, and a callee that finds
+// the two disagreeing refuses rather than choosing between them.
+//
 // A Work Context is bound to one audience. A service calling another service
 // attaches a context the authority exchanged for the callee's audience
 // (ExchangeWorkContextAudience), never the one it received: the callee's
@@ -74,12 +85,23 @@ func WithGRPCExecutionContext(
 	if err != nil {
 		return nil, err
 	}
-	existing, _ := metadata.FromOutgoingContext(ctx)
-	if len(existing.Get(workContextGRPCMetadataName)) != 0 {
-		return nil, fmt.Errorf("%w: outgoing gRPC Work Context already set", workcontext.ErrWorkContextInvalid)
+	installationID, installationRevision, err := workcontext.SealedInstallation(validated.workContext)
+	if err != nil {
+		return nil, err
 	}
-	if len(existing.Get(operationIDGRPCMetadataName)) != 0 {
-		return nil, fmt.Errorf("%w: outgoing gRPC operation ID already set", workcontext.ErrWorkContextInvalid)
+	existing, _ := metadata.FromOutgoingContext(ctx)
+	for _, carrier := range []string{
+		workContextGRPCMetadataName,
+		operationIDGRPCMetadataName,
+		installationIDGRPCMetadataName,
+		installationRevisionGRPCMetadataName,
+	} {
+		if len(existing.Get(carrier)) != 0 {
+			return nil, fmt.Errorf(
+				"%w: outgoing gRPC metadata %q is already set",
+				workcontext.ErrWorkContextInvalid, carrier,
+			)
+		}
 	}
 	return metadata.AppendToOutgoingContext(
 		ctx,
@@ -87,6 +109,10 @@ func WithGRPCExecutionContext(
 		validated.workContext.Encoded(),
 		operationIDGRPCMetadataName,
 		validated.operationID,
+		installationIDGRPCMetadataName,
+		installationID,
+		installationRevisionGRPCMetadataName,
+		installationRevision,
 	), nil
 }
 
@@ -119,7 +145,48 @@ func GRPCExecutionContextFromIncoming(ctx context.Context) (ExecutionContext, er
 	if err != nil {
 		return ExecutionContext{}, err
 	}
+	if err := checkIncomingInstallation(values, workContext); err != nil {
+		return ExecutionContext{}, err
+	}
 	return NewExecutionContext(workContext, operationIDs[0])
+}
+
+// checkIncomingInstallation holds the installation carriers to the sealed
+// claim. The carriers exist so a callee can refuse cheaply; they are caller-
+// controlled, so the only two acceptable outcomes are "they agree with the
+// seal" and "the call is refused". Preferring the carrier would let a caller
+// name any installation it liked, and ignoring a disagreement would make the
+// carriers decoration that a reader would nonetheless log and believe.
+func checkIncomingInstallation(
+	values metadata.MD,
+	token workcontext.WorkContextToken,
+) error {
+	sealedID, sealedRevision, err := workcontext.SealedInstallation(token)
+	if err != nil {
+		return err
+	}
+	for _, carrier := range []struct {
+		name   string
+		sealed string
+	}{
+		{installationIDGRPCMetadataName, sealedID},
+		{installationRevisionGRPCMetadataName, sealedRevision},
+	} {
+		presented := values.Get(carrier.name)
+		if len(presented) != 1 {
+			return fmt.Errorf(
+				"%w: incoming gRPC %s requires exactly one value",
+				workcontext.ErrWorkContextInvalid, carrier.name,
+			)
+		}
+		if presented[0] != carrier.sealed {
+			return fmt.Errorf(
+				"%w: incoming gRPC %s is %q and the credential seals %q",
+				workcontext.ErrWorkContextInvalid, carrier.name, presented[0], carrier.sealed,
+			)
+		}
+	}
+	return nil
 }
 
 // GRPCExecutionContextFromIncomingIfPresent supports compatibility boundaries
@@ -135,9 +202,16 @@ func GRPCExecutionContextFromIncomingIfPresent(
 	if !ok {
 		return ExecutionContext{}, false, nil
 	}
-	workContexts := values.Get(workContextGRPCMetadataName)
-	operationIDs := values.Get(operationIDGRPCMetadataName)
-	if len(workContexts) == 0 && len(operationIDs) == 0 {
+	carried := 0
+	for _, carrier := range []string{
+		workContextGRPCMetadataName,
+		operationIDGRPCMetadataName,
+		installationIDGRPCMetadataName,
+		installationRevisionGRPCMetadataName,
+	} {
+		carried += len(values.Get(carrier))
+	}
+	if carried == 0 {
 		return ExecutionContext{}, false, nil
 	}
 	execution, err = GRPCExecutionContextFromIncoming(ctx)

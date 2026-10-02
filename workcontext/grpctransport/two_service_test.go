@@ -106,9 +106,7 @@ func verifyIncoming(
 	if err != nil {
 		return grpctransport.ExecutionContext{}, workcontext.VerifiedWorkContext{}, status.Error(codes.Unauthenticated, err.Error())
 	}
-	verified, err := verifier.VerifyWorkContext(execution.WorkContext(), workcontext.WorkContextExpectations{
-		Issuer: hopIssuer, Audience: audience,
-	})
+	verified, err := verifier.VerifyWorkContext(execution.WorkContext(), hopExpectations(audience))
 	if err != nil {
 		return grpctransport.ExecutionContext{}, workcontext.VerifiedWorkContext{}, status.Error(codes.Unauthenticated, err.Error())
 	}
@@ -229,11 +227,38 @@ func newHopTopology(t *testing.T) *hopTopology {
 	return topology
 }
 
+// hopSeal is the execution both services in the hop run as: one installation,
+// one revision, one build. A hop crosses an audience boundary inside one
+// execution, so the seal is the same on both sides of it.
+func hopSeal() workcontext.Seal {
+	return workcontext.Seal{
+		PrincipalEpoch:       3,
+		InstallationID:       "installation-hop",
+		InstallationRevision: 12,
+		BuildIncarnation:     "build-incarnation-hop",
+	}
+}
+
+func hopExpectations(audience string) workcontext.WorkContextExpectations {
+	seal := hopSeal()
+	return workcontext.WorkContextExpectations{
+		Issuer:   hopIssuer,
+		Audience: audience,
+		Seal: workcontext.SealExpectations{
+			PrincipalEpoch:       seal.PrincipalEpoch,
+			InstallationID:       seal.InstallationID,
+			InstallationRevision: seal.InstallationRevision,
+			BuildIncarnation:     seal.BuildIncarnation,
+		},
+	}
+}
+
 // startTask issues the context the external caller holds: for service A only.
 func (h *hopTopology) startTask(t *testing.T) workcontext.WorkContextToken {
 	t.Helper()
 	token, _, err := h.authority.signer.StartTask(workcontext.StartTaskInput{
 		Audience: audienceA, TenantID: "tenant-codefly", OwnerPrincipalID: "principal-owner",
+		OwnerPrincipalKind: "user", Seal: hopSeal(),
 		TaskID: "task-hop", SessionID: "session-hop", AuthorizationRevision: 7,
 		AuthorityScopes: cloneHopScopes(),
 	})
@@ -307,7 +332,7 @@ func TestServiceHopExchangeThenCallSucceedsWithoutWideningScopes(t *testing.T) {
 	require.Equal(t, codes.Unauthenticated, status.Code(exchangedToA), exchangedToA)
 
 	// The hop keeps the cache partition: same tenant, same view.
-	verifiedA, err := topology.authority.verifier(t).VerifyWorkContext(token, workcontext.WorkContextExpectations{Audience: audienceA})
+	verifiedA, err := topology.authority.verifier(t).VerifyWorkContext(token, hopExpectations(audienceA))
 	require.NoError(t, err)
 	for _, options := range [][]workcontext.CachePartitionOption{nil, {workcontext.ByAuthorizationView()}} {
 		partitionA, err := workcontext.DeriveCachePartition(verifiedA, options...)
@@ -323,7 +348,7 @@ func TestServiceHopExchangeMayAttenuateButNeverWiden(t *testing.T) {
 
 	require.NoError(t, topology.call(t, topology.a, topology.startTask(t), hopAttenuate))
 	<-topology.atA
-	atB := (<-topology.atB).Claims()
+	atB := <-topology.atB
 	require.NoError(t, workcontext.RequireWorkContextScope(atB, workcontext.WorkContextScopeRequirement{
 		ResourceKind: "evidence", Action: "append",
 	}))

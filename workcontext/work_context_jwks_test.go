@@ -37,11 +37,11 @@ func TestWorkContextJWKSVerifierCachesAndRefreshesUnknownRotation(t *testing.T) 
 	require.NoError(t, err)
 	first := workContextJWKSToken(t, "key-1", firstPrivate)
 	for range 3 {
-		claims, err := verifier.Verify(t.Context(), first, WorkContextExpectations{
+		verified, err := verifier.VerifyWorkContext(t.Context(), first, workContextTestExpectedWith(WorkContextExpectations{
 			Issuer: "https://accounts.codefly.dev/work-context", Audience: "warden.evidence",
-		})
+		}))
 		require.NoError(t, err)
-		require.Equal(t, "tenant-codefly", claims.GetTenantId())
+		require.Equal(t, "tenant-codefly", verified.Claims().GetTenantId())
 	}
 	require.EqualValues(t, 1, requests.Load())
 
@@ -49,9 +49,9 @@ func TestWorkContextJWKSVerifierCachesAndRefreshesUnknownRotation(t *testing.T) 
 	keys = map[string]ed25519.PublicKey{"key-2": secondPublic}
 	mu.Unlock()
 	second := workContextJWKSToken(t, "key-2", secondPrivate)
-	_, err = verifier.Verify(t.Context(), second, WorkContextExpectations{
+	_, err = verifier.VerifyWorkContext(t.Context(), second, workContextTestExpectedWith(WorkContextExpectations{
 		Issuer: "https://accounts.codefly.dev/work-context", Audience: "warden.evidence",
-	})
+	}))
 	require.NoError(t, err)
 	require.EqualValues(t, 2, requests.Load())
 
@@ -59,14 +59,14 @@ func TestWorkContextJWKSVerifierCachesAndRefreshesUnknownRotation(t *testing.T) 
 	// one unknown-key refresh per cache generation, so arbitrary key IDs cannot
 	// turn verification into an unbounded request loop.
 	for index := range 50 {
-		_, err = verifier.Verify(
+		_, err = verifier.VerifyWorkContext(
 			t.Context(),
 			workContextJWKSToken(t, fmt.Sprintf("unknown-%d", index), firstPrivate),
-			WorkContextExpectations{},
+			workContextTestExpected(),
 		)
 		require.Error(t, err)
 	}
-	_, err = verifier.Verify(t.Context(), first, WorkContextExpectations{})
+	_, err = verifier.VerifyWorkContext(t.Context(), first, workContextTestExpected())
 	require.Error(t, err)
 	require.EqualValues(t, 2, requests.Load())
 }
@@ -89,10 +89,10 @@ func TestWorkContextJWKSVerifierRejectsRedirects(t *testing.T) {
 		URL: source.URL, Now: func() time.Time { return workContextTestTime },
 	})
 	require.NoError(t, err)
-	_, err = verifier.Verify(
+	_, err = verifier.VerifyWorkContext(
 		t.Context(),
 		workContextJWKSToken(t, "key-1", privateKey),
-		WorkContextExpectations{},
+		workContextTestExpected(),
 	)
 	require.Error(t, err)
 	require.Zero(t, destinationRequests.Load())
@@ -117,10 +117,10 @@ func TestWorkContextJWKSVerifierSuppressesConcurrentRotationRefresh(t *testing.T
 		URL: server.URL, Now: func() time.Time { return workContextTestTime },
 	})
 	require.NoError(t, err)
-	_, err = verifier.Verify(
+	_, err = verifier.VerifyWorkContext(
 		t.Context(),
 		workContextJWKSToken(t, "key-1", workContextJWKSPrivateForSeed(1)),
-		WorkContextExpectations{},
+		workContextTestExpected(),
 	)
 	require.NoError(t, err)
 	rotated.Store(true)
@@ -135,7 +135,7 @@ func TestWorkContextJWKSVerifierSuppressesConcurrentRotationRefresh(t *testing.T
 		go func() {
 			defer wait.Done()
 			<-start
-			_, verifyErr := verifier.Verify(context.Background(), token, WorkContextExpectations{})
+			_, verifyErr := verifier.VerifyWorkContext(context.Background(), token, workContextTestExpected())
 			failures <- verifyErr
 		}()
 	}
@@ -171,20 +171,20 @@ func TestWorkContextJWKSVerifierRefreshesExpiredCacheWithoutRefreshingBadSignatu
 	})
 	require.NoError(t, err)
 
-	_, err = verifier.Verify(
+	_, err = verifier.VerifyWorkContext(
 		t.Context(),
 		workContextJWKSToken(t, "key-1", privateKey),
-		WorkContextExpectations{},
+		workContextTestExpected(),
 	)
 	require.NoError(t, err)
 	require.EqualValues(t, 1, requests.Load())
 
 	// A known key ID with an invalid signature is an invalid token, not a key
 	// rotation signal, and must never cause network I/O.
-	_, err = verifier.Verify(
+	_, err = verifier.VerifyWorkContext(
 		t.Context(),
 		workContextJWKSToken(t, "key-1", wrongPrivateKey),
-		WorkContextExpectations{},
+		workContextTestExpected(),
 	)
 	require.Error(t, err)
 	require.EqualValues(t, 1, requests.Load())
@@ -192,10 +192,10 @@ func TestWorkContextJWKSVerifierRefreshesExpiredCacheWithoutRefreshingBadSignatu
 	mu.Lock()
 	now = now.Add(time.Minute)
 	mu.Unlock()
-	_, err = verifier.Verify(
+	_, err = verifier.VerifyWorkContext(
 		t.Context(),
 		workContextJWKSToken(t, "key-1", privateKey),
-		WorkContextExpectations{},
+		workContextTestExpected(),
 	)
 	require.NoError(t, err)
 	require.EqualValues(t, 2, requests.Load())
@@ -228,7 +228,7 @@ func TestWorkContextJWKSVerifierBoundsAndValidatesRemoteKeys(t *testing.T) {
 				URL: server.URL, Now: func() time.Time { return workContextTestTime },
 			})
 			require.NoError(t, err)
-			_, err = verifier.Verify(t.Context(), token, WorkContextExpectations{})
+			_, err = verifier.VerifyWorkContext(t.Context(), token, workContextTestExpected())
 			require.ErrorIs(t, err, ErrWorkContextInvalid)
 			require.NotErrorIs(t, err, ErrWorkContextUnavailable)
 		})
@@ -247,7 +247,7 @@ func TestWorkContextJWKSVerifierReportsIssuerOutageAsUnavailable(t *testing.T) {
 			URL: endpoint, Now: func() time.Time { return workContextTestTime },
 		})
 		require.NoError(t, err)
-		_, err = verifier.Verify(t.Context(), token, WorkContextExpectations{})
+		_, err = verifier.VerifyWorkContext(t.Context(), token, workContextTestExpected())
 		require.ErrorIs(t, err, ErrWorkContextUnavailable)
 		require.NotErrorIs(t, err, ErrWorkContextInvalid)
 	})
@@ -262,7 +262,7 @@ func TestWorkContextJWKSVerifierReportsIssuerOutageAsUnavailable(t *testing.T) {
 				URL: server.URL, Now: func() time.Time { return workContextTestTime },
 			})
 			require.NoError(t, err)
-			_, err = verifier.Verify(t.Context(), token, WorkContextExpectations{})
+			_, err = verifier.VerifyWorkContext(t.Context(), token, workContextTestExpected())
 			require.ErrorIs(t, err, ErrWorkContextUnavailable)
 			require.NotErrorIs(t, err, ErrWorkContextInvalid)
 		})
@@ -289,10 +289,10 @@ func TestWorkContextJWKSVerifierKeepsUnknownKeyOutageUnavailableAfterReservation
 		URL: server.URL, Now: func() time.Time { return workContextTestTime },
 	})
 	require.NoError(t, err)
-	_, err = verifier.Verify(
+	_, err = verifier.VerifyWorkContext(
 		t.Context(),
 		workContextJWKSToken(t, "key-1", firstPrivate),
-		WorkContextExpectations{},
+		workContextTestExpected(),
 	)
 	require.NoError(t, err)
 	require.EqualValues(t, 1, requests.Load())
@@ -301,7 +301,7 @@ func TestWorkContextJWKSVerifierKeepsUnknownKeyOutageUnavailableAfterReservation
 	// unknown and its key set cannot be fetched.
 	down.Store(true)
 	rotated := workContextJWKSToken(t, "key-2", secondPrivate)
-	_, err = verifier.Verify(t.Context(), rotated, WorkContextExpectations{})
+	_, err = verifier.VerifyWorkContext(t.Context(), rotated, workContextTestExpected())
 	require.ErrorIs(t, err, ErrWorkContextUnavailable)
 	require.NotErrorIs(t, err, ErrWorkContextInvalid)
 	require.EqualValues(t, 2, requests.Load())
@@ -311,7 +311,7 @@ func TestWorkContextJWKSVerifierKeepsUnknownKeyOutageUnavailableAfterReservation
 	// to an invalid-token rejection against the stale cache, and must not spend
 	// another fetch.
 	for range 5 {
-		_, err = verifier.Verify(t.Context(), rotated, WorkContextExpectations{})
+		_, err = verifier.VerifyWorkContext(t.Context(), rotated, workContextTestExpected())
 		require.ErrorIs(t, err, ErrWorkContextUnavailable)
 		require.NotErrorIs(t, err, ErrWorkContextInvalid)
 	}
@@ -355,10 +355,10 @@ func TestWorkContextJWKSVerifierRefreshWarmsCacheAtBoot(t *testing.T) {
 	require.EqualValues(t, 1, requests.Load())
 
 	// The warmed cache serves the first Verify without another fetch.
-	_, err = verifier.Verify(
+	_, err = verifier.VerifyWorkContext(
 		t.Context(),
 		workContextJWKSToken(t, "key-1", privateKey),
-		WorkContextExpectations{},
+		workContextTestExpected(),
 	)
 	require.NoError(t, err)
 	require.EqualValues(t, 1, requests.Load())
@@ -392,15 +392,15 @@ func TestWorkContextJWKSVerifierRefreshPreservesRotationRefreshBudget(t *testing
 	// still force exactly one rotation refresh, and no more.
 	rotated.Store(true)
 	second := workContextJWKSToken(t, "key-2", secondPrivate)
-	_, err = verifier.Verify(t.Context(), second, WorkContextExpectations{})
+	_, err = verifier.VerifyWorkContext(t.Context(), second, workContextTestExpected())
 	require.NoError(t, err)
 	require.EqualValues(t, 2, requests.Load())
 
 	for index := range 20 {
-		_, err = verifier.Verify(
+		_, err = verifier.VerifyWorkContext(
 			t.Context(),
 			workContextJWKSToken(t, fmt.Sprintf("unknown-%d", index), secondPrivate),
-			WorkContextExpectations{},
+			workContextTestExpected(),
 		)
 		require.Error(t, err)
 	}

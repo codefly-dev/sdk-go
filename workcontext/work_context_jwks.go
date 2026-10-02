@@ -14,8 +14,6 @@ import (
 	"strings"
 	"sync"
 	"time"
-
-	basev0 "github.com/codefly-dev/core/generated/go/codefly/base/v0"
 )
 
 const (
@@ -107,12 +105,14 @@ func NewWorkContextJWKSVerifier(
 	}, nil
 }
 
-// Verify establishes Work Context trust using the current cached JWKS.
-func (v *WorkContextJWKSVerifier) Verify(
+// verifierFor returns the key-set verifier that can check this token, forcing
+// at most one generation-aware refresh when the token names a key the cache
+// does not hold. Verification itself is VerifyWorkContext's, so the sealed
+// checks cannot be reached by a path that skips them.
+func (v *WorkContextJWKSVerifier) verifierFor(
 	ctx context.Context,
 	token WorkContextToken,
-	expected WorkContextExpectations,
-) (*basev0.WorkContextV1, error) {
+) (*WorkContextVerifier, error) {
 	if v == nil {
 		return nil, fmt.Errorf("%w: nil JWKS verifier", ErrWorkContextInvalid)
 	}
@@ -128,7 +128,7 @@ func (v *WorkContextJWKSVerifier) Verify(
 		return nil, err
 	}
 	if _, known := keyIDs[keyID]; known {
-		return verifier.Verify(token, expected)
+		return verifier, nil
 	}
 
 	// A different caller may already have refreshed this generation. Passing
@@ -137,7 +137,7 @@ func (v *WorkContextJWKSVerifier) Verify(
 	if err != nil {
 		return nil, err
 	}
-	return verifier.Verify(token, expected)
+	return verifier, nil
 }
 
 // Refresh fetches and installs the key set immediately, warming the cache so a
