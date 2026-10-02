@@ -42,6 +42,25 @@ jobs:
           go mod tidy
           git diff --exit-code -- go.mod go.sum
 
+  # The sweep lives HERE, in the workflow that builds every ref this repository
+  # publishes, rather than in one of its own that ran on main alone. go.yml's
+  # own `on:` is the statement of which refs are built, so a gate that has to
+  # hold on all of them belongs beside the build rather than beside a list of
+  # refs that drifts from it.
+  #
+  # The job's name is load-bearing: the active ruleset on main requires the
+  # status check "no second Work Context implementation" by that exact context,
+  # so renaming this job would leave a required check that never reports.
+  one-implementation:
+    name: no second Work Context implementation
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - name: Sweep every tracked Go file for a second implementation
+        run: ./scripts/check-one-implementation.sh
+
   lint:
     name: lint
     runs-on: ubuntu-latest

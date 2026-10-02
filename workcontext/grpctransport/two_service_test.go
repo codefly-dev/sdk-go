@@ -96,6 +96,9 @@ func newHopAuthority(t *testing.T) *hopAuthority {
 	// hop that carries none. Recording only the owner's seal left the actor
 	// unrevocable, which is a capability nobody can withdraw.
 	require.NoError(t, seals.PutEpoch(hopActor, 1))
+	// And the owner's, which the seal no longer carries: one source for every
+	// principal's epoch, so revocation cannot be undone by storing a seal.
+	require.NoError(t, seals.PutEpoch(hopPrincipal, 1))
 	return &hopAuthority{
 		minter: &corework.Authority{
 			Issuer: hopIssuer, KeyID: hopKeyID, Key: privateKey,
@@ -277,7 +280,6 @@ func newHopTopology(t *testing.T) *hopTopology {
 // execution, so the seal is the same on both sides of it.
 func hopSeal() workcontext.Seal {
 	return workcontext.Seal{
-		PrincipalEpoch:       3,
 		InstallationID:       "installation-hop",
 		InstallationRevision: 12,
 		BuildIncarnation:     9,

@@ -117,31 +117,35 @@ see the skill below.
   variable ships the name with an empty string; `RuntimeValue` reports `false`
   so it cannot shadow the configuration a caller falls back to. Keep that.
 - **The Work Context has exactly one implementation and it is not here.**
-  `core/workcontext` signs and verifies; this module is a client of it and
-  re-exports its verifier by alias. Nothing here may sign, check a signature or
-  encode a capability — `TestNoSecondWorkContextImplementation` refuses a
-  `crypto/ed25519` import, an `encoding/json` import outside `mint.go`'s HTTP
-  bodies (by exact path), a json-tagged struct that is not those bodies anywhere
-  in the file including inside a function, and a `WorkContext*` type of our own
-  — an alias counts only if it resolves into core's module;
-  `TestWorkContextConformance` drives core's fixtures through a verifier built as
-  the type we export, which is the behavioural half, the compile-time assertions
-  being the identity half. A claim added to the wire is added to the proto in
-  core, never to an encoder here. This repository once held a second
-  implementation signing hand-written JSON. The signatures were sound — each
-  side signed and verified the bytes it handled — but the key id is a field
-  *inside* the payload, so reading a protobuf payload as JSON yielded no key id
-  and the failure surfaced as "unknown key"/"signature does not verify", which
-  reads like a rotated key. That
-  test walks from the `workcontext` module root, and the deleted implementation
-  lived at the repository root, so `scripts/check-one-implementation.sh` sweeps
-  every tracked Go file in both modules as a **required check that is green**.
-  There is no compatibility period in it: refs outside this repository's build
-  that still carry it belong to the cold-cutover runbook, which lives elsewhere.
-- **A credential is sealed or it is not a credential.** Every field of
-  `workcontext.Seal` is required at mint and at verify, an operation binding
-  carries its id, revision and incarnation or none of them, and `Attach`
-  refuses to put an unsealed capability on a request.
+  `core/workcontext` signs, verifies, and — since this was asked for — answers
+  the *structural* question too, through `Inspect`. Nothing here may sign, check
+  a signature, encode a capability **or decide what a capability is**: a local
+  seal rule is a second implementation even when it signs nothing, and ours
+  disagreed with core's own fixtures about which sentinel three refusals earn.
+  `TestNoSecondWorkContextImplementation` refuses by capability rather than by
+  name — any signature, MAC or JOSE primitive, anything under `x/crypto`,
+  `protojson`, a `proto.Marshal` outside the one digest, `crypto/tls`/`x509`
+  outside the mint transport or using a symbol beyond it, an `encoding/json`
+  outside `mint.go` by exact path, a json-tagged struct anywhere else, and any
+  declaration whose name begins with `workcontext` case-insensitively unless it
+  aliases into core's module. `TestTheGateCatchesItsOwnBypasses` holds the gate
+  to that claim; `TestTheSDKParsePathsAgreeWithCore` drives every core fixture
+  through our own parse paths and requires core's sentinel. A claim added to the
+  wire is added to the proto in core, never to an encoder here. That test walks
+  from the `workcontext` module root, and the deleted implementation lived at
+  the repository root, so `scripts/check-one-implementation.sh` sweeps every
+  tracked Go file in both modules — as a job in `go.yml`, the workflow that
+  builds every ref this repository publishes, required on `main` by a ruleset.
+  There is no compatibility period: a release line that cannot meet the rule is
+  **retired by the owner**, not exempted.
+- **A credential is sealed or it is not a credential, and core says what that
+  means.** Every field of the seal is required at mint and at verify, an
+  operation binding carries its id, revision and incarnation or none of them,
+  and **every actor hop carries an epoch** — a hop without one is a principal
+  nobody can revoke. `Attach` refuses to put an unsealed capability on a
+  request, and it refuses it with `corework.Inspect`'s answer: this claim was
+  false for a while precisely because we were answering it ourselves and never
+  read the actor chain.
 - **An authority-bearing value is read once.** A principal, binding or audience
   comes from `ReadAuthority` at boot. `WorkspaceValue` answers from that pin for
   a pinned name, so a drift is an error rather than a reload — the process has
@@ -150,10 +154,15 @@ see the skill below.
   receipt written after the commit leaves a window where the effect exists and
   the receipt does not, and a recovery landing there reads "no receipt" for an
   effect that already happened. That is why `receipts.Record` takes a `Tx`.
-- **`compat/**` branches are published artifacts.** Consumers pin them when
-  `main` holds an unreleased breaking change, so CI builds them like `main`.
-  Never back-port a breaking deletion into one: it breaks the consumer the line
-  exists for. A line is retired, by the owner, once its last consumer repins.
+- **`compat/**` branches are published artifacts and are held to these rules,
+  not exempted from them.** Consumers pin them when `main` holds an unreleased
+  breaking change, so CI builds them like `main` — and the one-implementation
+  sweep runs in `go.yml` for exactly that reason. A line that cannot meet a rule
+  is **retired** by the owner, not granted a period during which the rule is
+  false of this repository. There was a bullet here forbidding the back-port of
+  a breaking deletion into a release line; it is deleted, because for the
+  deleted Work Context implementation it is what kept the implementation alive
+  on three refs CI builds.
 
 ## Procedures
 

@@ -230,11 +230,11 @@ modules:
 	writeFile(t, filepath.Join(root, "modules", "platform", "module.codefly.yaml"), `kind: module
 name: platform
 services:
-  - name: warden
+  - name: records
 `)
-	serviceDir := filepath.Join(root, "modules", "platform", "services", "warden")
+	serviceDir := filepath.Join(root, "modules", "platform", "services", "records")
 	writeFile(t, filepath.Join(serviceDir, "service.codefly.yaml"), `kind: service
-name: warden
+name: records
 version: 0.0.0
 agent:
   kind: codefly:service
@@ -248,7 +248,7 @@ endpoints:
 
 	instance, err := codefly.For(ctx).
 		Module("platform").
-		Service("warden").
+		Service("records").
 		Endpoint("rest").
 		ResolveNetworkInstance()
 	assert.NoError(t, err)
@@ -256,7 +256,7 @@ endpoints:
 		ctx,
 		"sdk-endpoint-test",
 		"platform",
-		"warden",
+		"records",
 		"",
 		&basev0.Endpoint{Name: "rest", Api: "rest"},
 	)
@@ -266,7 +266,7 @@ endpoints:
 
 	scoped, err := codefly.For(ctx).
 		Module("platform").
-		Service("warden").
+		Service("records").
 		Endpoint("rest").
 		NamingScope("agent-test").
 		ResolveNetworkInstance()

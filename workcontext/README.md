@@ -43,21 +43,44 @@ verify on every live path.
 A comment would not have stopped that, and did not. Two tests do.
 
 **`TestNoSecondWorkContextImplementation`** parses every non-test file in this
-module and fails if any of them:
+module and refuses it **by what the code can do, not by what it is called**.
+That distinction is the whole of it: the first version listed two package paths
+and a case-sensitive name prefix, and a faithful clone of core's signer —
+`proto.MarshalOptions{Deterministic: true}` plus `golang.org/x/crypto/ed25519`
+— was green, as were `crypto/rsa`, `crypto/hmac`, the bare `crypto` package
+(whose `crypto.Signer` signs Ed25519 with no ed25519 import), `protojson`, and
+the deleted implementation's own type name `workContextPayload`.
 
-- imports `crypto/ed25519` or `crypto/ecdsa` — this module neither signs nor
-  checks a signature, so nothing here needs a signing primitive;
-- imports `encoding/json` outside the one allowlisted file, `mint.go`, which
-  speaks the mint endpoint's HTTP bodies and never encodes a capability;
-- declares a json-tagged struct other than the mint endpoint's request and
-  response — a struct whose tags enumerate a capability's fields by hand is
-  exactly the deleted implementation, and is how a field present in the proto
-  came to be missing on the wire;
-- declares a type or func named `WorkContext*` that is not an alias of core's.
+It fails a file that:
+
+- imports **any** signature, MAC or key-agreement primitive, anything under
+  `golang.org/x/crypto/`, or any JOSE/JWT/token library, whatever the paths are.
+  `crypto/sha256` is deliberately fine — a hash is not a signature;
+- imports `crypto/tls` or `crypto/x509` anywhere but `mint.go`, which builds the
+  mint client's own transport — **and uses only the symbols a transport needs**,
+  so `x509.ParsePKCS8PrivateKey` followed by a `crypto.Signer` assertion, the
+  shortest signer that imports no primitive at all, is a finding;
+- imports `encoding/json` outside `mint.go` — matched by **exact path relative
+  to the module root**, since a base-name match let any nested `mint.go` inherit
+  the allowance;
+- calls `proto.Marshal` or `proto.MarshalOptions` outside the one file that
+  encodes a scope for a cache digest. Encoding the message is half a signer;
+- declares a json-tagged struct other than the mint endpoint's two bodies,
+  **anywhere in the file** including an anonymous struct or a type inside a
+  function;
+- declares anything — func, method, var, const or type — whose name begins with
+  `workcontext` **case-insensitively**, unless it is in a named allowlist with a
+  reason, or is a type alias **whose target resolves into
+  `github.com/codefly-dev/core`**.
 
 It also pins the aliases by assignment (`var _ *corework.Verifier =
 (*Verifier)(nil)`), which compiles only while `Verifier` is core's type and not
 a local copy with the same fields.
+
+**`TestTheGateCatchesItsOwnBypasses`** drives twenty-one hostile sources through
+the checker and two that must stay allowed, so the gate is held to its claim
+rather than trusted about it. Each of the standard bypasses above was measured
+to pass the previous version and fail this one.
 
 **`TestWorkContextConformance`** runs `core/workcontext/conformance.RunWith`
 against a verifier built **field by field from the kit's settings as this
@@ -87,6 +110,33 @@ accept/refuse decision with core's named reason on every fixture. It does not
 prove identity — an equivalent second implementation would pass the same
 fixtures. Identity is the compile-time assertions (`var _ *corework.Verifier =
 (*Verifier)(nil)`) and the static gate. Two halves, claimed separately.
+
+**`TestTheSDKParsePathsAgreeWithCore`** drives every fixture in core's kit
+through **this module's own parse paths** and requires core's declared sentinel
+for each.
+
+This is the test the conformance run is not. Driving fixtures through
+`&Verifier{}` exercises core, because `Verifier` is an alias of core's type —
+and the module's real decisions are in `SealedInstallation`, `FromHeaders`,
+`Attach` and `credentialFrom`. Three divergences lived exactly there, and all
+three are now core's answer rather than a local one:
+
+| fixture | core | this module, before |
+| --- | --- | --- |
+| `seal-without-installation` | `ErrInvalid` (the schema reaches it first) | `ErrUnsealed`, with a test pinning the divergence |
+| `actor-without-epoch` | `ErrUnsealed` | **accepted** — the actor chain was never read, so a principal nobody can revoke went on the wire |
+| zero epoch / revision / incarnation, partial binding | `ErrInvalid` | `ErrUnsealed` |
+
+The fix was not to sync the rule. **`corework.Inspect` now owns every
+structural decision** — shape, encoding, schema, attenuation, grant shape, a
+seal naming an installation, an epoch on every actor hop — and this module's
+`readClaims` runs after it, reads two values, and decides nothing. Core added
+`Inspect` for this, when asked; the eight structural refusals must reach core's
+sentinel here, and the other seventeen must **pass**, because an unverified
+inspection that refused a signature or a live-state failure would be claiming to
+have verified something it cannot see. `Inspect` checks no signature at all —
+core's own test asserts a token re-signed with a key nobody holds passes it — so
+nil means *shaped right*, never *permitted*.
 
 **And one sweep, because the test above walks from this module's root.** The
 implementation this repository deleted lived at the REPOSITORY root, in package
@@ -147,27 +197,44 @@ authority, err := codefly.ReadAuthority(ctx,
 if err != nil {
     return err // a process that cannot establish its identity must not serve
 }
-audience, _ := authority.Value("platform", "work-context-audience")
 mintURL, _ := authority.Value("platform", "mint-url")
 
 client, err := workcontext.NewMintClient(workcontext.MintOptions{
-    URL:                mintURL,
-    Audience:           audience,
+    URL:       mintURL,
+    Authority: authority, // REQUIRED: rechecked before every mint, including the first
+    // The audience is NAMED, not passed. It is read from the pin on every
+    // mint, so the value that reaches the host is the pinned value.
+    Audience: workcontext.AuthorityValue{
+        Name: "platform", Key: "work-context-audience",
+    },
     ProjectedToken:     workcontext.ProjectedTokenFile("/var/run/secrets/codefly/token"),
     ProjectionAudience: projectionAudience,
-    Authority:          authority, // rechecked before EVERY mint, including the first
+    RootCAs:            platformRoots, // nil means the system pool
 })
 ```
 
-`URL` must be **absolute https** with no userinfo, query or fragment. The
+**`Authority` is required and the audience is read from it.** A free-string
+audience beside an optional pin made the drift check guard a value the mint did
+not use: `Recheck` could pass while the credential was minted for whatever
+string the caller had typed. Reading it through `Value` on every mint is what
+makes the pin load-bearing, and `credentialFrom` then requires the audience the
+host SIGNED to be the audience the pin answered.
+
+`URL` must be **absolute https** with no userinfo, query or fragment: the
 projected service-account token travels on that request as a bearer credential,
-so plaintext is a disclosure the configuration must not be able to choose; a
-supplied `HTTPClient` whose transport skips certificate verification, or permits
-TLS below 1.2, is refused for the same reason. Redirects are refused on **every**
-client, on a copy of the one you supplied, before any request leaves: Go's own
-client forwards `Authorization` across a redirect to the same host, so a
-redirect that was merely classified afterwards would be classified after the
-projection had already gone somewhere nothing configured.
+so plaintext is a disclosure the configuration must not be able to choose.
+
+**The transport is the client's, and you cannot supply one.** `RootCAs` is the
+only thing a caller says about it. An `*http.Client` option was a hole that
+inspecting the client could not close: a nil `Transport` means the global,
+mutable `http.DefaultTransport`; a wrapping `RoundTripper` is opaque; a
+`DialTLSContext` bypasses `TLSClientConfig` entirely; and a caller keeping the
+`*http.Transport` pointer can turn verification off after construction, because
+copying an `http.Client` shares its `Transport`. Each of those sent the
+projection over a channel nobody authenticated. So the client builds the
+transport — TLS 1.2 minimum, verification on, no custom dialer, no proxy — and
+refuses redirects, because Go's own client forwards `Authorization` across a
+redirect to the same host.
 
 Then, on every outbound request:
 
@@ -197,10 +264,37 @@ which is why a process that resolved its audience through `ReadAuthority` should
 pass it.
 
 A credential is also checked against **its own window** before it is installed:
-an expired or not-yet-valid response, or one whose whole lifetime sits inside the
-renewal lead, is refused rather than held and counted as a mint that worked. The
-tolerance is `core/workcontext.DefaultSkew`, so the client is not stricter than
-the verifier that will accept the credential.
+an expired or not-yet-valid response, one whose whole lifetime sits inside the
+renewal lead, or one valid for longer than `MaxCredentialLifetime`, is refused
+rather than held and counted as a mint that worked. The window tested is
+**`not_before`** — the claim core's verifier tests; testing `issued_at` was
+testing a different window from the one the credential would be judged against
+— and the tolerance is `core/workcontext.DefaultSkew`, so the client is not
+stricter than the verifier that will accept the credential.
+
+### A failed renewal is not an outage
+
+**A held credential that is still valid is served even when a renewal fails.**
+Entering the renewal lead and getting a 503 used to return an error to every
+caller while the credential in hand had minutes left — an outage manufactured
+out of a credential that still worked. A renewal failure is only an error once
+the credential has actually expired.
+
+One mint at a time, and **the wait is cancellable**: callers wait on a channel
+rather than on the client's mutex, so a caller whose `ctx` is cancelled stops
+waiting instead of blocking on a request it is not making. After a failure the
+next attempt is **held off**, doubling to a minute. Without that, a host
+answering 503 received one request per caller per call — the heartbeat under
+another name, arriving exactly when the host was least able to serve it. The
+hold-off bounds `Refresh` too, which the generation check alone does not: a
+receiver whose live state lags refuses each FRESH credential, and every refusal
+is a new generation.
+
+`MaxCredentialLifetime` (default 24h) refuses a credential minted for longer
+than this process will hold one. **It is a stopgap and labelled as one**: core
+has built `Authority.MaxTTL` with a one-hour default, which is the right side of
+the wire, and this ceiling goes when that is in a pinned release. A client-side
+cap bounds only the clients that implement it.
 
 ### When the host refuses the credential you hold
 
@@ -230,6 +324,14 @@ transport sets the same names as metadata. Those two carriers are a **pre-check
 the host may refuse on cheaply, and never authority**: the installation that
 governs a call is the sealed one. On the incoming side the SDK refuses when a
 carrier disagrees with the sealed claim rather than preferring either side.
+
+**Both carriers are required, exactly once each, on both transports.** Carrying
+neither used to be allowed on HTTP, which was the optional-carrier escape hatch
+surviving there after it was deleted on gRPC — "one contract for both
+transports" was false, and a sender that attached nothing skipped the pre-check
+entirely. Cardinality is checked before agreement, because `Header.Get` reads
+only the first value: `[sealed-id, something-else]` compared equal to the seal
+while the request carried two contradictory installations.
 
 ## Verifying
 
@@ -308,9 +410,9 @@ either import path.
 
 | Sentinel | Means | What the caller does |
 | --- | --- | --- |
-| `ErrInvalid` | wrong and cannot become right — bad signature, another audience, another installation, another build, another binding id, a malformed capability | refuse; 401 |
-| `ErrRevoked` | sound when minted, overtaken since — the principal's epoch, the installation revision, the build incarnation, a binding revision or incarnation, a revoked binding, or the authorization revision moved | mint again, retry once |
-| `ErrUnsealed` | the capability carries no seal, or names no installation | refuse; it is not a credential |
+| `ErrInvalid` | wrong and cannot become right — bad signature, another issuer, another audience, a schema violation, a seal naming no installation, a zero epoch/revision/incarnation, a partial binding, a malformed capability, an expired or not-yet-valid window | refuse; 401 |
+| `ErrRevoked` | sound when minted, overtaken since — the principal's epoch, an actor hop's epoch, the installation revision, the build incarnation, a binding revision or incarnation, a revoked binding, **a binding granted to another principal or in another installation**, an installation the principal no longer holds, or the authorization revision moved | mint again, retry once |
+| `ErrUnsealed` | the capability carries no seal, or an actor hop carries no epoch — a principal nobody can revoke | refuse; it is not a credential |
 | `ErrNotACoreToken` | the payload is not this encoding at all — most usefully, a JSON one | refuse, and do **not** report a signature problem |
 | `ErrReplayed` | a single-use capability was presented twice | refuse; this is the resume contract, not a forgery |
 
@@ -346,24 +448,42 @@ successful check and every message for the next interval still left, with expiry
 and source unavailability equally invisible for that whole window. The condition
 is per emission, so the check is per emission.
 
+**Use `RecheckWith`, never `Verify`.** The recipe this README carried called
+`verifier.Verify` on every emission. Core's `Verify` **consumes** a single-use
+nonce and every grant capability is single-use, so a grant-opened stream died
+with `ErrReplayed` at its **first** message — and the error read like a replay
+attack rather than like the guard eating its own credential. Core added
+`(*Verifier).Recheck` for this: it re-reads the window, the authorization
+revision, the seal, every actor hop's epoch, the operation binding and the
+issuer's grant record, and it never touches the replay store. It takes a
+`*Verified`, so it cannot be anybody's first check.
+
 ```go
+// verified came from verifier.Verify once, when the stream opened.
 guard, err := workcontext.NewStreamGuard(workcontext.StreamGuardOptions{
-    Recheck: func(ctx context.Context) error {
-        // The same verification an ordinary call performs, against the
-        // issuer's state as it is NOW — not the state the stream opened with.
-        _, err := verifier.Verify(ctx, token)
-        return err
-    },
+    Recheck: workcontext.RecheckWith(verifier, verified),
 })
+
+// And let the STREAM enforce it, rather than remembering to call it.
+guarded, err := grpctransport.Guard(stream, guard)
+if err != nil {
+    return err
+}
 for message := range messages {
-    if err := guard.BeforeSend(ctx); err != nil {
-        return err // terminate; do not resume
-    }
-    if err := stream.Send(message); err != nil {
-        return err
+    if err := guarded.SendMsg(message); err != nil {
+        return err // terminated; do not resume
     }
 }
 ```
+
+`grpctransport.Guard` wraps a `grpc.ServerStream` so `SendMsg` **is** the
+re-check followed by the send. A guard on its own is advice: `BeforeSend` has to
+be called, and "before each emission" was therefore something each author had
+to remember — the same shape as the optional carrier this PR deleted, a rule
+that holds wherever somebody thought of it. A handler writing through the
+wrapper cannot emit without the check. `Guard` refuses a nil guard rather than
+treating it as "no guarding wanted", because a wrapper that silently did
+nothing would be worse than none: the call site would read as guarded.
 
 It guards emission rather than running a timer: an idle stream discloses
 nothing, so there is nothing to refuse. **Any** error from `Recheck` terminates,
@@ -374,10 +494,14 @@ Termination is sticky: a caller that loops past the first refusal is not handed
 a second chance to emit, and the authority coming back does not resurrect the
 stream.
 
-What this costs is one live authorization check per message. That is the price
-of the guarantee, and it is why the guard is for streams whose messages carry
-authority rather than for every stream. A stream that cannot pay it does not get
-the guarantee; it does not get a cadence instead.
+What this costs is one live authorization check per message — against an
+RPC-backed `SealSource`, one round trip per emitted item. That is the price of
+the guarantee, and it is why the guard is for streams whose messages carry
+authority rather than for every stream. **Decide it explicitly rather than
+discovering it from a latency graph**: per emission catches a revocation at the
+next message, per stream catches one only at the start, and core deliberately
+does not choose for you. A stream that cannot pay per-emission does not get the
+per-emission guarantee; what it must not get is a cadence that reads like one.
 
 ## Cache partitions
 

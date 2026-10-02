@@ -1,6 +1,8 @@
 package codefly
 
 import (
+	"fmt"
+	"sync"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -48,4 +50,61 @@ func TestPinningAnAuthoritySetIsWholeOrNothing(t *testing.T) {
 	// Re-installing the same values is not a conflict: reading the authority
 	// twice is allowed and must agree, which is the same comparison.
 	require.NoError(t, pinAuthorityValues(map[AuthorityValueName]string{first: "one"}))
+}
+
+// Concurrent installs of DIFFERENT values for one name: exactly one wins, the
+// pin is the winner's, and every loser is told the value changed.
+//
+// The external version of this test was not evidence. It ran several readers
+// against a constant environment value, so every reader resolved the same
+// string and they agreed whatever the code did — it passed against the racy
+// pre-fix version too. The race is only observable when the readers resolve
+// DIFFERENT values, which is what a configuration reload between two reads
+// produces and what this drives directly.
+//
+// Against the old unconditional install every goroutine succeeded and the last
+// writer won, so the process ended up holding several *Authority values that
+// disagreed about the audience it runs under, with the race detector seeing
+// nothing because every access was correctly locked.
+func TestConcurrentPinsOfDifferentValuesLeaveOneWinner(t *testing.T) {
+	name := AuthorityValueName{Name: "pin-race", Key: "audience"}
+	t.Cleanup(func() {
+		authorityPinsMu.Lock()
+		defer authorityPinsMu.Unlock()
+		delete(authorityPins, name)
+	})
+
+	const readers = 32
+	outcomes := make(chan error, readers)
+	proposed := make([]string, readers)
+	var waiting sync.WaitGroup
+	start := make(chan struct{})
+	for reader := range readers {
+		proposed[reader] = fmt.Sprintf("audience-%02d", reader)
+		waiting.Add(1)
+		go func() {
+			defer waiting.Done()
+			<-start // all of them at once, so the interleaving is real
+			outcomes <- pinAuthorityValues(map[AuthorityValueName]string{name: proposed[reader]})
+		}()
+	}
+	close(start)
+	waiting.Wait()
+	close(outcomes)
+
+	won := 0
+	for err := range outcomes {
+		if err == nil {
+			won++
+			continue
+		}
+		require.ErrorIs(t, err, ErrAuthorityValueChanged,
+			"a loser must be told the value changed, not given some other error")
+	}
+	require.Equal(t, 1, won,
+		"%d concurrent installs of different values must leave exactly one winner", readers)
+
+	pinned, ok := authorityPin(name)
+	require.True(t, ok)
+	require.Contains(t, proposed, pinned, "the pin is one of the proposed values")
 }

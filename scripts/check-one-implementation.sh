@@ -3,65 +3,128 @@
 # repository: it is codefly-dev/core/workcontext. This sweeps the WHOLE
 # repository — both modules, every tracked Go file — for a second one.
 #
-# It is a required pull-request check and it is green. There is no compatibility
-# period here and no countdown: a second implementation on a ref this repository
-# builds is a failure to fix, not a state to document.
+# It runs as a job in go.yml, which is the workflow that builds every ref this
+# repository publishes (main and compat/**), so the gate holds wherever the
+# build holds. It is required on main by an active ruleset, under the check name
+# "no second Work Context implementation". There is no compatibility period: a
+# second implementation on a ref this repository builds is a failure to fix, and
+# a release line that cannot meet the rule is retired by the owner rather than
+# exempted.
 #
 # It is not the same check as TestNoSecondWorkContextImplementation, which walks
 # from the workcontext module root and therefore cannot see the rest of the
 # repository. The implementation this repository deleted lived at the ROOT, in
 # package codefly, which is exactly the place that test's walk does not reach.
-# Hence a sweep over every tracked file rather than over one module.
 #
-# The predicate is narrow on purpose: a non-test Go file that imports a signing
-# primitive AND mentions the Work Context. Importing ed25519 for something else
-# is not this; mentioning the capability without signing it is not this either.
-# Both together is a mint or a verify, wherever in the tree it lives.
+# THE PREDICATE IS AN ABSOLUTE BAN ON SIGNING, with a named allowlist — not a
+# conjunction. It used to be "imports a signing primitive AND mentions
+# WorkContext", which a second implementation defeats by putting the signer in
+# one file and the wrapper in another; and its pattern was anchored on the
+# opening quote, so "golang.org/x/crypto/ed25519" did not match at all. Now any
+# import of a signature, a MAC or a JOSE/JWT library is a finding wherever it
+# is, and the exceptions are listed by path with a reason. crypto/sha256 is
+# deliberately not banned: a hash is not a signature, and two digests here need
+# one.
 #
 # Usage:
 #   scripts/check-one-implementation.sh            # the working tree (what CI runs)
 #   scripts/check-one-implementation.sh <ref>...   # named refs, for an operator
 #
-# The second form exists for whoever is retiring a ref that still carries the
-# deleted implementation. Which refs those are, and when they are deleted, is
-# the cold-cutover runbook's business and it lives outside this repository: this
-# repository holds the rule, not a consumer inventory.
+# The second form is for whoever retires a ref that still carries the deleted
+# implementation. Which refs those are is the cold-cutover runbook's business and
+# it lives outside this repository: this repository holds the rule, not a
+# consumer inventory.
 set -euo pipefail
 
-primitives='crypto/ed25519|crypto/ecdsa'
-subject='WorkContext'
+# Any of these in an import path is a signature, a MAC, or a library that mints
+# bearer tokens. The bare "crypto" package is included: crypto.Signer signs
+# Ed25519 with no ed25519 import anywhere.
+primitives='"crypto"|crypto/ed25519|crypto/ecdsa|crypto/rsa|crypto/dsa|crypto/hmac|crypto/ecdh|crypto/elliptic|crypto/subtle|x/crypto/|jose|jwt|jwx|paseto|macaroon|branca'
+# Second encodings of the message. protojson is a complete JSON encoding of a
+# protobuf message on its own, which is how the deleted implementation's payload
+# would come back without an encoding/json import.
+encoders='encoding/protojson|encoding/gob|encoding/asn1|encoding/xml'
 status=0
 
+# allowed <path> <pattern> — the exceptions, each with a reason in the comment.
+# The mint client builds and owns its own TLS transport, which needs tls for the
+# configuration and x509 for the caller's root pool. Nothing else here may.
+allowed() {
+  case "$1|$2" in
+    'workcontext/mint.go|'*'crypto/tls'*) return 0 ;;
+    'workcontext/mint.go|'*'crypto/x509'*) return 0 ;;
+    'tls.go|'*'crypto/tls'*) return 0 ;;
+    'tls.go|'*'crypto/x509'*) return 0 ;;
+    # The receipts digest canonicalises a receipt REQUEST, never a capability.
+    'receipts/digest.go|'*'encoding/protojson'*) return 0 ;;
+  esac
+  return 1
+}
+
+# findings <path> <contents-on-stdin-file> -> prints each offending import
+offending_imports() {
+  local path="$1" file="$2" line
+  while IFS= read -r line; do
+    case "$line" in
+      *'crypto/tls'*|*'crypto/x509'*|*'crypto/sha256'*|*'crypto/md5'*|*'crypto/sha1'*|*'crypto/sha512'*|*'crypto/rand'*)
+        # Hashes, randomness and TLS plumbing are not signatures. tls/x509 are
+        # still held to the allowlist below.
+        case "$line" in
+          *'crypto/tls'*|*'crypto/x509'*)
+            allowed "$path" "$line" || printf '%s\n' "$line"
+            ;;
+        esac
+        continue
+        ;;
+    esac
+    if printf '%s' "$line" | grep -Eq "($primitives)"; then
+      allowed "$path" "$line" || printf '%s\n' "$line"
+      continue
+    fi
+    if printf '%s' "$line" | grep -Eq "($encoders)"; then
+      allowed "$path" "$line" || printf '%s\n' "$line"
+    fi
+  done < "$file"
+}
+
 carrying_in_tree() {
-  local found=""
+  local found="" tmp
+  tmp=$(mktemp)
   while IFS= read -r path; do
     case "$path" in
       *_test.go) continue ;;
       *.go) ;;
       *) continue ;;
     esac
-    if grep -Eq "\"($primitives)\"" "$path" && grep -q "$subject" "$path"; then
+    grep -E '^\s*(import\s+)?(_\s+|[A-Za-z0-9_]+\s+)?"' "$path" > "$tmp" 2>/dev/null || : > "$tmp"
+    local bad
+    bad=$(offending_imports "$path" "$tmp")
+    if [ -n "$bad" ]; then
       found="$found $path"
     fi
   done <<< "$(git ls-files -- '*.go')"
+  rm -f "$tmp"
   printf '%s' "$found"
 }
 
 carrying_in_ref() {
-  local ref="$1" found=""
+  local ref="$1" found="" tmp
+  tmp=$(mktemp)
   while IFS= read -r path; do
     case "$path" in
       *_test.go) continue ;;
       *.go) ;;
       *) continue ;;
     esac
-    local blob
-    blob=$(git cat-file blob "$ref:$path" 2>/dev/null) || continue
-    if printf '%s' "$blob" | grep -Eq "\"($primitives)\"" &&
-       printf '%s' "$blob" | grep -q "$subject"; then
+    git cat-file blob "$ref:$path" 2>/dev/null |
+      grep -E '^\s*(import\s+)?(_\s+|[A-Za-z0-9_]+\s+)?"' > "$tmp" 2>/dev/null || : > "$tmp"
+    local bad
+    bad=$(offending_imports "$path" "$tmp")
+    if [ -n "$bad" ]; then
       found="$found $path"
     fi
   done <<< "$(git ls-tree -r --name-only "$ref")"
+  rm -f "$tmp"
   printf '%s' "$found"
 }
 
@@ -97,8 +160,13 @@ if [ "$status" -ne 0 ]; then
   cat >&2 <<'MSG'
 
 A wire contract has exactly one implementation, in the repository that owns the
-type: codefly-dev/core/workcontext. The files above sign or verify a Work
-Context here instead.
+type: codefly-dev/core/workcontext. The files above import a signature, a MAC, a
+token library or a second encoding of the message.
+
+There is no "and it also mentions WorkContext" condition any more: that was
+satisfied by splitting a signer across two files. If a file above has an honest
+need for one of these, add it to allowed() by path WITH A REASON, so the next
+reader sees the argument rather than the exception.
 
 Delete them and reach core's Verifier through workcontext/core.go. This
 repository once held a second implementation signing hand-written JSON. The

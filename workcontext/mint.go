@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/tls"
+	"crypto/x509"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -39,6 +40,21 @@ const (
 	// minRenewalLeadTime floors the lead so a very short credential still
 	// leaves room for one request and one retry.
 	minRenewalLeadTime = 5 * time.Second
+
+	// defaultMaxCredentialLifetime is the longest credential this client will
+	// hold. Core checks only that a TTL is positive, so without a ceiling a
+	// misconfigured host minting a month-long credential is accepted in
+	// silence. It is generous enough for the lifetimes the mint-once model
+	// wants — an hour's run needs about 75 minutes at the default lead — and
+	// short enough that a month is not one of them.
+	defaultMaxCredentialLifetime = 24 * time.Hour
+
+	// Backoff after a mint that failed. A failed renewal used to return an
+	// error to every caller while the held credential still had minutes left,
+	// and each caller then retried serially under the client's lock: one mint
+	// request per caller, which is the heartbeat under another name.
+	minMintBackoff = time.Second
+	maxMintBackoff = time.Minute
 )
 
 // Errors a mint caller distinguishes.
@@ -100,21 +116,39 @@ func (path ProjectedTokenFile) ProjectedToken() (string, error) {
 	return token, nil
 }
 
-// AuthorityPin is the boot-read authority every mint is checked against. The
-// root SDK's *codefly.Authority satisfies it.
+// AuthorityPin is the boot-read authority every mint reads its audience from
+// and is checked against. The root SDK's *codefly.Authority satisfies it.
 //
-// It exists so a mint cannot seal a credential to a value that drifted after
-// boot. The host is the authority for the audience and the binding a process
-// mints against; a value that changes under a running process is an error, and
-// a mint is exactly the moment that error would otherwise be laundered into a
-// new, differently-sealed credential.
+// It is REQUIRED, and it answers the audience rather than merely agreeing with
+// one. A free-string Audience beside an optional pin was a drift check guarding
+// a value the mint did not use: Recheck could pass while the credential was
+// minted for whatever string the caller had typed. Reading the audience through
+// Value on every mint is what makes the pin load-bearing — the value that
+// reaches the host is the pinned value, or the mint fails.
 //
-// It is checked before the FIRST mint too, and not only before a renewal: a
-// process may construct its client at boot and make its first call an hour
-// later, and the value can have moved in between.
+// Value's contract is the pin's: it answers from what was frozen at boot, and a
+// name the process did not declare is an error rather than a live lookup.
 type AuthorityPin interface {
+	// Recheck re-resolves every pinned value and refuses on the first that
+	// moved. A value that drifts under a running process is an error, never a
+	// reload: the process has already minted a credential sealed to the old
+	// one.
 	Recheck(ctx context.Context) error
+
+	// Value answers one pinned value, by the name and key the workspace
+	// accessors take.
+	Value(name string, key string) (string, error)
 }
+
+// AuthorityValue addresses one pinned workspace value, by the name and key
+// ReadAuthority declared it under. It is how MintOptions names the audience
+// without the audience being a string a caller can type.
+type AuthorityValue struct {
+	Name string
+	Key  string
+}
+
+func (v AuthorityValue) String() string { return v.Name + "/" + v.Key }
 
 // MintOptions configures the one credential a process obtains per execution.
 type MintOptions struct {
@@ -122,30 +156,56 @@ type MintOptions struct {
 	// no userinfo. Plain HTTP is refused — the projected service-account token
 	// travels on this request as a bearer credential.
 	URL string
-	// Audience is the Work Context audience to mint for, as the host names it.
-	// It is read from the process's boot-read authority, never typed.
-	Audience string
+
+	// Authority is the process's boot-read authority. REQUIRED: it answers the
+	// audience on every mint and it is rechecked before every mint, including
+	// the first.
+	Authority AuthorityPin
+
+	// Audience names the pinned value the Work Context audience is read from.
+	// REQUIRED. The audience is never a string passed in beside the pin — that
+	// made the drift check guard a value the mint did not use.
+	Audience AuthorityValue
+
 	// ProjectedToken reads the platform's projection of this process's
 	// service-account token. Required.
 	ProjectedToken ProjectedTokenSource
+
 	// ProjectionAudience is the audience the projected token itself was minted
 	// for, which the host states. Sent so the host can refuse a projection
 	// aimed at something else rather than reviewing whatever it is handed.
 	ProjectionAudience string
-	// Authority, when set, is rechecked before every mint, including the first.
-	// A process that resolved its audience or binding through ReadAuthority
-	// passes it here; without it there is no pin for this client to check and
-	// the drift refusal is not available to it.
-	Authority AuthorityPin
-	// HTTPClient is used as given except that redirects are refused on a copy
-	// of it, whatever it was configured to do. A redirected mint request is a
-	// credential request sent somewhere the configuration did not name.
-	HTTPClient *http.Client
+
+	// RootCAs is the only thing a caller may say about the transport: the roots
+	// that may sign the mint endpoint's certificate. Nil means the system pool.
+	//
+	// It replaces an *http.Client, and that is the point. A client is a hole:
+	// its Transport may be nil (so the global, mutable http.DefaultTransport),
+	// a wrapper this package cannot inspect, or one with a DialTLSContext that
+	// bypasses TLSClientConfig entirely — and a caller holding the same
+	// *http.Transport pointer can turn verification off after construction,
+	// because a copied http.Client shares it. Inspecting a supplied client
+	// could not close any of that. So the client builds and owns its transport:
+	// TLS 1.2 minimum, verification on, no custom dialer, redirects refused.
+	RootCAs *x509.CertPool
+
 	// RequestTimeout bounds one mint request.
 	RequestTimeout time.Duration
+
 	// RenewalLead overrides the fraction of a credential's lifetime at which
 	// renewal is attempted. Zero takes the default.
 	RenewalLead float64
+
+	// MaxCredentialLifetime refuses a credential the host minted for longer
+	// than this. Zero takes defaultMaxCredentialLifetime.
+	//
+	// The ceiling is here because there is none at the minter: core checks only
+	// that the TTL is positive, so a misconfigured host can mint a credential
+	// valid for a month and every verifier will accept it. A ceiling in the
+	// client is the weaker half of that fix — it bounds what THIS process will
+	// hold, not what the host will issue — and the cap belongs at the minter.
+	MaxCredentialLifetime time.Duration
+
 	// Now is the clock, for tests.
 	Now func() time.Time
 }
@@ -157,6 +217,7 @@ type Credential struct {
 	token     string
 	seal      Seal
 	binding   *SealedOperationBinding
+	notBefore time.Time
 	issuedAt  time.Time
 	expiresAt time.Time
 
@@ -185,6 +246,12 @@ func (c Credential) Seal() Seal { return c.seal }
 func (c Credential) OperationBinding() *SealedOperationBinding {
 	return cloneSealedBinding(c.binding)
 }
+
+// NotBefore reports when the credential starts being accepted. It is a
+// separate claim from IssuedAt, and it is the one a verifier tests, so a client
+// that checked only issued_at was checking a different window from the one its
+// credential would be judged against.
+func (c Credential) NotBefore() time.Time { return c.notBefore }
 
 // IssuedAt reports when the host minted it.
 func (c Credential) IssuedAt() time.Time { return c.issuedAt }
@@ -225,6 +292,20 @@ type MintClient struct {
 	credential *Credential
 	generation uint64
 	counts     MintCounts
+
+	// inflight is non-nil while one goroutine is minting, and is closed when it
+	// finishes. Concurrent callers wait on the channel rather than on the mutex
+	// so the wait is cancellable: holding the lock across the request made
+	// every caller's ctx meaningless and serialised N callers into N requests
+	// when the mint kept failing.
+	inflight chan struct{}
+
+	// backoff holds off the next attempt after a failure, and failures counts
+	// consecutive ones so the hold-off grows. Without it, a host answering 503
+	// received one request per caller per call — the heartbeat under another
+	// name, arriving exactly when the host is least able to serve it.
+	backoffUntil time.Time
+	failures     int
 }
 
 // NewMintClient validates configuration without performing any I/O.
@@ -233,8 +314,20 @@ func NewMintClient(options MintOptions) (*MintClient, error) {
 	if err != nil {
 		return nil, err
 	}
-	if strings.TrimSpace(options.Audience) == "" {
-		return nil, fmt.Errorf("%w: no audience to mint for", ErrMintRefused)
+	if options.Authority == nil {
+		return nil, fmt.Errorf(
+			"%w: a mint client needs the process's boot-read authority; the audience is read from it",
+			ErrMintRefused,
+		)
+	}
+	audience := AuthorityValue{
+		Name: strings.TrimSpace(options.Audience.Name),
+		Key:  strings.TrimSpace(options.Audience.Key),
+	}
+	if audience.Name == "" || audience.Key == "" {
+		return nil, fmt.Errorf(
+			"%w: name the pinned value the audience is read from", ErrMintRefused,
+		)
 	}
 	if options.ProjectedToken == nil {
 		return nil, fmt.Errorf("%w: no projected token source", ErrMintRefused)
@@ -259,42 +352,55 @@ func NewMintClient(options MintOptions) (*MintClient, error) {
 	if lead <= 0 || lead >= 1 {
 		return nil, fmt.Errorf("%w: renewal lead must be between zero and one", ErrMintRefused)
 	}
+	ceiling := options.MaxCredentialLifetime
+	if ceiling == 0 {
+		ceiling = defaultMaxCredentialLifetime
+	}
+	if ceiling <= 0 {
+		return nil, fmt.Errorf("%w: maximum credential lifetime must be positive", ErrMintRefused)
+	}
 	now := options.Now
 	if now == nil {
 		now = time.Now
 	}
-	client, err := secureMintClient(options.HTTPClient)
-	if err != nil {
-		return nil, err
-	}
 	options.URL = endpoint
+	options.Audience = audience
 	options.RequestTimeout = timeout
 	options.RenewalLead = lead
-	return &MintClient{options: options, httpClient: client, now: now}, nil
+	options.MaxCredentialLifetime = ceiling
+	return &MintClient{
+		options:    options,
+		httpClient: mintHTTPClient(options.RootCAs),
+		now:        now,
+	}, nil
 }
 
-// secureMintClient returns the client every mint request is made with:
-// the caller's, copied, with redirects refused on the copy.
+// mintHTTPClient builds the client every mint request is made with. The client
+// owns it: there is no way for a caller to supply one.
 //
-// Refusing them on a client of our own was not enough. The projection is on the
-// request as a bearer token, and Go's own client forwards Authorization across a
-// redirect to the same host — so a caller that supplied an ordinary
-// &http.Client{} disclosed the projection to whatever that host redirected to,
-// before anything here could classify the answer. The refusal is therefore
-// installed on EVERY client, before any request leaves. It is installed on a
-// copy so a caller that uses its client elsewhere keeps its own redirect
-// behaviour there.
-func secureMintClient(supplied *http.Client) (*http.Client, error) {
-	client := &http.Client{}
-	if supplied != nil {
-		copied := *supplied
-		client = &copied
+// Inspecting a caller's client could not make this safe, which is why the
+// option is gone. A nil Transport means the global, mutable
+// http.DefaultTransport; a wrapping RoundTripper is opaque; a DialTLSContext
+// bypasses TLSClientConfig altogether; and a caller that keeps the
+// *http.Transport pointer can turn verification off after construction, because
+// copying an http.Client shares its Transport. All four sent the projected
+// service-account token over a channel nobody authenticated. So the only thing
+// a caller says about the transport is which roots may sign the endpoint's
+// certificate.
+func mintHTTPClient(roots *x509.CertPool) *http.Client {
+	return &http.Client{
+		CheckRedirect: refuseMintRedirect,
+		Transport: &http.Transport{
+			TLSClientConfig: &tls.Config{
+				RootCAs:    roots, // nil means the system pool
+				MinVersion: tls.VersionTLS12,
+			},
+			ForceAttemptHTTP2:   true,
+			DisableCompression:  true,
+			MaxIdleConnsPerHost: 2,
+			TLSHandshakeTimeout: maxMintRequestTimeout,
+		},
 	}
-	if err := checkTransportAuthenticates(client.Transport); err != nil {
-		return nil, err
-	}
-	client.CheckRedirect = refuseMintRedirect
-	return client, nil
 }
 
 // refuseMintRedirect is called by net/http BEFORE the redirected request is
@@ -314,55 +420,26 @@ func refuseMintRedirect(request *http.Request, via []*http.Request) error {
 	)
 }
 
-// checkTransportAuthenticates refuses a transport configured not to verify the
-// endpoint's certificate. HTTPS whose certificate nobody checks is plaintext
-// with extra steps, and this is the one request that carries the projection.
+// Credential returns the credential to use now: the first one is minted, and
+// one that has reached its renewal point is renewed.
 //
-// A RoundTripper this package cannot inspect is not refused — it cannot be —
-// but it cannot downgrade the scheme either, and the URL check above requires
-// https.
-func checkTransportAuthenticates(transport http.RoundTripper) error {
-	settings, ok := transport.(*http.Transport)
-	if !ok {
-		return nil
-	}
-	if settings.TLSClientConfig != nil && settings.TLSClientConfig.InsecureSkipVerify {
-		return fmt.Errorf(
-			"%w: the mint client's transport does not verify the endpoint's certificate",
-			ErrMintRefused,
-		)
-	}
-	if settings.TLSClientConfig != nil &&
-		settings.TLSClientConfig.MinVersion != 0 &&
-		settings.TLSClientConfig.MinVersion < tls.VersionTLS12 {
-		return fmt.Errorf(
-			"%w: the mint client's transport permits TLS below 1.2",
-			ErrMintRefused,
-		)
-	}
-	return nil
-}
-
-// Credential returns the credential for this moment, minting the first one and
-// renewing a credential that has reached its renewal point. Every caller goes
-// through it, so no caller obtains a credential this client knows to be past
-// its renewal point.
-//
-// It is not a guarantee about a credential a caller already holds: a Credential
+// It is NOT a guarantee about a credential a caller already holds. A Credential
 // is a value, so one read out of here and kept can be attached after the host
-// has moved the state under it. That is what Refresh is for, and it is why a
+// has moved the state under it; that is what Refresh is for, and it is why a
 // receiver verifies rather than trusting that a caller re-asked.
 //
-// It holds one lock across the mint request, so concurrent callers wait rather
-// than each minting their own. That is the point: a process obtains one
-// credential per execution, and a process whose first request burst produced
-// one mint per goroutine would be the heartbeat again under another name. The
-// request timeout bounds the wait.
+// **A held credential that is still valid is served even when a renewal
+// fails.** Entering the renewal lead and failing used to return an error to
+// every caller while the credential in hand had minutes of validity left — an
+// outage this client manufactured out of a credential that still worked. A
+// renewal failure is only an error once the credential has actually expired.
 //
-// Every mint re-reads the projected token and rechecks the boot-read authority
-// first. A projection rotated under the running process is therefore picked up
-// without a restart, and an authority value that drifted refuses the mint
-// instead of being sealed into a new credential.
+// One mint at a time, and the wait is cancellable. Concurrent callers wait on a
+// channel rather than on the mutex, so a caller whose ctx is cancelled stops
+// waiting, and a failing mint produces one request rather than one per caller.
+// After a failure the next attempt is held off, growing to a minute: a process
+// obtains one credential per execution, and a process that answered a 503 with
+// a request per call would be the heartbeat again under another name.
 func (c *MintClient) Credential(ctx context.Context) (Credential, error) {
 	if c == nil {
 		return Credential{}, fmt.Errorf("%w: nil mint client", ErrMintRefused)
@@ -370,22 +447,9 @@ func (c *MintClient) Credential(ctx context.Context) (Credential, error) {
 	if ctx == nil {
 		return Credential{}, fmt.Errorf("%w: nil context", ErrMintRefused)
 	}
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	if c.credential != nil && !c.dueForRenewalLocked(*c.credential) {
-		return *c.credential, nil
-	}
-	renewal := c.credential != nil
-	credential, err := c.obtainLocked(ctx)
-	if err != nil {
-		return Credential{}, err
-	}
-	if renewal {
-		c.counts.Renewals++
-	} else {
-		c.counts.Mints++
-	}
-	return credential, nil
+	return c.obtain(ctx, mintReasonRenewal, func(held *Credential) bool {
+		return held == nil || c.dueForRenewalLocked(*held)
+	})
 }
 
 // Refresh replaces a credential the host has refused — ErrRevoked from a
@@ -394,8 +458,8 @@ func (c *MintClient) Credential(ctx context.Context) (Credential, error) {
 //
 // Without it there was no way back: Credential answers from the credential it
 // holds until that credential's own renewal point, so a process whose
-// installation revision changed served refusals until a lead that the host
-// chooses — hours, for a long-lived credential — had elapsed.
+// installation revision changed served refusals until a lead the host chooses
+// had elapsed.
 //
 // It is tied to the credential that was refused, not to the clock. A caller
 // passes back the Credential it was refused on; if this client has already
@@ -403,6 +467,12 @@ func (c *MintClient) Credential(ctx context.Context) (Credential, error) {
 // burst of concurrent refusals on one credential produces exactly one
 // replacement mint, and a caller holding a credential two generations old
 // cannot roll the client backwards by asking about it.
+//
+// It is held to the same backoff as a renewal, which matters for the case a
+// generation check alone does not cover: a receiver whose seal source lags
+// refuses each FRESH credential too, and every refusal is a new generation. The
+// backoff is what bounds that into one mint per hold-off rather than one per
+// call.
 func (c *MintClient) Refresh(ctx context.Context, refused Credential) (Credential, error) {
 	if c == nil {
 		return Credential{}, fmt.Errorf("%w: nil mint client", ErrMintRefused)
@@ -417,45 +487,155 @@ func (c *MintClient) Refresh(ctx context.Context, refused Credential) (Credentia
 		)
 	}
 	c.mu.Lock()
-	defer c.mu.Unlock()
-	if c.credential == nil {
+	issued := c.credential != nil
+	c.mu.Unlock()
+	if !issued {
 		return Credential{}, fmt.Errorf(
 			"%w: this client has issued no credential to refresh", ErrMintRefused,
 		)
 	}
-	if c.credential.generation != refused.generation {
+	return c.obtain(ctx, mintReasonRefresh, func(held *Credential) bool {
 		// Somebody else was refused on the same credential and has already
 		// replaced it. Minting again here would be the second mint for one
 		// revocation, which is the thing this client exists not to do.
-		return *c.credential, nil
-	}
-	credential, err := c.obtainLocked(ctx)
-	if err != nil {
-		return Credential{}, err
-	}
-	c.counts.Refreshes++
-	return credential, nil
+		return held != nil && held.generation == refused.generation
+	})
 }
 
-// obtainLocked rechecks the pinned authority, mints, and installs the result as
-// the credential this client holds. It is the one path that writes
-// c.credential, so a mint that is refused leaves the previous credential in
-// place rather than clearing it: a refused renewal must not turn into "this
-// process holds nothing", which reads as a boot failure somewhere it is not.
-func (c *MintClient) obtainLocked(ctx context.Context) (Credential, error) {
-	if c.options.Authority != nil {
-		if err := c.options.Authority.Recheck(ctx); err != nil {
-			return Credential{}, fmt.Errorf("%w: %v", ErrMintRefused, err)
+// mintReason says which counter a successful mint belongs to. The FIRST mint is
+// always counted as a mint whatever asked for it.
+type mintReason int
+
+const (
+	mintReasonRenewal mintReason = iota
+	mintReasonRefresh
+)
+
+// obtain is the one path that mints. needed decides, against the credential
+// currently held, whether a new one is wanted; it is called under the lock.
+func (c *MintClient) obtain(
+	ctx context.Context, reason mintReason, needed func(held *Credential) bool,
+) (Credential, error) {
+	for {
+		c.mu.Lock()
+		held := c.credential
+		if !needed(held) {
+			credential := *held
+			c.mu.Unlock()
+			return credential, nil
+		}
+		usable := held != nil && c.now().UTC().Before(held.expiresAt)
+		if waiting := c.inflight; waiting != nil {
+			// Another goroutine is minting. Wait for it rather than queueing a
+			// second request, and let ctx cancel the wait.
+			snapshot := Credential{}
+			if held != nil {
+				snapshot = *held
+			}
+			c.mu.Unlock()
+			select {
+			case <-waiting:
+				continue
+			case <-ctx.Done():
+				if usable {
+					return snapshot, nil
+				}
+				// Both stay in the chain: a caller that cancelled wants to see
+				// its own cancellation, not only that minting was unavailable.
+				return Credential{}, fmt.Errorf("%w: %w", ErrMintUnavailable, ctx.Err())
+			}
+		}
+		if until := c.backoffUntil; !until.IsZero() && c.now().UTC().Before(until) {
+			// Held off after a failure. Serving the credential in hand is the
+			// whole point of the hold-off; only an expired one is an error.
+			if usable {
+				credential := *held
+				c.mu.Unlock()
+				return credential, nil
+			}
+			c.mu.Unlock()
+			return Credential{}, fmt.Errorf(
+				"%w: the last mint failed and the next attempt is held off until %s",
+				ErrMintUnavailable, until,
+			)
+		}
+		done := make(chan struct{})
+		c.inflight = done
+		renewal := held != nil
+		c.mu.Unlock()
+
+		credential, err := c.mintOnce(ctx)
+
+		c.mu.Lock()
+		c.inflight = nil
+		if err != nil {
+			c.failures++
+			c.backoffUntil = c.now().UTC().Add(mintBackoff(c.failures))
+			stillUsable := c.credential != nil && c.now().UTC().Before(c.credential.expiresAt)
+			snapshot := Credential{}
+			if stillUsable {
+				snapshot = *c.credential
+			}
+			c.mu.Unlock()
+			close(done)
+			if stillUsable {
+				// The credential in hand still works. A renewal that failed is
+				// not an outage until the thing it was renewing has expired.
+				return snapshot, nil
+			}
+			return Credential{}, err
+		}
+		c.failures = 0
+		c.backoffUntil = time.Time{}
+		c.generation++
+		credential.generation = c.generation
+		c.credential = &credential
+		switch {
+		case !renewal:
+			c.counts.Mints++
+		case reason == mintReasonRefresh:
+			c.counts.Refreshes++
+		default:
+			c.counts.Renewals++
+		}
+		c.mu.Unlock()
+		close(done)
+		return credential, nil
+	}
+}
+
+// mintOnce rechecks the pinned authority, reads the audience from it and mints.
+// It performs no locking: obtain holds the single-flight slot across it, so the
+// request is made without the client's mutex held and a caller's ctx still
+// means something.
+func (c *MintClient) mintOnce(ctx context.Context) (Credential, error) {
+	if err := c.options.Authority.Recheck(ctx); err != nil {
+		return Credential{}, fmt.Errorf("%w: %v", ErrMintRefused, err)
+	}
+	audience, err := c.options.Authority.Value(c.options.Audience.Name, c.options.Audience.Key)
+	if err != nil {
+		return Credential{}, fmt.Errorf(
+			"%w: read the audience from %s: %v", ErrMintRefused, c.options.Audience, err,
+		)
+	}
+	if strings.TrimSpace(audience) == "" {
+		return Credential{}, fmt.Errorf(
+			"%w: %s is pinned to an empty audience", ErrMintRefused, c.options.Audience,
+		)
+	}
+	return c.mintLocked(ctx, audience)
+}
+
+// mintBackoff grows the hold-off with consecutive failures, to a minute.
+func mintBackoff(failures int) time.Duration {
+	hold := minMintBackoff
+	for range failures - 1 {
+		hold *= 2
+		if hold >= maxMintBackoff {
+			return maxMintBackoff
 		}
 	}
-	credential, err := c.mintLocked(ctx)
-	if err != nil {
-		return Credential{}, err
-	}
-	c.generation++
-	credential.generation = c.generation
-	c.credential = &credential
-	return credential, nil
+	return hold
 }
 
 // Counts reports what this process's credential life cost. A correct execution
@@ -481,7 +661,7 @@ func (c *MintClient) dueForRenewalLocked(credential Credential) bool {
 	if remaining <= 0 {
 		return true
 	}
-	lifetime := credential.expiresAt.Sub(credential.issuedAt)
+	lifetime := credential.expiresAt.Sub(credential.notBefore)
 	lead := time.Duration(float64(lifetime) * c.options.RenewalLead)
 	if lead < minRenewalLeadTime {
 		lead = minRenewalLeadTime
@@ -492,13 +672,13 @@ func (c *MintClient) dueForRenewalLocked(credential Credential) bool {
 	return remaining <= lead
 }
 
-func (c *MintClient) mintLocked(ctx context.Context) (Credential, error) {
+func (c *MintClient) mintLocked(ctx context.Context, audience string) (Credential, error) {
 	projected, err := c.options.ProjectedToken.ProjectedToken()
 	if err != nil {
 		return Credential{}, err
 	}
 	body, err := json.Marshal(mintRequest{
-		Audience:           c.options.Audience,
+		Audience:           audience,
 		ProjectionAudience: c.options.ProjectionAudience,
 	})
 	if err != nil {
@@ -547,11 +727,15 @@ func (c *MintClient) mintLocked(ctx context.Context) (Credential, error) {
 		}
 		return Credential{}, fmt.Errorf("%w: mint returned HTTP %d", sentinel, response.StatusCode)
 	}
-	if contentType := response.Header.Get("Content-Type"); contentType != "" {
-		mediaType, _, parseErr := mime.ParseMediaType(contentType)
-		if parseErr != nil || mediaType != "application/json" {
-			return Credential{}, fmt.Errorf("%w: mint response is not application/json", ErrMintRefused)
-		}
+	// Content-Type is REQUIRED, not checked when present. An absent header used
+	// to be accepted, which made "the response is JSON" something the host
+	// could decline to state about the one response this process trusts for its
+	// whole life.
+	mediaType, _, parseErr := mime.ParseMediaType(response.Header.Get("Content-Type"))
+	if parseErr != nil || mediaType != "application/json" {
+		return Credential{}, fmt.Errorf(
+			"%w: mint response must declare Content-Type: application/json", ErrMintRefused,
+		)
 	}
 	payload, err := io.ReadAll(io.LimitReader(response.Body, maxMintResponseBytes+1))
 	if err != nil {
@@ -562,14 +746,14 @@ func (c *MintClient) mintLocked(ctx context.Context) (Credential, error) {
 			"%w: mint response exceeds %d bytes", ErrMintRefused, maxMintResponseBytes,
 		)
 	}
-	return c.credentialFrom(payload)
+	return c.credentialFrom(payload, audience)
 }
 
 // credentialFrom reads the credential out of the response and takes its sealed
 // values from the token, not from the response body. The host may echo them for
 // a log, and an echo that disagrees with the signature is a refusal: the only
 // installation, build and epoch that mean anything are the signed ones.
-func (c *MintClient) credentialFrom(payload []byte) (Credential, error) {
+func (c *MintClient) credentialFrom(payload []byte, audience string) (Credential, error) {
 	var body mintResponse
 	decoder := json.NewDecoder(bytes.NewReader(payload))
 	decoder.DisallowUnknownFields()
@@ -594,16 +778,21 @@ func (c *MintClient) credentialFrom(payload []byte) (Credential, error) {
 			ErrMintRefused, body.BuildIncarnation, seal.BuildIncarnation,
 		)
 	}
-	if claims.GetAudience() != c.options.Audience {
+	// The audience the host signed must be the audience read from the pin.
+	// This is the check an optional pin beside a free-string Audience could not
+	// make: Recheck passing told nobody that the credential in hand was minted
+	// for the pinned value rather than for whatever a caller had typed.
+	if claims.GetAudience() != audience {
 		return Credential{}, fmt.Errorf(
-			"%w: credential was minted for audience %q, not %q",
-			ErrMintRefused, claims.GetAudience(), c.options.Audience,
+			"%w: credential was minted for audience %q, and %s is pinned to %q",
+			ErrMintRefused, claims.GetAudience(), c.options.Audience, audience,
 		)
 	}
 	credential := Credential{
 		token:     token,
 		seal:      seal,
 		binding:   binding,
+		notBefore: time.Unix(claims.GetNotBeforeUnix(), 0).UTC(),
 		issuedAt:  time.Unix(claims.GetIssuedAtUnix(), 0).UTC(),
 		expiresAt: time.Unix(claims.GetExpiresAtUnix(), 0).UTC(),
 	}
@@ -613,41 +802,64 @@ func (c *MintClient) credentialFrom(payload []byte) (Credential, error) {
 	return credential, nil
 }
 
-// checkWindow refuses a credential that is unusable the moment it arrives.
+// checkWindow refuses a credential that is unusable the moment it arrives, and
+// one valid for longer than this process will hold a credential.
 //
-// The renewal check only ever looked at the credential already held, so a
-// response that was delayed, or minted against a clock well behind this
-// process's, was installed as a success and then refused by every receiver —
-// with the mint counted as having worked. A credential is checked against its
-// own window before it is installed, with core's own skew so the tolerance here
-// is the verifier's and not a second number.
+// Two things it gets right that the first version did not. It tests
+// **not_before**, which is the claim core's verifier tests; testing issued_at
+// was testing a different window from the one the credential would be judged
+// against, and a host that sets them apart would have had a credential accepted
+// here and refused everywhere. And it bounds the lifetime: core checks only
+// that a TTL is positive, so a misconfigured host minting a month-long
+// credential was installed in silence.
+//
+// The tolerance is core's own skew, so this client is never stricter than the
+// verifier that will accept the credential.
 func (c *MintClient) checkWindow(credential Credential) error {
-	if !credential.expiresAt.After(credential.issuedAt) {
+	if !credential.expiresAt.After(credential.notBefore) {
 		return fmt.Errorf(
-			"%w: the minted credential expires at or before it was issued (%s to %s)",
-			ErrMintRefused, credential.issuedAt, credential.expiresAt,
+			"%w: the minted credential expires at or before it becomes valid (%s to %s)",
+			ErrMintRefused, credential.notBefore, credential.expiresAt,
+		)
+	}
+	if lifetime := credential.expiresAt.Sub(credential.notBefore); lifetime > c.options.MaxCredentialLifetime {
+		return fmt.Errorf(
+			"%w: the minted credential is valid for %s, and this process holds a credential for at most %s",
+			ErrMintRefused, lifetime, c.options.MaxCredentialLifetime,
 		)
 	}
 	now := c.now().UTC()
-	if now.Before(credential.issuedAt.Add(-corework.DefaultSkew)) {
+	if now.Before(credential.notBefore.Add(-corework.DefaultSkew)) {
+		// Not yet valid. A clock this far apart is a configuration error on one
+		// side or the other and will not fix itself, so it is a refusal.
 		return fmt.Errorf(
 			"%w: the minted credential is not valid until %s, and it is %s",
-			ErrMintRefused, credential.issuedAt, now,
+			ErrMintRefused, credential.notBefore, now,
 		)
 	}
 	if !now.Before(credential.expiresAt) {
+		// Already expired on arrival. This is what a DELAYED response looks
+		// like, which the next attempt may well not hit, so it is an outage
+		// and not a refusal — and the backoff is what stops the next attempt
+		// being immediate.
 		return fmt.Errorf(
 			"%w: the minted credential expired at %s, and it is %s",
-			ErrMintRefused, credential.expiresAt, now,
+			ErrMintUnavailable, credential.expiresAt, now,
 		)
 	}
 	if c.dueForRenewalLocked(credential) {
-		// Installing it would put the client straight back into a renewal, and
+		// Installing it would put the client straight back into a renewal and
 		// the next response would be the same one: a mint loop, one audit event
 		// per iteration, which is the heartbeat this client replaced.
+		//
+		// ErrMintUnavailable rather than ErrMintRefused, which is the sentinel
+		// this carried first and got wrong: a merely delayed response produces
+		// exactly this, and ErrMintRefused means "the host will say the same
+		// thing again, do not serve". A caller must not stop serving because
+		// one response arrived late.
 		return fmt.Errorf(
-			"%w: the minted credential's whole lifetime is inside the renewal lead (%s to %s)",
-			ErrMintRefused, credential.issuedAt, credential.expiresAt,
+			"%w: the minted credential's whole remaining lifetime is inside the renewal lead (%s to %s)",
+			ErrMintUnavailable, credential.notBefore, credential.expiresAt,
 		)
 	}
 	return nil

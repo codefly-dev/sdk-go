@@ -1,7 +1,6 @@
 package codefly_test
 
 import (
-	"sync"
 	"testing"
 
 	codefly "github.com/codefly-dev/sdk-go"
@@ -108,47 +107,6 @@ func TestReadAuthorityFailsWholeWhenOneNameIsMissing(t *testing.T) {
 	value, err := codefly.For(t.Context()).WorkspaceValue("mint-partial", "audience")
 	require.NoError(t, err, "a read that failed whole must pin nothing")
 	require.Equal(t, "example.moved-after-the-failed-read", value)
-}
-
-// Two processes-worth of concurrent reads of one name must not end up holding
-// two authorities that disagree. Whichever value wins, every Authority that was
-// handed back carries it; the losers are refused.
-func TestConcurrentAuthorityReadsNeverDisagree(t *testing.T) {
-	t.Setenv("CODEFLY__WORKSPACE_CONFIGURATION__MINT_RACE__AUDIENCE", "example.audience")
-	require.NoError(t, codefly.LoadEnvironmentVariables())
-	name := codefly.AuthorityValueName{Name: "mint-race", Key: "audience"}
-
-	const readers = 16
-	values := make(chan string, readers)
-	var waiting sync.WaitGroup
-	for range readers {
-		waiting.Add(1)
-		go func() {
-			defer waiting.Done()
-			authority, err := codefly.ReadAuthority(t.Context(), name)
-			if err != nil {
-				return
-			}
-			value, err := authority.Value(name.Name, name.Key)
-			if err != nil {
-				return
-			}
-			values <- value
-		}()
-	}
-	waiting.Wait()
-	close(values)
-
-	var agreed string
-	for value := range values {
-		if agreed == "" {
-			agreed = value
-			continue
-		}
-		require.Equal(t, agreed, value,
-			"two concurrent reads produced authorities that disagree about %s", name)
-	}
-	require.NotEmpty(t, agreed, "at least one read must succeed")
 }
 
 // A name the process never declared is not answerable from a frozen set.

@@ -23,7 +23,6 @@ import (
 var (
 	testClock = time.Date(2026, 10, 2, 12, 0, 0, 0, time.UTC)
 	testSeal  = Seal{
-		PrincipalEpoch:       7,
 		InstallationID:       testInstallation,
 		InstallationRevision: 3,
 		BuildIncarnation:     11,
@@ -48,6 +47,9 @@ const (
 	testPrincipal    = "principal-1"
 	testInstallation = "installation-1"
 	testBinding      = "binding-1"
+	// testPrincipalEpoch is the owner's live epoch, which the seal source
+	// answers rather than the seal carrying it.
+	testPrincipalEpoch = 7
 )
 
 type authority struct {
@@ -62,6 +64,12 @@ func newAuthority(t *testing.T) *authority {
 	t.Helper()
 	seals := corework.NewMemorySealSource()
 	require.NoError(t, seals.Put(testPrincipal, testSeal))
+	// The owner's epoch is recorded through PutEpoch like any other
+	// principal's. Seal no longer carries it: it had two sources, and
+	// revocation could be UNDONE — advancing the epoch left stored seals
+	// untouched, and storing a seal for an unrelated installation lowered it
+	// back. One source, owners and actors alike.
+	require.NoError(t, seals.PutEpoch(testPrincipal, testPrincipalEpoch))
 	require.NoError(t, seals.PutBinding(testLiveBinding))
 	return newAuthorityOver(t, seals)
 }
@@ -128,12 +136,15 @@ func (noGrants) Grant(context.Context, string) (*corework.Grant, error) {
 // discussion.
 func resealWithout(t *testing.T, token string, field string) string {
 	t.Helper()
-	claims, err := claimsOf(token)
+	claims, err := readClaims(token)
 	require.NoError(t, err)
 	require.NotNil(t, claims.GetSeal())
 	switch field {
 	case "PrincipalEpoch":
 		claims.Seal.PrincipalEpoch = 0
+	case "ActorEpoch":
+		require.NotEmpty(t, claims.GetActorChain(), "no hop to blank")
+		claims.ActorChain[len(claims.ActorChain)-1].PrincipalEpoch = nil
 	case "InstallationID":
 		claims.Seal.InstallationId = ""
 	case "InstallationRevision":

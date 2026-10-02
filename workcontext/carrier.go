@@ -79,34 +79,29 @@ func FromHeaders(headers http.Header) (string, error) {
 	return encoded, nil
 }
 
-// checkCarriedInstallation refuses a request whose installation carriers
-// disagree with the seal, or whose carriers are stated more than once.
+// checkCarriedInstallation requires BOTH installation carriers, exactly once
+// each, and holds them to the seal.
 //
-// Cardinality is checked before agreement, which Header.Get made impossible:
-// it reads the FIRST value, so `[sealed-id, something-else]` compared equal to
-// the seal and the call was accepted while carrying two contradictory
+// Carrying neither used to be allowed, and that was the optional-carrier escape
+// hatch surviving on HTTP after it was deleted on gRPC: gRPC requires exactly
+// one of each, so "one contract for both transports" was false, and a sender
+// that attached nothing skipped the seal check entirely. Attach always sets
+// both, so any sender using this SDK already satisfies it; one that does not is
+// a sender whose pre-check nobody can perform.
+//
+// Cardinality is checked before agreement, which Header.Get made impossible: it
+// reads the FIRST value, so `[sealed-id, something-else]` compared equal to the
+// seal and the call was accepted while carrying two contradictory
 // installations. Whether a later intermediary reads the first or the second is
-// not something this module can decide, so an ambiguous carrier is refused
-// here — the same contract gRPC already held, now stated once for both.
+// not something this module can decide, so an ambiguous carrier is refused.
 func checkCarriedInstallation(headers http.Header, encoded string) error {
-	ids := headers.Values(InstallationIDHeaderName)
-	revisions := headers.Values(InstallationRevisionHeaderName)
-	if len(ids) == 0 && len(revisions) == 0 {
-		return nil
-	}
 	for _, carrier := range []struct {
 		name   string
 		values []string
 	}{
-		{InstallationIDHeaderName, ids},
-		{InstallationRevisionHeaderName, revisions},
+		{InstallationIDHeaderName, headers.Values(InstallationIDHeaderName)},
+		{InstallationRevisionHeaderName, headers.Values(InstallationRevisionHeaderName)},
 	} {
-		if len(carrier.values) == 0 {
-			return fmt.Errorf(
-				"%w: %s and %s travel together; one was presented without the other",
-				ErrInvalid, InstallationIDHeaderName, InstallationRevisionHeaderName,
-			)
-		}
 		if len(carrier.values) != 1 {
 			return fmt.Errorf(
 				"%w: %s requires exactly one value and carries %d",
@@ -118,16 +113,16 @@ func checkCarriedInstallation(headers http.Header, encoded string) error {
 	if err != nil {
 		return err
 	}
-	if ids[0] != sealedID {
+	if id := headers.Get(InstallationIDHeaderName); id != sealedID {
 		return fmt.Errorf(
 			"%w: %s carries %q and the capability is sealed to %q",
-			ErrInvalid, InstallationIDHeaderName, ids[0], sealedID,
+			ErrInvalid, InstallationIDHeaderName, id, sealedID,
 		)
 	}
-	if revisions[0] != sealedRevision {
+	if revision := headers.Get(InstallationRevisionHeaderName); revision != sealedRevision {
 		return fmt.Errorf(
 			"%w: %s carries %q and the capability is sealed to %q",
-			ErrInvalid, InstallationRevisionHeaderName, revisions[0], sealedRevision,
+			ErrInvalid, InstallationRevisionHeaderName, revision, sealedRevision,
 		)
 	}
 	return nil
@@ -136,14 +131,13 @@ func checkCarriedInstallation(headers http.Header, encoded string) error {
 // SealedInstallation reads the installation a capability is sealed to, for a
 // transport that names it beside the capability.
 //
-// It is the WHOLE seal check and not an installation check. It used to read
-// just the installation id and revision, which made "Attach refuses an unsealed
-// capability" true of two fields out of four: a capability with no principal
-// epoch, no build incarnation, or a binding naming an id at no revision was
-// attached and travelled, and the missing field is the one an attacker would
-// choose to leave out. Every carrier in this module — HTTP attach, HTTP read,
-// outgoing gRPC metadata, incoming gRPC metadata — goes through here, so there
-// is one answer to "is this sealed" rather than one per transport.
+// It is CORE'S whole structural check and not an installation check. It used to
+// read just the installation id and revision, which made "Attach refuses an
+// unsealed capability" true of two fields out of four; then it grew a local
+// rule, which disagreed with core's fixtures about which sentinel each refusal
+// earns. Now it asks corework.Inspect, so there is one answer to "is this
+// sealed" for every carrier in this module — HTTP attach, HTTP read, outgoing
+// gRPC metadata, incoming gRPC metadata — and that answer is core's.
 //
 // It reads the capability's own content without checking the signature, which
 // is sound only because nothing trusts the result: the carrier it fills is a
@@ -157,44 +151,44 @@ func SealedInstallation(encoded string) (id string, revision string, err error) 
 	return seal.InstallationID, strconv.FormatUint(seal.InstallationRevision, 10), nil
 }
 
-// claimsOf decodes a capability's claims WITHOUT establishing any trust in
-// them. Nothing in this module authorizes from what it returns: its one caller
-// is sealOf, which the pre-check carriers and the mint client reach it through.
+// readClaims decodes a capability's claims AFTER core has judged its structure,
+// and applies no rule of its own.
 //
-// It decodes core's encoding with core's generated type, so there is no second
-// reading of the wire here. The one thing it must not become is a verification:
-// there is no signature check in it and there must never be one, because a
-// second place that checks a signature is a second implementation whatever it
-// is called.
-func claimsOf(encoded string) (*Claims, error) {
-	if strings.TrimSpace(encoded) == "" {
-		return nil, fmt.Errorf("%w: empty capability", ErrInvalid)
+// This is all that is left of a parser that had become a second
+// implementation. It used to hand-parse the envelope and then apply its own
+// structural seal rule, and that rule DISAGREED with core's own fixtures:
+// seal-without-installation was ErrUnsealed here and ErrInvalid there (core's
+// schema reaches it first), a zero epoch, revision or incarnation was
+// ErrUnsealed here and ErrInvalid there, and the actor chain was never read at
+// all — so core's actor-without-epoch fixture, a principal nobody can revoke,
+// was attached and carried. One condition with two messages is the exact
+// fragmentation the one-implementation rule exists to end, and it had been
+// relocated from the signature to the seal.
+//
+// So every structural DECISION is corework.Inspect's, and what remains here is
+// reading two values out of a capability core has already said is shaped like a
+// sealed capability: the installation, for the pre-check carriers, and the
+// window, for the mint client reading the lifetime of a credential the host
+// just issued it. Nothing here decides anything, and nothing trusts the result:
+// Inspect itself checks no signature — core's own test asserts that a token
+// re-signed with a key nobody holds passes it — so nil means "shaped right" and
+// never "permitted".
+//
+// The residue shrinks to nothing when core's Inspect returns the claims it has
+// already decoded; that is agreed and not yet in a pinned commit. Until then
+// this decode runs SECOND, after Inspect, so it can never be the thing that
+// answers a question.
+func readClaims(encoded string) (*Claims, error) {
+	if err := corework.Inspect(encoded); err != nil {
+		return nil, err
 	}
-	if len(encoded) > MaxTokenBytes {
-		return nil, fmt.Errorf("%w: capability exceeds %d bytes", ErrInvalid, MaxTokenBytes)
-	}
-	payload, signature, found := strings.Cut(encoded, ".")
-	if !found || payload == "" || signature == "" {
-		return nil, fmt.Errorf("%w: capability is not <payload>.<signature>", ErrInvalid)
-	}
+	payload, _, _ := strings.Cut(encoded, ".")
 	raw, err := base64.RawURLEncoding.DecodeString(payload)
 	if err != nil {
+		// Unreachable: Inspect decoded the same bytes. Returning core's
+		// sentinel rather than panicking keeps the failure legible if core's
+		// envelope ever stops being <base64url>.<base64url>.
 		return nil, fmt.Errorf("%w: payload is not base64url: %v", ErrInvalid, err)
-	}
-	if _, err := base64.RawURLEncoding.DecodeString(signature); err != nil {
-		return nil, fmt.Errorf("%w: signature is not base64url: %v", ErrInvalid, err)
-	}
-	// Before unmarshalling: is this even this encoding? Core's check, not a
-	// second one — so a token in another format is named here exactly as the
-	// verifier would name it (ErrNotACoreToken), rather than reported as a
-	// payload that failed to unmarshal. Two different messages for one
-	// condition is the diagnostic fragmentation that produced this rule.
-	//
-	// A nil return means only that the payload is not visibly another format.
-	// Nothing here checks a signature, and nothing that follows trusts the
-	// result.
-	if err := corework.CheckEncoding(raw); err != nil {
-		return nil, err
 	}
 	claims := &Claims{}
 	if err := proto.Unmarshal(raw, claims); err != nil {
@@ -203,56 +197,28 @@ func claimsOf(encoded string) (*Claims, error) {
 	return claims, nil
 }
 
-// sealOf reads the claims, the seal and the sealed operation binding of a
-// capability, and is the one structural seal check in this module.
+// sealOf reads the seal and the sealed operation binding of a capability whose
+// structure core has approved.
 //
-// It requires a whole seal: every field of it, and for an operation binding all
-// three of its fields or none of them. A partial seal is refused here and not
-// carried, because a capability sealed to an installation with no revision, or
-// to a binding id at no revision, names an authority nobody approved — and the
-// field that is missing is the one an attacker would choose to leave out.
-//
-// Refusing it here is a preflight and not the authorization: core's verifier
-// refuses the same capability at the far end. The preflight is what makes the
-// refusal legible — it names the field that is missing, in the process that
-// holds the credential, rather than arriving as a mismatch in a service that
-// cannot do anything about it.
+// It applies no rule. Every refusal a capability's own bytes can earn —
+// another encoding, a bad envelope, a schema violation, a seal naming no
+// installation, a zero epoch, revision or incarnation, a partial binding, a
+// widening hop, an actor hop with no epoch — is corework.Inspect's answer, with
+// corework's sentinel. TestTheSDKParsePathsAgreeWithCore drives every fixture
+// in core's kit through this path and requires core's declared sentinel for
+// each, so the agreement is tested rather than described.
 func sealOf(encoded string) (*Claims, Seal, *SealedOperationBinding, error) {
-	claims, err := claimsOf(encoded)
+	claims, err := readClaims(encoded)
 	if err != nil {
 		return nil, Seal{}, nil, err
 	}
 	sealed := claims.GetSeal()
-	if sealed == nil {
-		return nil, Seal{}, nil, fmt.Errorf("%w: capability carries no seal", ErrUnsealed)
-	}
 	seal := Seal{
-		PrincipalEpoch:       sealed.GetPrincipalEpoch(),
 		InstallationID:       sealed.GetInstallationId(),
 		InstallationRevision: sealed.GetInstallationRevision(),
 		BuildIncarnation:     sealed.GetBuildIncarnation(),
 	}
-	switch {
-	case seal.PrincipalEpoch == 0:
-		return nil, Seal{}, nil, fmt.Errorf("%w: the seal names no principal epoch", ErrUnsealed)
-	case seal.InstallationID == "":
-		return nil, Seal{}, nil, fmt.Errorf("%w: the seal names no installation", ErrUnsealed)
-	case seal.InstallationRevision == 0:
-		return nil, Seal{}, nil, fmt.Errorf("%w: the seal names no installation revision", ErrUnsealed)
-	case seal.BuildIncarnation == 0:
-		return nil, Seal{}, nil, fmt.Errorf("%w: the seal names no build incarnation", ErrUnsealed)
-	}
-	bound := claims.GetOperationBinding()
-	if bound == nil {
-		return claims, seal, nil, nil
-	}
-	if bound.GetBindingId() == "" || bound.GetRevision() == 0 || bound.GetIncarnation() == 0 {
-		return nil, Seal{}, nil, fmt.Errorf(
-			"%w: an operation binding carries its id, revision and incarnation or none of them",
-			ErrUnsealed,
-		)
-	}
-	return claims, seal, cloneSealedBinding(bound), nil
+	return claims, seal, cloneSealedBinding(claims.GetOperationBinding()), nil
 }
 
 // cloneSealedBinding copies the message, so a caller that mutates what it is

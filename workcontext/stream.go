@@ -15,10 +15,16 @@ var ErrStreamTerminated = errors.New("Codefly Work Context stream terminated")
 
 // StreamGuardOptions configures one stream's hold on its credential.
 type StreamGuardOptions struct {
-	// Recheck re-presents the credential and returns the host's answer. It is
-	// the same verification an ordinary call performs, against live state read
-	// at the moment of the check — not against the expectations the stream
-	// opened with, which is the whole point.
+	// Recheck re-reads the issuer's live state for a capability that is ALREADY
+	// verified, and returns the host's answer.
+	//
+	// Use core's (*Verifier).Recheck. Do NOT use Verify: it consumes a
+	// single-use nonce, and every grant capability is single-use, so a stream
+	// opened with one died with ErrReplayed at its first message. This
+	// module's own README recommended exactly that for a while. Re-checking
+	// liveness and spending a nonce are two operations and only one of them
+	// belongs in a loop; core added Recheck for this, and it takes a *Verified
+	// so it cannot be anybody's first check.
 	//
 	// Any error terminates the stream, and that includes an error that is
 	// neither ErrRevoked nor ErrInvalid. A live source that cannot be reached
@@ -26,6 +32,22 @@ type StreamGuardOptions struct {
 	// pass is how a stream outlives the authority it was opened under while
 	// every log line stays clean.
 	Recheck func(context.Context) error
+}
+
+// RecheckWith builds the per-emission check from a verifier and a capability
+// that has already been verified, so the right call is the easy one.
+//
+// It exists because the wrong call compiles and reads fine: Verify is the name
+// everybody knows, and a guard built on it works in every test that does not
+// use a single-use capability and then kills the first grant-opened stream in
+// production.
+func RecheckWith(verifier *Verifier, verified *Verified) func(context.Context) error {
+	return func(ctx context.Context) error {
+		if verifier == nil || verified == nil {
+			return fmt.Errorf("%w: a stream re-check needs a verifier and a verified capability", ErrInvalid)
+		}
+		return verifier.Recheck(ctx, verified)
+	}
 }
 
 // StreamGuard holds a stream to its credential for the stream's whole life.

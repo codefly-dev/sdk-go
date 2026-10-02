@@ -32,11 +32,79 @@ var (
 	_ corework.OperationBinding = OperationBinding{}
 )
 
-// cryptoImplementationPackages are the packages a second implementation would
-// have to reach for. Neither may be imported by anything in this module: this
-// module presents capabilities and reads the sealed values off ones the host
-// issued it, and it neither signs nor checks a signature.
-var cryptoImplementationPackages = []string{"crypto/ed25519", "crypto/ecdsa"}
+// bannedImports, bannedImportPrefixes and bannedImportSubstrings are every way
+// into a signature or a second encoding of the message. An import matching any
+// of them is refused OUTRIGHT — with no "and the file also mentions WorkContext"
+// conjunction, because a conjunction is satisfied by putting the signer in one
+// file and the wrapper in another.
+//
+// The previous version of this gate listed exactly "crypto/ed25519" and
+// "crypto/ecdsa", which made it a gate about two strings. All of these passed
+// it: golang.org/x/crypto/ed25519; crypto/rsa and crypto/hmac; the bare crypto
+// package, whose crypto.Signer signs Ed25519 with no ed25519 import anywhere;
+// and protojson, which is a second encoding of the message by itself. A
+// faithful clone of core's signer — proto.MarshalOptions{Deterministic: true}
+// plus x/crypto — was green.
+var (
+	bannedImports = []string{
+		// The bare package: crypto.Signer and crypto.Hash are all a signer
+		// needs once a key has been parsed out of a PKCS#8 blob.
+		"crypto",
+		"crypto/ed25519", "crypto/ecdsa", "crypto/rsa", "crypto/dsa",
+		"crypto/hmac", "crypto/ecdh", "crypto/elliptic", "crypto/subtle",
+		// Second encodings of the message. encoding/json is handled separately
+		// because one file is allowed it for the mint endpoint's HTTP bodies.
+		"google.golang.org/protobuf/encoding/protojson",
+		"encoding/gob", "encoding/asn1", "encoding/xml",
+	}
+	bannedImportPrefixes = []string{"golang.org/x/crypto/"}
+	// Any JOSE, JWT or token-library path, whoever publishes it. A capability
+	// here is core's protobuf envelope; a library that mints bearer tokens has
+	// no honest use in this module.
+	bannedImportSubstrings = []string{"jose", "jwt", "jwx", "paseto", "macaroon", "branca"}
+)
+
+// tlsPlumbing is the narrow exception: the mint client builds and owns its own
+// transport, which needs crypto/tls for the configuration and crypto/x509 for
+// the caller's root pool. Both are refused everywhere else, and even there only
+// these SYMBOLS may be used — so x509.ParsePKCS8PrivateKey, which is how a
+// signer gets a key without importing ed25519, is a finding rather than a
+// permitted use of an allowed import.
+//
+// crypto/sha256 is deliberately absent from every list: a hash is not a
+// signature, and the cache partition's digest preimage needs one.
+var tlsPlumbing = map[string]struct {
+	files   []string
+	symbols []string
+}{
+	"crypto/tls": {
+		files:   []string{"mint.go"},
+		symbols: []string{"Config", "VersionTLS12", "VersionTLS13"},
+	},
+	"crypto/x509": {
+		files:   []string{"mint.go"},
+		symbols: []string{"CertPool", "NewCertPool", "SystemCertPool"},
+	},
+}
+
+// protoMarshalAllowlist is every file that may encode a protobuf message, and
+// what it encodes. Encoding the CAPABILITY is the second implementation; this
+// one encodes a scope, for a cache digest preimage, and never a WorkContext.
+var protoMarshalAllowlist = map[string]string{
+	"cache_partition.go": "a WorkScopeV1, for the cache digest preimage — never the capability",
+}
+
+// workContextNameAllowlist is this module's own declarations whose names begin
+// with the capability's, with the reason each is not a second surface. The name
+// check is case-insensitive and covers every declaration kind, so the module's
+// legitimate carrier constants have to be named here rather than slipping
+// through on capitalisation.
+var workContextNameAllowlist = map[string]string{
+	"workContextGRPCMetadataName": "the gRPC metadata key, which is workcontext.HeaderName and not a second name",
+	"workContext":                 "the opaque capability string a transport carries",
+	"workContexts":                "the metadata values read for that key",
+	"WorkContext":                 "the mint response body's JSON field for the capability string",
+}
 
 // jsonAllowlist is every non-test file that may import encoding/json, keyed by
 // its path RELATIVE TO THE MODULE ROOT, and why.
@@ -135,58 +203,184 @@ func TestNoSecondWorkContextImplementation(t *testing.T) {
 func inspectForSecondImplementation(file sourceFile) []string {
 	var findings []string
 	coreImports := map[string]bool{}
+	plumbing := map[string]string{} // local name -> allowed import path
 	for name, path := range importsOf(file.syntax) {
-		if slices.Contains(cryptoImplementationPackages, path) {
-			findings = append(findings, fmt.Sprintf(
-				"%s imports %q.\n"+
-					"This module signs nothing and verifies nothing: core's workcontext is the only\n"+
-					"implementation of the capability. If a signature has to be checked, it is checked\n"+
-					"by core's Verifier, reached through the alias in core.go.",
-				file.path, path))
-		}
-		if path == "encoding/json" {
-			if _, allowed := jsonAllowlist[file.path]; !allowed {
-				findings = append(findings, fmt.Sprintf(
-					"%s imports encoding/json.\n"+
-						"A capability is a protobuf message, signed by core over its deterministic encoding.\n"+
-						"The only JSON in this module is %v — the mint endpoint's HTTP bodies, named by exact\n"+
-						"path. If a capability is being JSON-encoded here, that is the second implementation\n"+
-						"coming back.",
-					file.path, allowedJSONFiles()))
-			}
-		}
+		findings = append(findings, inspectImport(file, name, path, plumbing)...)
 		if path == coreModulePath || strings.HasPrefix(path, coreModulePath+"/") {
 			coreImports[name] = true
 		}
 	}
+	findings = append(findings, inspectPlumbingSymbols(file, plumbing)...)
+	findings = append(findings, inspectProtoEncoding(file)...)
 	findings = append(findings, inspectDeclarations(file, coreImports)...)
 	findings = append(findings, inspectJSONTags(file)...)
 	return findings
 }
 
+// inspectImport refuses an import by what it can DO, not by whether its path is
+// one of two strings.
+func inspectImport(file sourceFile, name string, path string, plumbing map[string]string) []string {
+	if allowed, ok := tlsPlumbing[path]; ok {
+		if slices.Contains(allowed.files, file.path) {
+			plumbing[name] = path
+			return nil
+		}
+		return []string{fmt.Sprintf(
+			"%s imports %q, which only %v may: it is the mint client's own transport plumbing.",
+			file.path, path, allowed.files)}
+	}
+	banned := slices.Contains(bannedImports, path)
+	for _, prefix := range bannedImportPrefixes {
+		banned = banned || strings.HasPrefix(path, prefix)
+	}
+	for _, fragment := range bannedImportSubstrings {
+		banned = banned || strings.Contains(strings.ToLower(path), fragment)
+	}
+	if banned {
+		return []string{fmt.Sprintf(
+			"%s imports %q.\n"+
+				"This module signs nothing, verifies nothing and encodes no capability: core's\n"+
+				"workcontext is the only implementation. The ban is on what a package can do rather\n"+
+				"than on two package names, because crypto.Signer, x/crypto and protojson each build a\n"+
+				"complete second implementation without naming ed25519 anywhere.",
+			file.path, path)}
+	}
+	if path == "encoding/json" {
+		if _, allowed := jsonAllowlist[file.path]; !allowed {
+			return []string{fmt.Sprintf(
+				"%s imports encoding/json.\n"+
+					"A capability is a protobuf message, signed by core over its deterministic encoding.\n"+
+					"The only JSON in this module is %v — the mint endpoint's HTTP bodies, named by exact\n"+
+					"path. If a capability is being JSON-encoded here, that is the second implementation\n"+
+					"coming back.",
+				file.path, allowedJSONFiles())}
+		}
+	}
+	return nil
+}
+
+// inspectPlumbingSymbols holds crypto/tls and crypto/x509 to the symbols the
+// transport actually needs. An allowed import is not an allowed package: the
+// shortest route to a signer that imports no signing primitive is
+// x509.ParsePKCS8PrivateKey followed by a crypto.Signer assertion, and the
+// first half of that lives in a package this module legitimately imports.
+func inspectPlumbingSymbols(file sourceFile, plumbing map[string]string) []string {
+	if len(plumbing) == 0 {
+		return nil
+	}
+	var findings []string
+	ast.Inspect(file.syntax, func(node ast.Node) bool {
+		selector, ok := node.(*ast.SelectorExpr)
+		if !ok {
+			return true
+		}
+		qualifier, ok := selector.X.(*ast.Ident)
+		if !ok {
+			return true
+		}
+		path, isPlumbing := plumbing[qualifier.Name]
+		if !isPlumbing {
+			return true
+		}
+		if slices.Contains(tlsPlumbing[path].symbols, selector.Sel.Name) {
+			return true
+		}
+		findings = append(findings, fmt.Sprintf(
+			"%s uses %s.%s. Only %v may be used from %q here.\n"+
+				"The import is allowed for the mint client's transport, not as a way into the package:\n"+
+				"x509.ParsePKCS8PrivateKey plus a crypto.Signer assertion is a complete signer that\n"+
+				"imports no signing primitive at all.",
+			file.path, qualifier.Name, selector.Sel.Name, tlsPlumbing[path].symbols, path))
+		return true
+	})
+	return findings
+}
+
+// inspectProtoEncoding refuses a protobuf MARSHAL outside the one file that
+// encodes something which is not a capability. Unmarshal and Clone are not
+// restricted: reading a capability the host issued is this module's job, and
+// writing one is core's.
+func inspectProtoEncoding(file sourceFile) []string {
+	if _, allowed := protoMarshalAllowlist[file.path]; allowed {
+		return nil
+	}
+	var findings []string
+	ast.Inspect(file.syntax, func(node ast.Node) bool {
+		selector, ok := node.(*ast.SelectorExpr)
+		if !ok {
+			return true
+		}
+		qualifier, ok := selector.X.(*ast.Ident)
+		if !ok || qualifier.Name != "proto" {
+			return true
+		}
+		if selector.Sel.Name != "Marshal" && selector.Sel.Name != "MarshalOptions" {
+			return true
+		}
+		findings = append(findings, fmt.Sprintf(
+			"%s calls proto.%s.\n"+
+				"Encoding the message is half of a signer: core signs the deterministic protobuf\n"+
+				"encoding, so proto.MarshalOptions{Deterministic: true} over a capability is the\n"+
+				"deleted implementation with a different import list. Only %v may encode, and only\n"+
+				"because what it encodes is %v.",
+			file.path, selector.Sel.Name, allowedProtoMarshalFiles(), protoMarshalReasons()))
+		return true
+	})
+	return findings
+}
+
 // inspectDeclarations refuses a declaration that reads as a second WorkContext
-// surface, ANYWHERE in the file.
+// surface, ANYWHERE in the file and WHATEVER ITS CAPITALISATION.
 //
-// The earlier version walked file.Decls, so it saw only top-level declarations
-// — a `type WorkContextToken struct{...}` inside a function body passed it
-// untouched. And it accepted any alias at all: `type WorkContextVerifier =
-// mylocal.Verifier` satisfied "it is an alias" while aliasing nothing of
-// core's. An alias now has to resolve into core's module.
+// Three things the previous version missed. It walked file.Decls, so a
+// declaration inside a function body passed untouched. It accepted any alias at
+// all, so `type WorkContextVerifier = mylocal.Verifier` satisfied "it is an
+// alias" while aliasing nothing of core's. And it matched a case-sensitive
+// "WorkContext" prefix on free functions and types only — so the deleted
+// implementation's own type name, `workContextPayload`, passed it, as did a
+// method, a `var WorkContextSign = func…` and a const.
+//
+// This is a heuristic and is NOT the load-bearing half of the gate: a name
+// proves nothing, which is why the import, symbol and encoding rules above
+// refuse the CAPABILITY to sign or encode whatever anything is called. It is
+// kept because it catches the lazy case cheaply, and tightened so that this
+// module's own carrier names must be allowlisted with a reason rather than pass
+// on capitalisation.
 func inspectDeclarations(file sourceFile, coreImports map[string]bool) []string {
 	var findings []string
+	named := func(name string) bool {
+		if _, allowed := workContextNameAllowlist[name]; allowed {
+			return false
+		}
+		return strings.HasPrefix(strings.ToLower(name), "workcontext")
+	}
+	report := func(kind string, name string) {
+		if !named(name) {
+			return
+		}
+		findings = append(findings, fmt.Sprintf(
+			"%s declares %s %s.\n"+
+				"A WorkContext-named declaration here is how the second implementation looked, and its\n"+
+				"own payload type was spelled workContextPayload. The capability's operations and types\n"+
+				"are core's; this module names what it DOES to one (Attach, FromHeaders,\n"+
+				"SealedInstallation) and re-exports core's for the rest. If this is a legitimate\n"+
+				"carrier name, add it to workContextNameAllowlist with the reason.",
+			file.path, kind, name))
+	}
 	ast.Inspect(file.syntax, func(node ast.Node) bool {
 		switch declared := node.(type) {
 		case *ast.FuncDecl:
-			if declared.Recv == nil && strings.HasPrefix(declared.Name.Name, "WorkContext") {
-				findings = append(findings, fmt.Sprintf(
-					"%s declares func %s.\n"+
-						"A WorkContext-named function here is how the second implementation looked. The\n"+
-						"capability's own operations are core's; this module names what it does to one\n"+
-						"(Attach, FromHeaders, SealedInstallation) and re-exports core's for the rest.",
-					file.path, declared.Name.Name))
+			kind := "func"
+			if declared.Recv != nil {
+				kind = "method"
+			}
+			report(kind, declared.Name.Name)
+		case *ast.ValueSpec:
+			for _, name := range declared.Names {
+				report("var/const", name.Name)
 			}
 		case *ast.TypeSpec:
-			if !strings.HasPrefix(declared.Name.Name, "WorkContext") {
+			if !named(declared.Name.Name) {
 				return true
 			}
 			if declared.Assign == 0 {
@@ -361,6 +555,98 @@ import "crypto/ed25519"
 var _ = ed25519.Sign`,
 			says: `imports "crypto/ed25519"`,
 		},
+
+		// Below: the STANDARD bypasses. Each one is a complete second
+		// implementation that the previous gate — a list of two package paths
+		// and a case-sensitive name prefix — reported as green.
+		"the same primitive from x/crypto": {
+			path: "carrier.go",
+			source: `package workcontext
+import "golang.org/x/crypto/ed25519"
+var _ = ed25519.Sign`,
+			says: `imports "golang.org/x/crypto/ed25519"`,
+		},
+		"a different algorithm": {
+			path: "carrier.go",
+			source: `package workcontext
+import "crypto/rsa"
+var _ = rsa.SignPKCS1v15`,
+			says: `imports "crypto/rsa"`,
+		},
+		"a MAC instead of a signature": {
+			path: "carrier.go",
+			source: `package workcontext
+import "crypto/hmac"
+var _ = hmac.New`,
+			says: `imports "crypto/hmac"`,
+		},
+		"the bare crypto package, whose Signer needs no algorithm import": {
+			path: "carrier.go",
+			source: `package workcontext
+import "crypto"
+func sign(key crypto.Signer, payload []byte) ([]byte, error) {
+	return key.Sign(nil, payload, crypto.Hash(0))
+}`,
+			says: `imports "crypto"`,
+		},
+		"a key parsed out of PKCS#8 through an allowed import": {
+			path: "mint.go",
+			source: `package workcontext
+import "crypto/x509"
+func key(der []byte) (any, error) { return x509.ParsePKCS8PrivateKey(der) }`,
+			says: "uses x509.ParsePKCS8PrivateKey",
+		},
+		"the TLS plumbing imported somewhere that is not the mint client": {
+			path: "carrier.go",
+			source: `package workcontext
+import "crypto/tls"
+var _ = tls.Config{}`,
+			says: `imports "crypto/tls", which only`,
+		},
+		"a second encoding of the message, in JSON, without encoding/json": {
+			path: "carrier.go",
+			source: `package workcontext
+import "google.golang.org/protobuf/encoding/protojson"
+var _ = protojson.Marshal`,
+			says: "protobuf/encoding/protojson",
+		},
+		"core's own signing encoding, reproduced": {
+			path: "carrier.go",
+			source: `package workcontext
+import "google.golang.org/protobuf/proto"
+func encode(claims *Claims) ([]byte, error) {
+	return proto.MarshalOptions{Deterministic: true}.Marshal(claims)
+}`,
+			says: "calls proto.MarshalOptions",
+		},
+		"a JOSE library": {
+			path: "carrier.go",
+			source: `package workcontext
+import "github.com/go-jose/go-jose/v4"
+var _ = jose.NewSigner`,
+			says: "go-jose",
+		},
+		"the deleted implementation's own type name, uncapitalised": {
+			path: "carrier.go",
+			source: `package workcontext
+type workContextPayload struct {
+	Audience string
+}`,
+			says: "declares type workContextPayload",
+		},
+		"a WorkContext method rather than a free function": {
+			path: "carrier.go",
+			source: `package workcontext
+type thing struct{}
+func (thing) WorkContextSign(payload []byte) []byte { return payload }`,
+			says: "declares method WorkContextSign",
+		},
+		"a WorkContext func bound to a var": {
+			path: "carrier.go",
+			source: `package workcontext
+var WorkContextSign = func(payload []byte) []byte { return payload }`,
+			says: "declares var/const WorkContextSign",
+		},
 	} {
 		t.Run(name, func(t *testing.T) {
 			findings := inspectForSecondImplementation(parseSource(t, bypass.path, bypass.source))
@@ -506,6 +792,24 @@ func importsOf(file *ast.File) map[string]string {
 		paths[name] = path
 	}
 	return paths
+}
+
+func allowedProtoMarshalFiles() []string {
+	names := make([]string, 0, len(protoMarshalAllowlist))
+	for name := range protoMarshalAllowlist {
+		names = append(names, name)
+	}
+	slices.Sort(names)
+	return names
+}
+
+func protoMarshalReasons() []string {
+	reasons := make([]string, 0, len(protoMarshalAllowlist))
+	for _, reason := range protoMarshalAllowlist {
+		reasons = append(reasons, reason)
+	}
+	slices.Sort(reasons)
+	return reasons
 }
 
 func allowedJSONFiles() []string {

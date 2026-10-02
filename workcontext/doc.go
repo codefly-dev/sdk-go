@@ -30,6 +30,6 @@
 //     beside it as a pre-check the far end may refuse on cheaply.
 //   - CachePartition: the identity partition a cache stack scopes entries to,
 //     which never spans an installation revision.
-//   - StreamGuard: a stream re-presents its credential on the host's cadence
+//   - StreamGuard: a stream re-presents its credential before every message
 //     and terminates on refusal.
 package workcontext

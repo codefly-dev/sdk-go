@@ -73,6 +73,13 @@ type (
 // wire.
 type Claims = basev0.WorkContextV1
 
+// Core's verify-only Authenticator and Authenticated are deliberately not
+// aliased either. They require the issuer's revision and seal sources, which is
+// precisely what a client does not hold; a client that could supply them is not
+// a client. Re-exporting them here would put the weaker of two strengths in the
+// same namespace as the stronger, one import away from each other, which is the
+// silent downgrade core objected to when it was first asked for that path.
+
 // The refusals, core's. This module defines no second taxonomy of them: a
 // caller writes errors.Is against these and gets the same answer whichever
 // package it names them through.
@@ -110,6 +117,22 @@ var (
 
 	// ErrReplayed is a single-use capability presented twice.
 	ErrReplayed = corework.ErrReplayed
+
+	// Core exports three more sentinels that are deliberately NOT aliased here,
+	// on core's own instruction when asked:
+	//
+	//   - ErrNeedsIssuer comes only from core's verify-only Authenticator, when
+	//     a capability carries a grant hop. Verifier.Verify never returns it, so
+	//     a client matching it would be writing a branch nothing reaches.
+	//   - ErrNoSeal and ErrNoBinding are what a SealSource IMPLEMENTATION
+	//     returns, not what a client matches.
+	//
+	// Aliasing them would widen this module's surface to a shape its consumers
+	// cannot reach, which reads as "this is available here" about three things
+	// that are not. A consumer that implements a seal source, or adopts the
+	// verify-only entrypoint, imports core/workcontext directly for them — and
+	// at that point it is not a client of the capability but a participant in
+	// it.
 )
 
 // ScopeContained and ScopesAttenuate are core's scope algebra. A service

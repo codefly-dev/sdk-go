@@ -52,6 +52,10 @@ type mintHost struct {
 	// or shorter-lived than the renewal lead.
 	mintedAt  *time.Time
 	mintedFor *time.Duration
+	// pin is the process's boot-read authority, which answers the audience.
+	pin *testPin
+	// before runs at the top of every request, so a test can hold one open.
+	before func()
 }
 
 func newMintHost(t *testing.T, now func() time.Time) *mintHost {
@@ -59,7 +63,7 @@ func newMintHost(t *testing.T, now func() time.Time) *mintHost {
 	host := &mintHost{
 		t: t, now: now, lifetime: 15 * time.Minute,
 		audience: testAudience, authority: newAuthority(t),
-		bodies: make(chan []byte, 64),
+		bodies: make(chan []byte, 64), pin: newTestPin(),
 	}
 	host.server = httptest.NewTLSServer(http.HandlerFunc(host.handle))
 	t.Cleanup(host.server.Close)
@@ -68,6 +72,9 @@ func newMintHost(t *testing.T, now func() time.Time) *mintHost {
 
 func (h *mintHost) handle(writer http.ResponseWriter, request *http.Request) {
 	h.requests.Add(1)
+	if h.before != nil {
+		h.before()
+	}
 	h.presented.Store(request.Header.Get("Authorization"))
 	if h.refuseWith != 0 {
 		writer.WriteHeader(h.refuseWith)
@@ -140,14 +147,14 @@ func newTestMintClient(t *testing.T, host *mintHost, path string, now func() tim
 	t.Helper()
 	settings := MintOptions{
 		URL:                host.server.URL,
-		Audience:           testAudience,
+		Authority:          host.pin,
+		Audience:           testAudienceName,
 		ProjectedToken:     ProjectedTokenFile(path),
-		ProjectionAudience: "accounts",
+		ProjectionAudience: "projection-audience",
 		Now:                now,
-		// The test server's own client, which trusts the server's certificate
-		// and nothing else. It is a SUPPLIED client, so every test here also
-		// exercises the path where the caller brought its own.
-		HTTPClient: host.server.Client(),
+		// The only thing a caller may say about the transport: which roots may
+		// sign the endpoint's certificate. The client builds the rest.
+		RootCAs: certPoolOf(host.server),
 	}
 	for _, option := range options {
 		option(&settings)
@@ -269,22 +276,29 @@ func TestEveryMintRefusesWhenTheBootReadAuthorityHasDrifted(t *testing.T) {
 	clock := testClock
 	now := func() time.Time { return clock }
 	host := newMintHost(t, now)
-	pin := &stubAuthority{}
-	client := newTestMintClient(t, host, projectedFile(t, "projected"), now, func(options *MintOptions) {
-		options.Authority = pin
-	})
+	client := newTestMintClient(t, host, projectedFile(t, "projected"), now)
 
 	_, err := client.Credential(t.Context())
 	require.NoError(t, err)
-	require.EqualValues(t, 1, pin.checks.Load(), "the first mint checks the pin too")
+	require.EqualValues(t, 1, host.pin.checks.Load(), "the first mint checks the pin too")
 
-	pin.err = errors.New("audience changed under a running process")
+	host.pin.set(testAudience, errors.New("audience changed under a running process"))
 	clock = testClock.Add(14 * time.Minute)
+	credential, err := client.Credential(t.Context())
+	// The credential in hand has a minute left, so the drift does not make this
+	// process stop serving — it makes it stop MINTING, which is the point.
+	require.NoError(t, err)
+	require.NotEmpty(t, credential.Token())
+	require.EqualValues(t, 2, host.pin.checks.Load())
+	require.EqualValues(t, 1, host.requests.Load(), "a drifted authority must not reach the mint endpoint")
+
+	// Once the held credential has expired there is nothing to serve, and the
+	// drift is the error.
+	clock = testClock.Add(2 * time.Hour)
 	_, err = client.Credential(t.Context())
 	require.ErrorIs(t, err, ErrMintRefused)
 	require.ErrorContains(t, err, "audience changed")
-	require.EqualValues(t, 2, pin.checks.Load())
-	require.EqualValues(t, 1, host.requests.Load(), "a drifted authority must not reach the mint endpoint")
+	require.EqualValues(t, 1, host.requests.Load())
 }
 
 // The first mint, specifically: a client constructed at boot whose pin has
@@ -292,10 +306,8 @@ func TestEveryMintRefusesWhenTheBootReadAuthorityHasDrifted(t *testing.T) {
 func TestTheFirstMintRefusesAnAlreadyDriftedAuthority(t *testing.T) {
 	now := func() time.Time { return testClock }
 	host := newMintHost(t, now)
-	pin := &stubAuthority{err: errors.New("binding changed before the first call")}
-	client := newTestMintClient(t, host, projectedFile(t, "projected"), now, func(options *MintOptions) {
-		options.Authority = pin
-	})
+	host.pin.set(testAudience, errors.New("binding changed before the first call"))
+	client := newTestMintClient(t, host, projectedFile(t, "projected"), now)
 
 	_, err := client.Credential(t.Context())
 	require.ErrorIs(t, err, ErrMintRefused)
@@ -304,15 +316,48 @@ func TestTheFirstMintRefusesAnAlreadyDriftedAuthority(t *testing.T) {
 		"the pin is checked before the projection is presented to anything")
 }
 
-type stubAuthority struct {
-	checks atomic.Uint64
-	err    error
+// testPin stands in for the process's boot-read authority: it answers the
+// pinned audience and counts the rechecks. The root SDK's *codefly.Authority
+// has the same two methods.
+type testPin struct {
+	mu       sync.Mutex
+	checks   atomic.Uint64
+	reads    atomic.Uint64
+	audience string
+	err      error
+	valueErr error
 }
 
-func (s *stubAuthority) Recheck(context.Context) error {
-	s.checks.Add(1)
-	return s.err
+func newTestPin() *testPin { return &testPin{audience: testAudience} }
+
+func (p *testPin) Recheck(context.Context) error {
+	p.checks.Add(1)
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.err
 }
+
+func (p *testPin) Value(name string, key string) (string, error) {
+	p.reads.Add(1)
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.valueErr != nil {
+		return "", p.valueErr
+	}
+	if name != testAudienceName.Name || key != testAudienceName.Key {
+		return "", errors.New("authority-bearing value was not read at boot: " + name + "/" + key)
+	}
+	return p.audience, nil
+}
+
+func (p *testPin) set(audience string, recheck error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.audience = audience
+	p.err = recheck
+}
+
+var testAudienceName = AuthorityValue{Name: "platform", Key: "work-context-audience"}
 
 // A credential the host has refused is replaced on demand, not when its own
 // renewal lead arrives. Without this there was no way back: the client answered
@@ -420,34 +465,27 @@ func TestRefreshRechecksThePinAndRereadsTheProjection(t *testing.T) {
 	now := func() time.Time { return testClock }
 	host := newMintHost(t, now)
 	path := projectedFile(t, "projected-before")
-	pin := &stubAuthority{}
-	client := newTestMintClient(t, host, path, now, func(options *MintOptions) {
-		options.Authority = pin
-	})
+	client := newTestMintClient(t, host, path, now)
 
 	held, err := client.Credential(t.Context())
 	require.NoError(t, err)
-	require.EqualValues(t, 1, pin.checks.Load())
+	require.EqualValues(t, 1, host.pin.checks.Load())
+	require.EqualValues(t, 1, host.pin.reads.Load(), "the audience is READ from the pin, not passed in")
 
 	require.NoError(t, os.WriteFile(path, []byte("projected-after"), 0o600))
 	replaced, err := client.Refresh(t.Context(), held)
 	require.NoError(t, err)
-	require.EqualValues(t, 2, pin.checks.Load())
+	require.EqualValues(t, 2, host.pin.checks.Load())
+	require.EqualValues(t, 2, host.pin.reads.Load())
 	require.Equal(t, "Bearer projected-after", host.presented.Load())
 
-	// A drifted pin refuses the refresh, and the credential already held stays
+	// A drifted pin stops the refresh, and the credential already held stays
 	// held: a refused replacement must not leave the process holding nothing,
 	// which would read as a boot failure somewhere it is not.
-	pin.err = errors.New("audience changed under a running process")
-	_, err = client.Refresh(t.Context(), replaced)
-	require.ErrorIs(t, err, ErrMintRefused)
-	require.ErrorContains(t, err, "audience changed")
-
-	pin.err = nil
-	still, err := client.Credential(t.Context())
-	require.NoError(t, err)
-	require.Equal(t, replaced.Token(), still.Token(),
-		"a refused replacement leaves the credential the process already holds")
+	host.pin.set(testAudience, errors.New("audience changed under a running process"))
+	still, err := client.Refresh(t.Context(), replaced)
+	require.NoError(t, err, "a credential with time left is served while minting is refused")
+	require.Equal(t, replaced.Token(), still.Token())
 }
 
 // The host may echo the sealed values for a log. An echo that disagrees with
@@ -480,32 +518,48 @@ func TestMintRefusesACredentialForAnotherAudience(t *testing.T) {
 	require.ErrorContains(t, err, "minted for audience")
 }
 
-// A credential is checked against its OWN window before it is installed.
+// A credential is checked against its OWN window before it is installed, and
+// the sentinel says whether the next attempt could do better.
 //
 // The renewal check only ever looked at the credential already held, so a
 // response that was delayed, or minted against a clock well behind this
 // process's, was installed as a success — counted as a working mint — and then
-// refused by every receiver. The three cases are the three ways that happens.
+// refused by every receiver.
+//
+// The window tested is **not_before**, which is the claim core's verifier
+// tests. Testing issued_at was testing a different window from the one the
+// credential would be judged against.
+//
+// And the sentinels matter rather than being decoration. ErrMintRefused means
+// "the host will say the same thing again, do not serve"; a merely DELAYED
+// response is not that, so an already-expired credential and a lifetime that is
+// all lead are ErrMintUnavailable. A clock far enough apart to make a
+// credential not-yet-valid, and a credential longer than this process will
+// hold, are configuration and will not fix themselves.
 func TestMintRefusesACredentialThatIsUnusableOnArrival(t *testing.T) {
 	now := func() time.Time { return testClock }
-	short := 4 * time.Second
 
 	for name, arrange := range map[string]struct {
 		mintedAt  time.Time
 		mintedFor time.Duration
+		sentinel  error
 		says      string
 	}{
-		"already expired": {
+		"already expired, which is what a delayed response looks like": {
 			mintedAt: testClock.Add(-time.Hour), mintedFor: 15 * time.Minute,
-			says: "expired at",
+			sentinel: ErrMintUnavailable, says: "expired at",
 		},
-		"not yet valid": {
+		"not yet valid, which is a clock that will not fix itself": {
 			mintedAt: testClock.Add(time.Hour), mintedFor: 15 * time.Minute,
-			says: "not valid until",
+			sentinel: ErrMintRefused, says: "not valid until",
 		},
-		"whole lifetime inside the renewal lead": {
-			mintedAt: testClock, mintedFor: short,
-			says: "inside the renewal lead",
+		"whole remaining lifetime inside the renewal lead": {
+			mintedAt: testClock, mintedFor: 4 * time.Second,
+			sentinel: ErrMintUnavailable, says: "inside the renewal lead",
+		},
+		"longer than this process will hold a credential": {
+			mintedAt: testClock, mintedFor: 30 * 24 * time.Hour,
+			sentinel: ErrMintRefused, says: "holds a credential for at most",
 		},
 	} {
 		t.Run(name, func(t *testing.T) {
@@ -515,7 +569,7 @@ func TestMintRefusesACredentialThatIsUnusableOnArrival(t *testing.T) {
 			client := newTestMintClient(t, host, projectedFile(t, "projected"), now)
 
 			_, err := client.Credential(t.Context())
-			require.ErrorIs(t, err, ErrMintRefused)
+			require.ErrorIs(t, err, arrange.sentinel)
 			require.ErrorContains(t, err, arrange.says)
 			require.Equal(t, MintCounts{}, client.Counts(),
 				"a credential that was never usable is not a mint that worked")
@@ -532,7 +586,22 @@ func TestMintRefusesACredentialThatIsUnusableOnArrival(t *testing.T) {
 	client := newTestMintClient(t, host, projectedFile(t, "projected"), now)
 	_, err := client.Credential(t.Context())
 	require.NoError(t, err, "a credential minted inside core's skew is usable")
+
+	// And the ceiling is configurable, because what a process should hold is
+	// the deployment's call — the point is that there IS one, since core checks
+	// only that a TTL is positive.
+	host = newMintHost(t, now)
+	week := 7 * 24 * time.Hour
+	host.mintedAt, host.mintedFor = &testClockCopy, &week
+	client = newTestMintClient(t, host, projectedFile(t, "projected"), now,
+		func(options *MintOptions) { options.MaxCredentialLifetime = 14 * 24 * time.Hour })
+	credential, err := client.Credential(t.Context())
+	require.NoError(t, err)
+	require.Equal(t, testClock.Add(week), credential.ExpiresAt())
 }
+
+// testClockCopy is an addressable testClock, for the host overrides above.
+var testClockCopy = testClock
 
 // A refusal the host will give again is not retryable, and an outage is. A
 // client that confused them would either spin against a permanent refusal or
@@ -604,7 +673,7 @@ func TestMintRequestSelfReportsNoIdentity(t *testing.T) {
 	require.NoError(t, json.Unmarshal(sent, &fields))
 	require.Equal(t, []string{"audience", "projection_audience"}, keysOf(fields))
 	require.Equal(t, testAudience, fields["audience"])
-	require.Equal(t, "accounts", fields["projection_audience"])
+	require.Equal(t, "projection-audience", fields["projection_audience"])
 }
 
 func keysOf(fields map[string]any) []string {
@@ -618,15 +687,19 @@ func keysOf(fields map[string]any) []string {
 
 // The redirect target must receive NO REQUEST AT ALL.
 //
-// The old test asserted the returned classification after the redirect had
-// already been followed, which is the wrong thing entirely: by then the
-// projected service-account token had been sent to an address nothing
-// configured, and naming the outcome afterwards changes nothing. What this
-// asserts is containment — zero requests at the destination — and it asserts it
-// for a SUPPLIED client, which is where the hole was: Go's own client forwards
-// Authorization across a redirect to the same host, so a caller that brought an
-// ordinary &http.Client{} disclosed the projection before this package could
-// classify anything.
+// Two things changed here. The old test asserted the returned classification
+// after the redirect had already been followed, which is the wrong thing
+// entirely: by then the projected token had been sent to an address nothing
+// configured. And the hole the first fix closed by copying a supplied client is
+// now closed by not accepting one — a caller cannot supply an http.Client at
+// all, because inspecting one could not close a nil Transport (the global,
+// mutable http.DefaultTransport), a wrapping RoundTripper, a DialTLSContext
+// that bypasses TLSClientConfig, or a caller mutating the shared *Transport
+// after construction.
+//
+// So the client under test here is the one the SDK builds, which is the only
+// one there is, and what is asserted is containment: zero requests at the
+// destination, asserted before the error is even looked at.
 func TestARedirectedMintSendsNothingToTheDestination(t *testing.T) {
 	now := func() time.Time { return testClock }
 	var elsewhereRequests atomic.Uint64
@@ -642,99 +715,83 @@ func TestARedirectedMintSendsNothingToTheDestination(t *testing.T) {
 		}))
 	t.Cleanup(redirector.Close)
 
-	// One TLS configuration that trusts BOTH servers, so nothing but the
-	// refusal stops the second request. A client that could not verify the
-	// destination's certificate would pass this test for the wrong reason.
-	trusted := &tls.Config{
-		RootCAs:    certPoolOf(redirector, elsewhere),
-		MinVersion: tls.VersionTLS12,
-	}
-
-	for name, supplied := range map[string]*http.Client{
-		// The case that disclosed the projection: a caller-supplied client with
-		// no redirect policy of its own, so net/http's default applied.
-		"no redirect policy of its own": {
-			Transport: &http.Transport{TLSClientConfig: trusted},
-		},
-		// And a caller that explicitly decided to follow redirects. For a
-		// credential request that decision is not the caller's to make.
-		"a policy that follows redirects": {
-			Transport:     &http.Transport{TLSClientConfig: trusted},
-			CheckRedirect: func(*http.Request, []*http.Request) error { return nil },
-		},
-	} {
-		t.Run(name, func(t *testing.T) {
-			elsewhereRequests.Store(0)
-			client, err := NewMintClient(MintOptions{
-				URL:                redirector.URL,
-				Audience:           testAudience,
-				ProjectedToken:     ProjectedTokenFile(projectedFile(t, "projected")),
-				ProjectionAudience: "accounts",
-				Now:                now,
-				HTTPClient:         supplied,
-			})
-			require.NoError(t, err)
-
-			_, err = client.Credential(t.Context())
-
-			// Containment first, and on its own line: this is the assertion
-			// that matters. A test that checked the returned error before the
-			// request count would report the classification of a disclosure
-			// that had already happened.
-			require.EqualValues(t, 0, elsewhereRequests.Load(),
-				"the redirect destination must receive no request: the first one carried the projection")
-			require.ErrorIs(t, err, ErrMintRefused)
-			require.NotErrorIs(t, err, ErrMintUnavailable,
-				"a redirected credential request is not something to retry")
-			require.ErrorContains(t, err, "redirected")
-			require.Equal(t, MintCounts{}, client.Counts())
-		})
-	}
-
-	// The client the SDK builds when the caller supplies none cannot reach a
-	// test server's certificate, so its refusal is asserted on the policy
-	// itself rather than over the wire.
-	byDefault, err := secureMintClient(nil)
+	// The root pool trusts BOTH servers, so nothing but the refusal stops the
+	// second request: a client that could not verify the destination's
+	// certificate would pass this test for the wrong reason.
+	client, err := NewMintClient(MintOptions{
+		URL:                redirector.URL,
+		Authority:          newTestPin(),
+		Audience:           testAudienceName,
+		ProjectedToken:     ProjectedTokenFile(projectedFile(t, "projected")),
+		ProjectionAudience: "projection-audience",
+		Now:                now,
+		RootCAs:            certPoolOf(redirector, elsewhere),
+	})
 	require.NoError(t, err)
-	request, err := http.NewRequest(http.MethodGet, elsewhere.URL, nil)
-	require.NoError(t, err)
-	require.ErrorIs(t, byDefault.CheckRedirect(request, nil), ErrMintRefused)
+
+	_, err = client.Credential(t.Context())
+
+	require.EqualValues(t, 0, elsewhereRequests.Load(),
+		"the redirect destination must receive no request: the first one carried the projection")
+	require.ErrorIs(t, err, ErrMintRefused)
+	require.NotErrorIs(t, err, ErrMintUnavailable,
+		"a redirected credential request is not something to retry")
+	require.ErrorContains(t, err, "redirected")
+	require.Equal(t, MintCounts{}, client.Counts())
 }
 
-// A supplied client keeps its own redirect behaviour everywhere else. The
-// refusal is installed on a copy, so a caller that shares one client between
-// the mint endpoint and its ordinary traffic does not have the rest of its
-// traffic silently stop following redirects.
-func TestSecuringTheMintClientDoesNotMutateTheCallersClient(t *testing.T) {
-	supplied := &http.Client{}
-	secured, err := secureMintClient(supplied)
-	require.NoError(t, err)
-	require.NotNil(t, secured.CheckRedirect)
-	require.Nil(t, supplied.CheckRedirect,
-		"the caller's client must not be reconfigured out from under it")
+// The transport is the SDK's, and a caller cannot reach it.
+//
+// This is the finding in its sharpest form: the previous version inspected a
+// supplied *http.Client and refused the one configuration it could see
+// (InsecureSkipVerify on an *http.Transport). Four configurations it could not
+// see each sent the projected bearer over an unauthenticated channel. None of
+// them is reachable now, because there is no option to supply.
+func TestTheMintTransportIsOwnedByTheClient(t *testing.T) {
+	client := mintHTTPClient(nil)
 
-	// And a client that had its own redirect policy loses it HERE and only
-	// here: a credential request is not followed, whatever the caller decided
-	// for its other traffic.
-	followed := false
-	opinionated := &http.Client{CheckRedirect: func(*http.Request, []*http.Request) error {
-		followed = true
-		return nil
-	}}
-	secured, err = secureMintClient(opinionated)
-	require.NoError(t, err)
+	transport, ok := client.Transport.(*http.Transport)
+	require.True(t, ok, "the client builds a concrete *http.Transport, not a wrapper it cannot reason about")
+	require.NotNil(t, transport.TLSClientConfig, "a nil TLS config would mean the package defaults")
+	require.False(t, transport.TLSClientConfig.InsecureSkipVerify)
+	require.EqualValues(t, tls.VersionTLS12, transport.TLSClientConfig.MinVersion)
+	require.Nil(t, transport.DialTLSContext,
+		"a custom TLS dialer bypasses TLSClientConfig entirely")
+	require.Nil(t, transport.DialContext)
+	require.Nil(t, transport.Proxy,
+		"a proxy for a credential request is an address the configuration did not name")
+	require.NotNil(t, client.CheckRedirect)
+
+	// It is not http.DefaultTransport, which is global and mutable: anything
+	// in the process could have reconfigured that one.
+	require.NotSame(t, http.DefaultTransport, client.Transport)
+
+	// Two clients do not share a transport, so nothing one caller does to its
+	// client can reach another's.
+	require.NotSame(t, client.Transport, mintHTTPClient(nil).Transport)
+
+	// The root pool is the ONLY thing a caller says about it, and it lands
+	// where it is used.
+	pool := x509.NewCertPool()
+	withRoots := mintHTTPClient(pool)
+	rooted, ok := withRoots.Transport.(*http.Transport)
+	require.True(t, ok)
+	require.Same(t, pool, rooted.TLSClientConfig.RootCAs)
+
+	// And the redirect refusal is on it, as a refusal rather than as
+	// http.ErrUseLastResponse, so net/http never sends the second request.
 	request, err := http.NewRequest(http.MethodGet, "https://example.invalid/_mint", nil)
 	require.NoError(t, err)
-	require.ErrorIs(t, secured.CheckRedirect(request, nil), ErrMintRefused)
-	require.False(t, followed)
+	require.ErrorIs(t, client.CheckRedirect(request, nil), ErrMintRefused)
 }
 
 func TestNewMintClientValidatesItsConfiguration(t *testing.T) {
 	valid := MintOptions{
-		URL:                "https://accounts.internal/platform/_mint",
-		Audience:           testAudience,
+		URL:                "https://mint.example/platform/_mint",
+		Authority:          newTestPin(),
+		Audience:           testAudienceName,
 		ProjectedToken:     ProjectedTokenFile("/var/run/secrets/token"),
-		ProjectionAudience: "accounts",
+		ProjectionAudience: "projection-audience",
 	}
 	_, err := NewMintClient(valid)
 	require.NoError(t, err)
@@ -744,28 +801,23 @@ func TestNewMintClientValidatesItsConfiguration(t *testing.T) {
 		// Plaintext is the one that mattered: the projection travels on this
 		// request as a bearer credential, so http was a disclosure the
 		// configuration could choose.
-		"plaintext http":         func(o *MintOptions) { o.URL = "http://accounts.internal/_mint" },
-		"url with query":         func(o *MintOptions) { o.URL = "https://accounts.internal/_mint?as=root" },
-		"url with credentials":   func(o *MintOptions) { o.URL = "https://user:pass@accounts.internal/_mint" },
-		"url with fragment":      func(o *MintOptions) { o.URL = "https://accounts.internal/_mint#f" },
-		"no audience":            func(o *MintOptions) { o.Audience = "" },
+		"plaintext http":       func(o *MintOptions) { o.URL = "http://mint.example/_mint" },
+		"url with query":       func(o *MintOptions) { o.URL = "https://mint.example/_mint?as=root" },
+		"url with credentials": func(o *MintOptions) { o.URL = "https://user:pass@mint.example/_mint" },
+		"url with fragment":    func(o *MintOptions) { o.URL = "https://mint.example/_mint#f" },
+		// The audience is read from the pin, so there must BE a pin and it must
+		// be named. A free-string audience beside an optional pin made the
+		// drift check guard a value the mint did not use.
+		"no authority pin":       func(o *MintOptions) { o.Authority = nil },
+		"no audience name":       func(o *MintOptions) { o.Audience = AuthorityValue{} },
+		"audience name only":     func(o *MintOptions) { o.Audience = AuthorityValue{Name: "platform"} },
+		"audience key only":      func(o *MintOptions) { o.Audience = AuthorityValue{Key: "audience"} },
 		"no projection":          func(o *MintOptions) { o.ProjectedToken = nil },
+		"negative lifetime cap":  func(o *MintOptions) { o.MaxCredentialLifetime = -time.Hour },
 		"no projection audience": func(o *MintOptions) { o.ProjectionAudience = "" },
 		"timeout too long":       func(o *MintOptions) { o.RequestTimeout = time.Hour },
 		"renewal lead at one":    func(o *MintOptions) { o.RenewalLead = 1 },
 		"negative renewal lead":  func(o *MintOptions) { o.RenewalLead = -0.5 },
-		// HTTPS nobody authenticates is plaintext with extra steps, and this is
-		// the one request that carries the projection.
-		"transport that skips certificate verification": func(o *MintOptions) {
-			o.HTTPClient = &http.Client{Transport: &http.Transport{
-				TLSClientConfig: &tls.Config{InsecureSkipVerify: true}, //nolint:gosec // the point of the test
-			}}
-		},
-		"transport permitting TLS below 1.2": func(o *MintOptions) {
-			o.HTTPClient = &http.Client{Transport: &http.Transport{
-				TLSClientConfig: &tls.Config{MinVersion: tls.VersionTLS10},
-			}}
-		},
 	} {
 		t.Run(name, func(t *testing.T) {
 			options := valid
@@ -810,4 +862,192 @@ func TestCredentialSurfaceComesFromTheSignedCapability(t *testing.T) {
 	require.NoError(t, credential.Attach(request))
 	require.Equal(t, credential.Token(), request.Header.Get(HeaderName))
 	require.Equal(t, testInstallation, request.Header.Get(InstallationIDHeaderName))
+}
+
+// A renewal that fails does not take a working credential away.
+//
+// This is the finding in its sharpest form: entering the renewal lead and
+// getting a 503 used to return an error to every caller while the credential in
+// hand had minutes of validity left. The client manufactured an outage out of a
+// credential that still worked, and then — because each caller retried under
+// the lock with no hold-off — made one mint request per caller at exactly the
+// moment the host was least able to serve them.
+func TestAFailedRenewalServesTheHeldCredentialUntilItExpires(t *testing.T) {
+	clock := testClock
+	now := func() time.Time { return clock }
+	host := newMintHost(t, now)
+	client := newTestMintClient(t, host, projectedFile(t, "projected"), now)
+
+	held, err := client.Credential(t.Context())
+	require.NoError(t, err)
+	require.EqualValues(t, 1, host.requests.Load())
+
+	// Inside the renewal lead, with the host refusing.
+	host.refuseWith = http.StatusServiceUnavailable
+	clock = testClock.Add(13 * time.Minute)
+	served, err := client.Credential(t.Context())
+	require.NoError(t, err, "a credential with two minutes left is still a credential")
+	require.Equal(t, held.Token(), served.Token())
+	require.EqualValues(t, 2, host.requests.Load(), "it tried once")
+
+	// Ten more callers inside the hold-off make NO further requests. Without
+	// the hold-off this was one request per caller.
+	for range 10 {
+		again, err := client.Credential(t.Context())
+		require.NoError(t, err)
+		require.Equal(t, held.Token(), again.Token())
+	}
+	require.EqualValues(t, 2, host.requests.Load(),
+		"a failed mint holds off the next attempt; a request per caller is the heartbeat again")
+
+	// Past the hold-off it tries again — still refused, still serving.
+	clock = testClock.Add(13*time.Minute + 2*minMintBackoff)
+	_, err = client.Credential(t.Context())
+	require.NoError(t, err)
+	require.EqualValues(t, 3, host.requests.Load())
+
+	// Once the held credential has actually expired there is nothing to serve,
+	// and the outage is the caller's problem to know about.
+	clock = testClock.Add(20 * time.Minute)
+	_, err = client.Credential(t.Context())
+	require.ErrorIs(t, err, ErrMintUnavailable)
+	require.Equal(t, MintCounts{Mints: 1}, client.Counts(),
+		"a failed renewal is not a renewal")
+
+	// And when the host comes back, the renewal happens.
+	host.refuseWith = 0
+	clock = testClock.Add(20*time.Minute + time.Minute)
+	fresh, err := client.Credential(t.Context())
+	require.NoError(t, err)
+	require.NotEqual(t, held.Token(), fresh.Token())
+	require.Equal(t, MintCounts{Mints: 1, Renewals: 1}, client.Counts())
+}
+
+// The hold-off grows, so a long outage is not a steady stream of requests.
+func TestTheMintHoldOffGrowsWithConsecutiveFailures(t *testing.T) {
+	require.Equal(t, minMintBackoff, mintBackoff(1))
+	require.Equal(t, 2*minMintBackoff, mintBackoff(2))
+	require.Equal(t, 4*minMintBackoff, mintBackoff(3))
+	require.Equal(t, maxMintBackoff, mintBackoff(30),
+		"and it is bounded: a hold-off nobody ever leaves is an outage of our own")
+	require.LessOrEqual(t, mintBackoff(100), maxMintBackoff)
+}
+
+// A caller whose context is cancelled while another goroutine is minting stops
+// waiting. The mint used to happen under the client's mutex, which made every
+// waiting caller's ctx meaningless: a cancelled request still blocked until the
+// request it was not making had finished.
+//
+// The host holds its answer for a bounded moment rather than indefinitely, and
+// releases on cleanup, so a failing assertion cannot wedge the server.
+func TestAWaitingCallerHonoursItsContext(t *testing.T) {
+	now := func() time.Time { return testClock }
+	host := newMintHost(t, now)
+	release := make(chan struct{})
+	var releaseOnce sync.Once
+	letGo := func() { releaseOnce.Do(func() { close(release) }) }
+	t.Cleanup(letGo)
+	host.before = func() {
+		select {
+		case <-release:
+		case <-time.After(2 * time.Second):
+		}
+	}
+	client := newTestMintClient(t, host, projectedFile(t, "projected"), now)
+
+	minted := make(chan error, 1)
+	go func() {
+		_, err := client.Credential(context.Background())
+		minted <- err
+	}()
+
+	// Wait until the host has the request in hand, so the call below is
+	// certainly a waiter rather than the minter.
+	require.Eventually(t, func() bool { return host.requests.Load() == 1 },
+		2*time.Second, time.Millisecond)
+
+	cancelled, cancel := context.WithCancel(context.Background())
+	cancel()
+	_, err := client.Credential(cancelled)
+	require.ErrorIs(t, err, ErrMintUnavailable)
+	require.ErrorIs(t, err, context.Canceled)
+	require.EqualValues(t, 1, host.requests.Load(),
+		"a waiting caller does not queue a second request")
+
+	letGo()
+	require.NoError(t, <-minted)
+	require.Equal(t, MintCounts{Mints: 1}, client.Counts())
+}
+
+// A waiting caller that holds a usable credential gets it rather than an error,
+// even when its own context is cancelled: the credential in hand is valid, and
+// the caller asked for a credential rather than for a mint.
+func TestACancelledWaiterStillGetsAUsableHeldCredential(t *testing.T) {
+	clock := testClock
+	now := func() time.Time { return clock }
+	host := newMintHost(t, now)
+	client := newTestMintClient(t, host, projectedFile(t, "projected"), now)
+
+	held, err := client.Credential(t.Context())
+	require.NoError(t, err)
+
+	release := make(chan struct{})
+	var releaseOnce sync.Once
+	letGo := func() { releaseOnce.Do(func() { close(release) }) }
+	t.Cleanup(letGo)
+	host.before = func() {
+		select {
+		case <-release:
+		case <-time.After(2 * time.Second):
+		}
+	}
+	clock = testClock.Add(13 * time.Minute)
+
+	renewing := make(chan struct{})
+	go func() {
+		defer close(renewing)
+		_, _ = client.Credential(context.Background())
+	}()
+	require.Eventually(t, func() bool { return host.requests.Load() == 2 },
+		2*time.Second, time.Millisecond)
+
+	cancelled, cancel := context.WithCancel(context.Background())
+	cancel()
+	served, err := client.Credential(cancelled)
+	require.NoError(t, err, "a valid credential in hand beats a cancelled wait")
+	require.Equal(t, held.Token(), served.Token())
+
+	letGo()
+	<-renewing
+}
+
+// A receiver whose live state lags refuses every fresh credential, and each
+// refusal is a NEW generation — so the generation check alone does not bound
+// it. The hold-off is what does.
+func TestRepeatedRefreshesAreBounded(t *testing.T) {
+	now := func() time.Time { return testClock }
+	host := newMintHost(t, now)
+	client := newTestMintClient(t, host, projectedFile(t, "projected"), now)
+
+	held, err := client.Credential(t.Context())
+	require.NoError(t, err)
+	require.EqualValues(t, 1, host.requests.Load())
+
+	// The first refusal gets a replacement.
+	replaced, err := client.Refresh(t.Context(), held)
+	require.NoError(t, err)
+	require.EqualValues(t, 2, host.requests.Load())
+
+	// Now the host starts failing, and a caller refused on each fresh
+	// credential keeps coming back. Without the hold-off this is one mint per
+	// call for as long as the receiver lags.
+	host.refuseWith = http.StatusServiceUnavailable
+	current := replaced
+	for range 20 {
+		next, err := client.Refresh(t.Context(), current)
+		require.NoError(t, err, "a credential with time left is served")
+		current = next
+	}
+	require.EqualValues(t, 3, host.requests.Load(),
+		"twenty refusals inside one hold-off make one request")
 }

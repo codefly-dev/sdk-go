@@ -218,6 +218,13 @@ func canonicalScopes(scopes []*basev0.WorkScopeV1) ([][]byte, error) {
 		encoded = append(encoded, raw)
 	}
 	slices.SortFunc(encoded, bytes.Compare)
+	// Identical scopes collapse. Two equal scopes encode to equal bytes, so
+	// without this a caller holding the same scope twice — which an
+	// attenuation chain produces readily — lands in a different partition from
+	// one holding it once, for the same authority. That is cache fragmentation
+	// rather than a wrong answer, but it is silent, and the digest is supposed
+	// to be a function of the authority rather than of how it was assembled.
+	encoded = slices.CompactFunc(encoded, bytes.Equal)
 	return encoded, nil
 }
 

@@ -6,6 +6,8 @@ import (
 	"testing"
 	"time"
 
+	corework "github.com/codefly-dev/core/workcontext"
+	"github.com/codefly-dev/core/workcontext/conformance"
 	"github.com/stretchr/testify/require"
 )
 
@@ -153,4 +155,77 @@ func TestStreamGuardValidatesItsConfiguration(t *testing.T) {
 	var absent *StreamGuard
 	require.ErrorIs(t, absent.BeforeSend(context.Background()), ErrInvalid)
 	require.NoError(t, absent.Terminated())
+}
+
+// The per-emission re-check must NOT consume a single-use capability.
+//
+// This is the bug the README shipped: the documented recipe called
+// verifier.Verify on every emission, core's Verify consumes a single-use nonce,
+// and every grant capability is single-use — so a grant-opened stream died with
+// ErrReplayed at its FIRST message. The error even looked like a replay attack
+// rather than like the guard eating its own credential.
+//
+// The fix is core's (*Verifier).Recheck, which re-reads what can move and never
+// touches the replay store. RecheckWith is how this module hands a caller that
+// call instead of the one that compiles just as well and breaks later.
+func TestTheStreamRecheckDoesNotConsumeASingleUseCapability(t *testing.T) {
+	settings := conformance.New(time.Now())
+	verifier := &Verifier{
+		Issuer:    settings.Issuer,
+		Audience:  settings.Audience,
+		Keys:      corework.FixtureKeys(),
+		Revisions: settings.Revisions,
+		Replay:    settings.Replay,
+		Grants:    settings.Grants,
+		Seals:     settings.Seals,
+		Now:       settings.Now,
+	}
+
+	fixtures, err := corework.Fixtures(settings.Now())
+	require.NoError(t, err)
+	var grant corework.Fixture
+	for _, candidate := range fixtures {
+		if candidate.SingleUse {
+			grant = candidate
+			break
+		}
+	}
+	require.NotEmpty(t, grant.Token, "core's kit has no single-use fixture to test with")
+
+	// The one legitimate consumption.
+	verified, err := verifier.Verify(t.Context(), grant.Token)
+	require.NoError(t, err)
+
+	// Now the stream, built the way this module recommends.
+	guard, err := NewStreamGuard(StreamGuardOptions{
+		Recheck: RecheckWith(verifier, verified),
+	})
+	require.NoError(t, err)
+	for message := range 5 {
+		require.NoError(t, guard.BeforeSend(t.Context()),
+			"message %d must not be refused as a replay of the stream's own credential", message+1)
+	}
+	require.NoError(t, guard.Terminated())
+
+	// And the capability is still spent exactly once overall: presenting it to
+	// Verify again is a replay, which is what single-use means.
+	_, err = verifier.Verify(t.Context(), grant.Token)
+	require.ErrorIs(t, err, ErrReplayed)
+
+	// Whereas a guard built on Verify — the recipe this replaces — dies on its
+	// first message. Asserted so the regression is a failing test rather than a
+	// README nobody re-reads.
+	consuming, err := NewStreamGuard(StreamGuardOptions{
+		Recheck: func(ctx context.Context) error {
+			_, verifyErr := verifier.Verify(ctx, grant.Token)
+			return verifyErr
+		},
+	})
+	require.NoError(t, err)
+	require.ErrorIs(t, consuming.BeforeSend(t.Context()), ErrReplayed,
+		"this is the bug: Verify in a loop spends the nonce the loop depends on")
+}
+
+func TestRecheckWithRefusesIncompleteArguments(t *testing.T) {
+	require.ErrorIs(t, RecheckWith(nil, nil)(context.Background()), ErrInvalid)
 }
