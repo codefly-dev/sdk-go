@@ -7,6 +7,7 @@ import (
 	"strconv"
 	"strings"
 
+	corework "github.com/codefly-dev/core/workcontext"
 	"google.golang.org/protobuf/proto"
 )
 
@@ -161,6 +162,18 @@ func claimsOf(encoded string) (*Claims, error) {
 	}
 	if _, err := base64.RawURLEncoding.DecodeString(signature); err != nil {
 		return nil, fmt.Errorf("%w: signature is not base64url: %v", ErrInvalid, err)
+	}
+	// Before unmarshalling: is this even this encoding? Core's check, not a
+	// second one — so a token in another format is named here exactly as the
+	// verifier would name it (ErrNotACoreToken), rather than reported as a
+	// payload that failed to unmarshal. Two different messages for one
+	// condition is the diagnostic fragmentation that produced this rule.
+	//
+	// A nil return means only that the payload is not visibly another format.
+	// Nothing here checks a signature, and nothing that follows trusts the
+	// result.
+	if err := corework.CheckEncoding(raw); err != nil {
+		return nil, err
 	}
 	claims := &Claims{}
 	if err := proto.Unmarshal(raw, claims); err != nil {

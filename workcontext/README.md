@@ -385,13 +385,19 @@ else. The sealed fields are proto fields — `seal.principal_epoch`,
 `operation_binding.binding_id` / `.revision` / `.incarnation`, all three
 together or none.
 
-This module reads a capability's seal and lifetime with `proto.Unmarshal` into
-core's generated type and **no signature check**, in one place
-(`carrier.go`, `claimsOf`). That is sound only because nothing trusts the
-result: it fills the pre-check carriers, and it tells the mint client when its
-own freshly issued credential expires. A receiver that preferred a carrier over
-the sealed claim would have made a caller-controlled header into authority,
-which is why the incoming side refuses a disagreement instead.
+This module reads a capability's seal and lifetime in one place (`carrier.go`,
+`claimsOf`): core's `CheckEncoding` on the decoded payload, then
+`proto.Unmarshal` into core's generated type, and **no signature check**. That
+is sound only because nothing trusts the result — it fills the pre-check
+carriers, and it tells the mint client when its own freshly issued credential
+expires. A receiver that preferred a carrier over the sealed claim would have
+made a caller-controlled header into authority, which is why the incoming side
+refuses a disagreement instead.
+
+`CheckEncoding` is core's and is called rather than reimplemented, so a token in
+another format is named `ErrNotACoreToken` **here too**. Two decoders giving an
+operator two different messages for one condition is the same diagnostic
+fragmentation as the two encodings, in miniature.
 
 There are no cross-language golden tokens in this module any more. They went
 with the implementation that produced them: core mints its conformance fixtures

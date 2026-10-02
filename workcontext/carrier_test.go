@@ -160,13 +160,24 @@ func TestSealedOperationBindingIsWholeOrAbsent(t *testing.T) {
 	require.Nil(t, none, "a session that exercises no binding seals none")
 }
 
-// A token in another encoding is not a capability with a bad signature, and
-// nothing here may report it as one. The SDK's reading stops at "this is not a
-// WorkContextV1"; the named refusal is core's, which is where the signature
-// would have been checked.
-func TestAForeignEncodingIsNotReadAsACapability(t *testing.T) {
+// A token in another encoding is refused as that, by name, in the one place
+// this module decodes — using core's own discrimination, so an operator does
+// not get two different messages for one condition. It is never reported as a
+// signature problem, which is the misdiagnosis the whole rule exists to end.
+func TestAForeignEncodingIsNamedAsOne(t *testing.T) {
 	request := httptest.NewRequest(http.MethodGet, "/records", nil)
 	err := Attach(request, fixture(t, "foreign-encoding").Token)
+	require.ErrorIs(t, err, ErrNotACoreToken)
+	require.NotErrorIs(t, err, ErrInvalid,
+		"ErrNotACoreToken does not wrap ErrInvalid: the two diagnoses must not be reachable from one branch")
+	require.NotContains(t, err.Error(), "signature")
+
+	// An empty payload is NOT that error, here or in core: it is a malformed
+	// token of no format at all. Widening "not a core token" to cover it would
+	// make it mean "something was wrong early", which is the vagueness it
+	// exists to remove.
+	empty := httptest.NewRequest(http.MethodGet, "/records", nil)
+	err = Attach(empty, ".c2lnbmF0dXJl")
 	require.ErrorIs(t, err, ErrInvalid)
-	require.NotContains(t, err.Error(), "signature does not verify")
+	require.NotErrorIs(t, err, ErrNotACoreToken)
 }
