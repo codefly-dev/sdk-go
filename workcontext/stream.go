@@ -5,20 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"sync"
-	"time"
-)
-
-// Bounds on the re-check cadence. One shorter than a second would re-present a
-// credential faster than any authority changes its mind; one longer than the
-// longest credential a host issues would never fire inside a single stream, so
-// the stream would serve its whole life on the check that opened it.
-//
-// They are client-side sanity bounds and not a statement about the credential:
-// the cadence itself is the host's to state, because the host is what decides
-// how long an authorization answer stays true.
-const (
-	minStreamRecheckInterval = time.Second
-	maxStreamRecheckInterval = 15 * time.Minute
 )
 
 // ErrStreamTerminated marks a stream that a re-check refused. It is returned to
@@ -29,20 +15,17 @@ var ErrStreamTerminated = errors.New("Codefly Work Context stream terminated")
 
 // StreamGuardOptions configures one stream's hold on its credential.
 type StreamGuardOptions struct {
-	// Interval is the host's re-check cadence. It is the host's, not a number
-	// chosen here: the host is what decides how long an authorization answer
-	// stays true, and a stream that re-checks more slowly than that is a stream
-	// serving from a snapshot the host has already revised.
-	Interval time.Duration
-
 	// Recheck re-presents the credential and returns the host's answer. It is
-	// the same verification an ordinary call performs, against expectations
-	// read at the moment of the check — not against the expectations the stream
+	// the same verification an ordinary call performs, against live state read
+	// at the moment of the check — not against the expectations the stream
 	// opened with, which is the whole point.
+	//
+	// Any error terminates the stream, and that includes an error that is
+	// neither ErrRevoked nor ErrInvalid. A live source that cannot be reached
+	// has not said the credential is good; treating "I could not ask" as a
+	// pass is how a stream outlives the authority it was opened under while
+	// every log line stays clean.
 	Recheck func(context.Context) error
-
-	// Now is the clock, for tests.
-	Now func() time.Time
 }
 
 // StreamGuard holds a stream to its credential for the stream's whole life.
@@ -53,48 +36,50 @@ type StreamGuardOptions struct {
 // drain a snapshot computed under authority that no longer exists. Nothing in
 // the stream fails, no error is logged, and the data keeps arriving.
 //
-// It guards emission rather than running a timer. An idle stream discloses
-// nothing, so there is nothing to refuse; a stream that keeps emitting is
-// re-checked on the cadence and terminates the moment the answer changes.
+// It guards EVERY emission. There was a re-check cadence here, bounded at
+// fifteen minutes, and it was a weakening of the rule rather than an
+// implementation of it: revoke the installation one second after a successful
+// check and every message for the next fifteen minutes still left, with expiry
+// and source unavailability equally invisible for that interval. The condition
+// is per emission, so the check is per emission.
+//
+// What that costs is one live authorization check per message, which is the
+// price of the guarantee and is why the guard is for streams whose messages
+// carry authority rather than for every stream. A stream that cannot pay it
+// does not get the guarantee; it does not get a cadence instead.
+//
+// An idle stream discloses nothing, so there is nothing to refuse: the guard
+// does no work until something is about to be sent.
 type StreamGuard struct {
 	mu         sync.Mutex
-	interval   time.Duration
 	recheck    func(context.Context) error
-	now        func() time.Time
-	checkedAt  time.Time
 	terminated error
 }
 
-// NewStreamGuard validates the cadence and performs no I/O. The first
+// NewStreamGuard validates its configuration and performs no I/O. The first
 // BeforeSend re-checks, so a stream never emits its first message on the
 // strength of the check that opened it.
 func NewStreamGuard(options StreamGuardOptions) (*StreamGuard, error) {
 	if options.Recheck == nil {
 		return nil, fmt.Errorf("%w: a stream guard needs a re-check", ErrInvalid)
 	}
-	if options.Interval < minStreamRecheckInterval || options.Interval > maxStreamRecheckInterval {
-		return nil, fmt.Errorf(
-			"%w: stream re-check interval must be between %s and %s",
-			ErrInvalid, minStreamRecheckInterval, maxStreamRecheckInterval,
-		)
-	}
-	now := options.Now
-	if now == nil {
-		now = time.Now
-	}
-	return &StreamGuard{interval: options.Interval, recheck: options.Recheck, now: now}, nil
+	return &StreamGuard{recheck: options.Recheck}, nil
 }
 
-// BeforeSend is called before every message a stream emits. It re-presents the
-// credential when the cadence has elapsed and returns the refusal when the
-// host gives one. A non-nil error terminates the stream: the message must not
-// be sent, and nothing after it may be either.
+// BeforeSend is called before every message a stream emits, and re-presents the
+// credential every time. A non-nil error terminates the stream: the message
+// must not be sent, and nothing after it may be either.
 //
 // A refusal is returned wrapped, so a caller can tell a credential the state
 // moved under (ErrRevoked — a fresh credential would be accepted) from one that
-// never becomes valid (ErrInvalid). Neither resumes this stream. The
-// distinction is for the caller's decision about whether to open another, which
-// is a decision about one new stream and not a licence to keep this one alive.
+// never becomes valid (ErrInvalid) from a live source that could not be reached
+// at all. None of the three resumes this stream. The distinction is for the
+// caller's decision about whether to open another, which is a decision about
+// one new stream and not a licence to keep this one alive.
+//
+// It holds the guard's lock across the check, so a stream emitting from several
+// goroutines cannot have one of them send on the strength of a check another
+// goroutine is still waiting on.
 func (g *StreamGuard) BeforeSend(ctx context.Context) error {
 	if g == nil {
 		return fmt.Errorf("%w: nil stream guard", ErrInvalid)
@@ -107,10 +92,6 @@ func (g *StreamGuard) BeforeSend(ctx context.Context) error {
 	if g.terminated != nil {
 		return g.terminated
 	}
-	now := g.now().UTC()
-	if !g.checkedAt.IsZero() && now.Sub(g.checkedAt) < g.interval {
-		return nil
-	}
 	if err := g.recheck(ctx); err != nil {
 		// Both sentinels stay in the chain: the caller needs to know the stream
 		// is over AND whether a fresh credential would be accepted, and
@@ -118,7 +99,6 @@ func (g *StreamGuard) BeforeSend(ctx context.Context) error {
 		g.terminated = fmt.Errorf("%w: %w", ErrStreamTerminated, err)
 		return g.terminated
 	}
-	g.checkedAt = now
 	return nil
 }
 

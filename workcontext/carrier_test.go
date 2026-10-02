@@ -147,17 +147,127 @@ func TestFromHeadersRequiresExactlyOneCapability(t *testing.T) {
 
 // An operation binding carries its id, revision and incarnation or none of
 // them: a capability sealed to a binding id at no revision names an authority
-// nobody approved.
+// nobody approved, and the field that is missing is the one an attacker would
+// choose to leave out.
+//
+// The earlier version of this test supplied only complete and absent bindings,
+// so deleting the partial-binding rejection would not have failed it. The
+// partial cases are what it is for.
 func TestSealedOperationBindingIsWholeOrAbsent(t *testing.T) {
 	a := newAuthority(t)
 	_, _, binding, err := sealOf(a.start(t, mintInput{binding: testBinding}))
 	require.NoError(t, err)
 	require.NotNil(t, binding)
-	require.Equal(t, OperationBinding{ID: testBinding, Revision: 2, Incarnation: 1}, *binding)
+	require.Equal(t, testBinding, binding.GetBindingId())
+	require.EqualValues(t, 2, binding.GetRevision())
+	require.EqualValues(t, 1, binding.GetIncarnation())
 
 	_, _, none, err := sealOf(a.start(t, mintInput{}))
 	require.NoError(t, err)
 	require.Nil(t, none, "a session that exercises no binding seals none")
+
+	// A binding missing one of its three fields is refused, and so is the whole
+	// capability: a credential is sealed or it is not a credential.
+	for _, field := range []string{"Binding.ID", "Binding.Revision", "Binding.Incarnation"} {
+		t.Run(field, func(t *testing.T) {
+			token := resealWithout(t, a.start(t, mintInput{binding: testBinding}), field)
+
+			_, _, _, err := sealOf(token)
+			require.ErrorIs(t, err, ErrUnsealed)
+			require.ErrorContains(t, err, "id, revision and incarnation or none of them")
+
+			// And it never reaches a request, on either transport.
+			request := httptest.NewRequest(http.MethodGet, "/records", nil)
+			require.ErrorIs(t, Attach(request, token), ErrUnsealed)
+			require.Empty(t, request.Header.Get(HeaderName))
+			_, _, err = SealedInstallation(token)
+			require.ErrorIs(t, err, ErrUnsealed)
+		})
+	}
+}
+
+// Every field of the seal is required, and the check is the SAME check for
+// every carrier. SealedInstallation used to read only the installation id and
+// revision, which made "Attach refuses an unsealed capability" true of two
+// fields out of four: a capability with no principal epoch or no build
+// incarnation was attached and travelled.
+func TestEverySealedFieldIsRequiredOnEveryCarrier(t *testing.T) {
+	a := newAuthority(t)
+	for field, says := range map[string]string{
+		"PrincipalEpoch":       "no principal epoch",
+		"InstallationID":       "no installation",
+		"InstallationRevision": "no installation revision",
+		"BuildIncarnation":     "no build incarnation",
+	} {
+		t.Run(field, func(t *testing.T) {
+			token := resealWithout(t, a.start(t, mintInput{}), field)
+
+			_, _, _, err := sealOf(token)
+			require.ErrorIs(t, err, ErrUnsealed)
+			require.ErrorContains(t, err, says)
+
+			// The outbound HTTP carrier.
+			request := httptest.NewRequest(http.MethodGet, "/records", nil)
+			err = Attach(request, token)
+			require.ErrorIs(t, err, ErrUnsealed)
+			require.ErrorContains(t, err, says)
+			require.Empty(t, request.Header.Get(HeaderName),
+				"a refused capability must not be left on the request")
+
+			// The inbound HTTP carrier, with the installation carriers stated
+			// so the check is reached at all.
+			headers := http.Header{}
+			headers.Set(HeaderName, token)
+			headers.Set(InstallationIDHeaderName, testInstallation)
+			headers.Set(InstallationRevisionHeaderName, "3")
+			_, err = FromHeaders(headers)
+			require.ErrorIs(t, err, ErrUnsealed)
+
+			// And the one function both gRPC directions go through.
+			_, _, err = SealedInstallation(token)
+			require.ErrorIs(t, err, ErrUnsealed)
+			require.ErrorContains(t, err, says)
+		})
+	}
+}
+
+// An installation carrier stated twice is ambiguous, and ambiguous is refused.
+//
+// Header.Get reads the FIRST value, so [sealed-id, something-else] compared
+// equal to the seal and the call was accepted while carrying two contradictory
+// installations. Whether a later intermediary reads the first or the second is
+// not something this module can decide — gRPC already required exactly one, and
+// now both transports do.
+func TestDuplicateInstallationCarriersAreRefused(t *testing.T) {
+	a := newAuthority(t)
+	token := a.start(t, mintInput{})
+
+	for name, build := range map[string]func(http.Header){
+		"id stated twice, the second disagreeing": func(headers http.Header) {
+			headers.Add(InstallationIDHeaderName, testInstallation)
+			headers.Add(InstallationIDHeaderName, "installation-the-caller-added")
+			headers.Set(InstallationRevisionHeaderName, "3")
+		},
+		"id stated twice, both agreeing": func(headers http.Header) {
+			headers.Add(InstallationIDHeaderName, testInstallation)
+			headers.Add(InstallationIDHeaderName, testInstallation)
+			headers.Set(InstallationRevisionHeaderName, "3")
+		},
+		"revision stated twice": func(headers http.Header) {
+			headers.Set(InstallationIDHeaderName, testInstallation)
+			headers.Add(InstallationRevisionHeaderName, "3")
+			headers.Add(InstallationRevisionHeaderName, "4")
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			headers := http.Header{}
+			headers.Set(HeaderName, token)
+			build(headers)
+			_, err := FromHeaders(headers)
+			require.ErrorIs(t, err, ErrInvalid)
+			require.ErrorContains(t, err, "exactly one value")
+		})
+	}
 }
 
 // A token in another encoding is refused as that, by name, in the one place

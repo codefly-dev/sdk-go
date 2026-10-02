@@ -121,16 +121,23 @@ see the skill below.
   re-exports its verifier by alias. Nothing here may sign, check a signature or
   encode a capability — `TestNoSecondWorkContextImplementation` refuses a
   `crypto/ed25519` import, an `encoding/json` import outside `mint.go`'s HTTP
-  bodies, a json-tagged struct that is not those bodies, and a `WorkContext*`
-  type of our own; `TestWorkContextConformance` drives core's fixtures through
-  the entry point we export. A claim added to the wire is added to the proto in
+  bodies (by exact path), a json-tagged struct that is not those bodies anywhere
+  in the file including inside a function, and a `WorkContext*` type of our own
+  — an alias counts only if it resolves into core's module;
+  `TestWorkContextConformance` drives core's fixtures through a verifier built as
+  the type we export, which is the behavioural half, the compile-time assertions
+  being the identity half. A claim added to the wire is added to the proto in
   core, never to an encoder here. This repository once held a second
-  implementation signing hand-written JSON: a token from either format failed
-  *signature* verification in the other, which reads like a rotated key. A test
-  guards only its own tree, so `scripts/check-one-implementation.sh` sweeps
-  every ref CI builds; it is **red by design** while a release line still
-  carries the old implementation — `docs/cutover.md` says who retires those and
-  when, and it is never an agent.
+  implementation signing hand-written JSON. The signatures were sound — each
+  side signed and verified the bytes it handled — but the key id is a field
+  *inside* the payload, so reading a protobuf payload as JSON yielded no key id
+  and the failure surfaced as "unknown key"/"signature does not verify", which
+  reads like a rotated key. That
+  test walks from the `workcontext` module root, and the deleted implementation
+  lived at the repository root, so `scripts/check-one-implementation.sh` sweeps
+  every tracked Go file in both modules as a **required check that is green**.
+  There is no compatibility period in it: refs outside this repository's build
+  that still carry it belong to the cold-cutover runbook, which lives elsewhere.
 - **A credential is sealed or it is not a credential.** Every field of
   `workcontext.Seal` is required at mint and at verify, an operation binding
   carries its id, revision and incarnation or none of them, and `Attach`

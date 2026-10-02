@@ -32,9 +32,23 @@ type Verified = corework.Verified
 // sealed values against it for exact equality.
 type Seal = corework.Seal
 
-// OperationBinding is the live state of one unit of authority, resolved by its
-// opaque id — never searched for by the scopes it contains.
+// OperationBinding is the LIVE state of one unit of authority, as the issuer
+// holds it: resolved by its opaque id — never searched for by the scopes it
+// contains — and carrying the principal it is granted to and the installation
+// it is granted within, because an id that exists is not an id somebody holds.
+//
+// It is what a verifier's seal source answers, not what a capability carries.
+// SealedOperationBinding is the carried half, and the two are deliberately
+// different types: the capability names three fields, the live state names six,
+// and a client that filled the live type from a token would be handing a reader
+// an empty PrincipalID and InstallationID that read as "granted to nobody,
+// nowhere" rather than as "the wire does not say".
 type OperationBinding = corework.OperationBinding
+
+// SealedOperationBinding is the operation binding a capability carries: the
+// binding's id, and its revision and incarnation at mint time. It is core's own
+// message for that, so there is no second spelling of what travels.
+type SealedOperationBinding = basev0.WorkOperationBindingV1
 
 // SealSource answers the live values a seal is compared against.
 type SealSource = corework.SealSource

@@ -187,38 +187,6 @@ func checkIncomingInstallation(
 	return nil
 }
 
-// GRPCExecutionContextFromIncomingIfPresent supports compatibility boundaries
-// where execution attribution is optional. No carrier returns present=false;
-// a partial or duplicate carrier is still an error.
-func GRPCExecutionContextFromIncomingIfPresent(
-	ctx context.Context,
-) (execution ExecutionContext, present bool, err error) {
-	if ctx == nil {
-		return ExecutionContext{}, false, fmt.Errorf("%w: nil gRPC context", workcontext.ErrInvalid)
-	}
-	values, ok := metadata.FromIncomingContext(ctx)
-	if !ok {
-		return ExecutionContext{}, false, nil
-	}
-	carried := 0
-	for _, carrier := range []string{
-		workContextGRPCMetadataName,
-		operationIDGRPCMetadataName,
-		installationIDGRPCMetadataName,
-		installationRevisionGRPCMetadataName,
-	} {
-		carried += len(values.Get(carrier))
-	}
-	if carried == 0 {
-		return ExecutionContext{}, false, nil
-	}
-	execution, err = GRPCExecutionContextFromIncoming(ctx)
-	if err != nil {
-		return ExecutionContext{}, false, err
-	}
-	return execution, true, nil
-}
-
 func validateOperationID(operationID string) error {
 	if operationID == "" {
 		return fmt.Errorf("%w: operation ID is required", workcontext.ErrInvalid)

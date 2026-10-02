@@ -73,41 +73,61 @@ func FromHeaders(headers http.Header) (string, error) {
 		return "", fmt.Errorf("%w: %s appears %d times", ErrInvalid, HeaderName, len(values))
 	}
 	encoded := values[0]
-	if err := checkCarriedInstallation(headers.Get(InstallationIDHeaderName),
-		headers.Get(InstallationRevisionHeaderName), encoded); err != nil {
+	if err := checkCarriedInstallation(headers, encoded); err != nil {
 		return "", err
 	}
 	return encoded, nil
 }
 
 // checkCarriedInstallation refuses a request whose installation carriers
-// disagree with the seal. Agreement is required when a carrier is present and
-// the carriers are required together: half of a pre-check is a pre-check that
-// passes for the wrong reason.
-func checkCarriedInstallation(id, revision, encoded string) error {
-	if id == "" && revision == "" {
+// disagree with the seal, or whose carriers are stated more than once.
+//
+// Cardinality is checked before agreement, which Header.Get made impossible:
+// it reads the FIRST value, so `[sealed-id, something-else]` compared equal to
+// the seal and the call was accepted while carrying two contradictory
+// installations. Whether a later intermediary reads the first or the second is
+// not something this module can decide, so an ambiguous carrier is refused
+// here — the same contract gRPC already held, now stated once for both.
+func checkCarriedInstallation(headers http.Header, encoded string) error {
+	ids := headers.Values(InstallationIDHeaderName)
+	revisions := headers.Values(InstallationRevisionHeaderName)
+	if len(ids) == 0 && len(revisions) == 0 {
 		return nil
 	}
-	if id == "" || revision == "" {
-		return fmt.Errorf(
-			"%w: %s and %s travel together; one was presented without the other",
-			ErrInvalid, InstallationIDHeaderName, InstallationRevisionHeaderName,
-		)
+	for _, carrier := range []struct {
+		name   string
+		values []string
+	}{
+		{InstallationIDHeaderName, ids},
+		{InstallationRevisionHeaderName, revisions},
+	} {
+		if len(carrier.values) == 0 {
+			return fmt.Errorf(
+				"%w: %s and %s travel together; one was presented without the other",
+				ErrInvalid, InstallationIDHeaderName, InstallationRevisionHeaderName,
+			)
+		}
+		if len(carrier.values) != 1 {
+			return fmt.Errorf(
+				"%w: %s requires exactly one value and carries %d",
+				ErrInvalid, carrier.name, len(carrier.values),
+			)
+		}
 	}
 	sealedID, sealedRevision, err := SealedInstallation(encoded)
 	if err != nil {
 		return err
 	}
-	if id != sealedID {
+	if ids[0] != sealedID {
 		return fmt.Errorf(
 			"%w: %s carries %q and the capability is sealed to %q",
-			ErrInvalid, InstallationIDHeaderName, id, sealedID,
+			ErrInvalid, InstallationIDHeaderName, ids[0], sealedID,
 		)
 	}
-	if revision != sealedRevision {
+	if revisions[0] != sealedRevision {
 		return fmt.Errorf(
 			"%w: %s carries %q and the capability is sealed to %q",
-			ErrInvalid, InstallationRevisionHeaderName, revision, sealedRevision,
+			ErrInvalid, InstallationRevisionHeaderName, revisions[0], sealedRevision,
 		)
 	}
 	return nil
@@ -116,29 +136,30 @@ func checkCarriedInstallation(id, revision, encoded string) error {
 // SealedInstallation reads the installation a capability is sealed to, for a
 // transport that names it beside the capability.
 //
+// It is the WHOLE seal check and not an installation check. It used to read
+// just the installation id and revision, which made "Attach refuses an unsealed
+// capability" true of two fields out of four: a capability with no principal
+// epoch, no build incarnation, or a binding naming an id at no revision was
+// attached and travelled, and the missing field is the one an attacker would
+// choose to leave out. Every carrier in this module — HTTP attach, HTTP read,
+// outgoing gRPC metadata, incoming gRPC metadata — goes through here, so there
+// is one answer to "is this sealed" rather than one per transport.
+//
 // It reads the capability's own content without checking the signature, which
 // is sound only because nothing trusts the result: the carrier it fills is a
 // pre-check, and a receiver that preferred it over the sealed claim would have
-// made the carrier into authority. A capability with no readable seal is an
-// error here, so no transport can attach one while leaving the installation
-// blank.
+// made the carrier into authority.
 func SealedInstallation(encoded string) (id string, revision string, err error) {
-	claims, err := claimsOf(encoded)
+	_, seal, _, err := sealOf(encoded)
 	if err != nil {
 		return "", "", err
 	}
-	seal := claims.GetSeal()
-	if seal.GetInstallationId() == "" || seal.GetInstallationRevision() == 0 {
-		return "", "", fmt.Errorf("%w: the capability names no installation", ErrUnsealed)
-	}
-	return seal.GetInstallationId(), strconv.FormatUint(seal.GetInstallationRevision(), 10), nil
+	return seal.InstallationID, strconv.FormatUint(seal.InstallationRevision, 10), nil
 }
 
 // claimsOf decodes a capability's claims WITHOUT establishing any trust in
-// them. Nothing in this module authorizes from what it returns: the two callers
-// are the pre-check carriers above, and the mint client reading the lifetime
-// and the seal of a capability the host just handed it over an authenticated
-// channel.
+// them. Nothing in this module authorizes from what it returns: its one caller
+// is sealOf, which the pre-check carriers and the mint client reach it through.
 //
 // It decodes core's encoding with core's generated type, so there is no second
 // reading of the wire here. The one thing it must not become is a verification:
@@ -182,15 +203,21 @@ func claimsOf(encoded string) (*Claims, error) {
 	return claims, nil
 }
 
-// sealOf reads the claims, the seal and the operation binding of a capability
-// the host has just issued over an authenticated channel.
+// sealOf reads the claims, the seal and the sealed operation binding of a
+// capability, and is the one structural seal check in this module.
 //
-// It requires a whole seal: every field, and for an operation binding all three
-// of its fields or none of them. A partial seal is refused here and not carried,
-// because a capability sealed to an installation with no revision, or to a
-// binding id at no revision, names an authority nobody approved — and the field
-// that is missing is the one an attacker would choose to leave out.
-func sealOf(encoded string) (*Claims, Seal, *OperationBinding, error) {
+// It requires a whole seal: every field of it, and for an operation binding all
+// three of its fields or none of them. A partial seal is refused here and not
+// carried, because a capability sealed to an installation with no revision, or
+// to a binding id at no revision, names an authority nobody approved — and the
+// field that is missing is the one an attacker would choose to leave out.
+//
+// Refusing it here is a preflight and not the authorization: core's verifier
+// refuses the same capability at the far end. The preflight is what makes the
+// refusal legible — it names the field that is missing, in the process that
+// holds the credential, rather than arriving as a mismatch in a service that
+// cannot do anything about it.
+func sealOf(encoded string) (*Claims, Seal, *SealedOperationBinding, error) {
 	claims, err := claimsOf(encoded)
 	if err != nil {
 		return nil, Seal{}, nil, err
@@ -219,16 +246,24 @@ func sealOf(encoded string) (*Claims, Seal, *OperationBinding, error) {
 	if bound == nil {
 		return claims, seal, nil, nil
 	}
-	binding := &OperationBinding{
-		ID:          bound.GetBindingId(),
-		Revision:    bound.GetRevision(),
-		Incarnation: bound.GetIncarnation(),
-	}
-	if binding.ID == "" || binding.Revision == 0 || binding.Incarnation == 0 {
+	if bound.GetBindingId() == "" || bound.GetRevision() == 0 || bound.GetIncarnation() == 0 {
 		return nil, Seal{}, nil, fmt.Errorf(
 			"%w: an operation binding carries its id, revision and incarnation or none of them",
 			ErrUnsealed,
 		)
 	}
-	return claims, seal, binding, nil
+	return claims, seal, cloneSealedBinding(bound), nil
+}
+
+// cloneSealedBinding copies the message, so a caller that mutates what it is
+// handed cannot change what a credential reports it is bound to.
+func cloneSealedBinding(bound *SealedOperationBinding) *SealedOperationBinding {
+	if bound == nil {
+		return nil
+	}
+	copied, ok := proto.Clone(bound).(*SealedOperationBinding)
+	if !ok {
+		return nil
+	}
+	return copied
 }

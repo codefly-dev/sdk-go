@@ -111,21 +111,6 @@ func TestGRPCExecutionContextRejectsMissingOrNonCanonicalOperationID(t *testing.
 	require.ErrorContains(t, err, "operation ID requires exactly one value")
 }
 
-func TestGRPCExecutionContextOptionalExtractionDistinguishesAbsentFromPartial(t *testing.T) {
-	execution, present, err := GRPCExecutionContextFromIncomingIfPresent(context.Background())
-	require.NoError(t, err)
-	require.False(t, present)
-	require.Empty(t, execution.OperationID())
-
-	partial := metadata.NewIncomingContext(
-		context.Background(),
-		metadata.Pairs(operationIDGRPCMetadataName, "operation-1"),
-	)
-	_, present, err = GRPCExecutionContextFromIncomingIfPresent(partial)
-	require.ErrorContains(t, err, "Work Context requires exactly one value")
-	require.False(t, present)
-}
-
 // Deliverable 3 on the gRPC side: the sealed installation travels beside the
 // capability on every call, under the same names HTTP uses, so a callee can
 // refuse before it decodes anything.
@@ -182,19 +167,25 @@ func TestIncomingInstallationCarriersAreHeldToTheSeal(t *testing.T) {
 	}
 }
 
-// A partial carrier set is an error rather than an absence: the optional-
-// attribution boundary exists for a call that carries nothing at all, not for
-// one that carries half of an authority.
-func TestIfPresentTreatsAPartialInstallationCarrierAsAnError(t *testing.T) {
-	_, present, err := GRPCExecutionContextFromIncomingIfPresent(
-		metadata.NewIncomingContext(context.Background(), metadata.MD{}),
-	)
-	require.NoError(t, err)
-	require.False(t, present)
-
-	_, _, err = GRPCExecutionContextFromIncomingIfPresent(metadata.NewIncomingContext(
-		context.Background(),
-		metadata.Pairs(workcontext.InstallationIDHeaderName, sealedInstallationID),
-	))
-	require.ErrorIs(t, err, workcontext.ErrInvalid)
+// There is no optional extractor any more. A capability-bearing path requires
+// the capability, so a call carrying no carriers at all is refused exactly like
+// one carrying half of them — the compatibility boundary that returned
+// present=false is deleted, and a consumer that relied on it now fails to
+// compile rather than silently keeping its old path.
+func TestExtractionRefusesACallThatCarriesNothing(t *testing.T) {
+	for name, incoming := range map[string]context.Context{
+		"no metadata at all": context.Background(),
+		"empty metadata": metadata.NewIncomingContext(
+			context.Background(), metadata.MD{},
+		),
+		"installation only": metadata.NewIncomingContext(
+			context.Background(),
+			metadata.Pairs(workcontext.InstallationIDHeaderName, sealedInstallationID),
+		),
+	} {
+		t.Run(name, func(t *testing.T) {
+			_, err := GRPCExecutionContextFromIncoming(incoming)
+			require.ErrorIs(t, err, workcontext.ErrInvalid)
+		})
+	}
 }

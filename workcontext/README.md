@@ -60,30 +60,47 @@ It also pins the aliases by assignment (`var _ *corework.Verifier =
 a local copy with the same fields.
 
 **`TestWorkContextConformance`** runs `core/workcontext/conformance.RunWith`
-against the verification entry point this module exports. The kit drives **21
-fixtures** through it — every token form (session, operation, delegated,
+against a verifier built **field by field from the kit's settings as this
+module's exported `Verifier`** — not through `conformance.Settings.Verifier()`,
+which returns core's own and would have passed unchanged beside the
+implementation this module deleted. The kit drives every fixture it carries
+through it (the count moves as core adds cases; read it, never pin it) — every token form (session, operation, delegated,
 delegated-operation, grant) and every negative case, including a stale and a
 *future* installation revision, because the seal is compared for exact equality
 and there is no legitimate way to hold a capability sealed ahead of live — and
 fails the build if any outcome or any named sentinel differs. The single-use
 grant fixture is presented twice against one replay store, so a verifier
-without a working one passes the other twenty and fails exactly there. The decisive fixture is the foreign encoding: a JSON-shaped
-token that must be refused **before** its signature is checked, with
-`ErrNotACoreToken`. A second implementation refuses that token too — as a
-signature failure, which is the misdiagnosis the whole rule exists to prevent.
-That is why the gate lives here, in the consumer: core cannot see who
-re-implements it.
+without a working one passes everything else and fails exactly there. The
+decisive fixture is the foreign encoding: a JSON-shaped token that must be
+refused **before** its signature is checked, with `ErrNotACoreToken`. A second
+implementation refuses that token too — but only after reading a key id out of a
+payload it cannot read, so it refuses as "unknown key" or "signature does not
+verify", which is the misdiagnosis the whole rule exists to prevent. The
+signatures were never the problem: each implementation signed and verified the
+bytes it handled. The key id is a field *inside* the payload, which is why
+naming the format before any key lookup is the only diagnosis that points at the
+format. That is why the gate lives here,
+in the consumer: core cannot see who re-implements it.
 
-**And one sweep, because a test guards only its own tree.** A branch's CI run
-uses that branch's own tree and workflow, so neither test above executes on the
-release lines under `compat/**`, which still carry the deleted implementation in
-full — deliberately, because back-porting the deletion would break the consumer
-a release line exists for. `scripts/check-one-implementation.sh` (the
-`one implementation` workflow) reads every ref CI builds out of the object
-database and names the ones carrying a signer or a verifier. It is **red by
-design** until those refs are retired, which is a visible countdown rather than
-a silence; `docs/cutover.md` holds the precondition and the commands, and the
-retirement is the owner's act at the cutover.
+What the kit proves is **behavioural**: this entry point reaches core's
+accept/refuse decision with core's named reason on every fixture. It does not
+prove identity — an equivalent second implementation would pass the same
+fixtures. Identity is the compile-time assertions (`var _ *corework.Verifier =
+(*Verifier)(nil)`) and the static gate. Two halves, claimed separately.
+
+**And one sweep, because the test above walks from this module's root.** The
+implementation this repository deleted lived at the REPOSITORY root, in package
+`codefly` — exactly where that walk does not reach.
+`scripts/check-one-implementation.sh` (the `one implementation` workflow) sweeps
+every tracked Go file in both modules, and it is a **required pull-request check
+that is green**. There is no compatibility period in it and no countdown: a
+second implementation on a ref this repository builds is a failure to fix.
+
+Refs outside this repository's build that still carry the deleted
+implementation are the cold-cutover runbook's business, and that runbook lives
+outside this repository — this repository holds the rule, not a consumer
+inventory. The script takes refs as arguments for whoever is doing that work
+(`scripts/check-one-implementation.sh origin/some-ref`), which CI does not run.
 
 ## The model: mint once, sealed, verified exactly
 
@@ -138,9 +155,19 @@ client, err := workcontext.NewMintClient(workcontext.MintOptions{
     Audience:           audience,
     ProjectedToken:     workcontext.ProjectedTokenFile("/var/run/secrets/codefly/token"),
     ProjectionAudience: projectionAudience,
-    Authority:          authority, // rechecked before every renewal
+    Authority:          authority, // rechecked before EVERY mint, including the first
 })
 ```
+
+`URL` must be **absolute https** with no userinfo, query or fragment. The
+projected service-account token travels on that request as a bearer credential,
+so plaintext is a disclosure the configuration must not be able to choose; a
+supplied `HTTPClient` whose transport skips certificate verification, or permits
+TLS below 1.2, is refused for the same reason. Redirects are refused on **every**
+client, on a copy of the one you supplied, before any request leaves: Go's own
+client forwards `Authorization` across a redirect to the same host, so a
+redirect that was merely classified afterwards would be classified after the
+projection had already gone somewhere nothing configured.
 
 Then, on every outbound request:
 
@@ -154,11 +181,48 @@ if err := credential.Attach(request); err != nil {
 }
 ```
 
-`Credential` is the only way to reach the credential, so there is no path on
-which a stale one is used. It re-reads the projected token and rechecks the
-boot-read authority before each renewal: a projection rotated under the running
-process is picked up without a restart, and an authority value that has drifted
-refuses the renewal instead of being sealed into a new credential.
+`Credential` mints the first credential and renews one that has reached its
+renewal point, so no caller obtains a credential the client knows to be past
+that point. It is **not** a guarantee about a credential a caller already holds:
+`Credential` is a value, so one read out and kept can be attached after the host
+has moved the state under it. That is what `Refresh` is for, and it is why a
+receiver verifies rather than trusting that a caller re-asked.
+
+Every mint re-reads the projected token and rechecks the pinned authority — the
+first one included, because a client constructed at boot may not be asked for a
+credential until an hour later and the value can have moved in between. A
+drifted value refuses the mint instead of being sealed into a new credential.
+`Authority` is optional; without it there is no pin for the client to check,
+which is why a process that resolved its audience through `ReadAuthority` should
+pass it.
+
+A credential is also checked against **its own window** before it is installed:
+an expired or not-yet-valid response, or one whose whole lifetime sits inside the
+renewal lead, is refused rather than held and counted as a mint that worked. The
+tolerance is `core/workcontext.DefaultSkew`, so the client is not stricter than
+the verifier that will accept the credential.
+
+### When the host refuses the credential you hold
+
+`ErrRevoked` from the far end means the credential was sound when it was minted
+and the state moved under it. Hand the refused credential back:
+
+```go
+credential, err := client.Credential(ctx)
+// ... the call is refused with ErrRevoked ...
+credential, err = client.Refresh(ctx, credential)
+```
+
+`Refresh` is tied to the credential that was refused, not to the clock. If the
+client has already replaced that one, the replacement is returned and nothing is
+minted — so a burst of concurrent refusals on one credential produces exactly
+one replacement mint, and a caller holding a credential two generations old
+cannot roll the client backwards. It rechecks the pin and re-reads the
+projection like any other mint, and a refused replacement leaves the credential
+already held in place rather than clearing it.
+
+`client.Counts()` returns `MintCounts{Mints, Renewals, Refreshes}`. A correct
+execution reports exactly one mint.
 
 `Attach` sets `x-codefly-work-context` and, beside it,
 `x-codefly-installation-id` / `x-codefly-installation-revision`. The gRPC
@@ -271,14 +335,19 @@ check.
 ## Streams
 
 A stream authorized when it opened is not authorized forever. `StreamGuard`
-re-presents the credential on the host's re-check cadence and terminates on
-refusal, rather than draining a snapshot computed under authority that has since
-been replaced — the failure mode it exists to prevent is the silent one, where
+re-presents the credential **before every message** and terminates on refusal,
+rather than draining a snapshot computed under authority that has since been
+replaced — the failure mode it exists to prevent is the silent one, where
 nothing errors and the data keeps arriving.
+
+There was a re-check cadence here, and it was a weakening of the rule rather
+than an implementation of it: revoke the installation one second after a
+successful check and every message for the next interval still left, with expiry
+and source unavailability equally invisible for that whole window. The condition
+is per emission, so the check is per emission.
 
 ```go
 guard, err := workcontext.NewStreamGuard(workcontext.StreamGuardOptions{
-    Interval: hostRecheckCadence,
     Recheck: func(ctx context.Context) error {
         // The same verification an ordinary call performs, against the
         // issuer's state as it is NOW — not the state the stream opened with.
@@ -297,9 +366,18 @@ for message := range messages {
 ```
 
 It guards emission rather than running a timer: an idle stream discloses
-nothing, so there is nothing to refuse. Termination is sticky — a caller that
-loops past the first refusal is not handed a second chance to emit, and the
-authority coming back does not resurrect the stream.
+nothing, so there is nothing to refuse. **Any** error from `Recheck` terminates,
+including one that is neither `ErrRevoked` nor `ErrInvalid` — a live source that
+could not be reached has not said the credential is good, and treating "I could
+not ask" as a pass is how a stream outlives its authority with clean logs.
+Termination is sticky: a caller that loops past the first refusal is not handed
+a second chance to emit, and the authority coming back does not resurrect the
+stream.
+
+What this costs is one live authorization check per message. That is the price
+of the guarantee, and it is why the guard is for streams whose messages carry
+authority rather than for every stream. A stream that cannot pay it does not get
+the guarantee; it does not get a cadence instead.
 
 ## Cache partitions
 
@@ -354,7 +432,20 @@ another partition's key.
   module re-exports; a consumer that was verifying here owes the four sources
   above, and that is the honest price of there being one implementation.
 - **Stop searching bindings.** Resolve the sealed binding identity. A superset
-  of scopes is not a licence to act as a different binding.
+  of scopes is not a licence to act as a different binding. Note the two types:
+  `SealedOperationBinding` is what a capability CARRIES (id, revision,
+  incarnation) and `OperationBinding` is the LIVE state an issuer holds (those
+  three plus the principal it is granted to, the installation it is granted
+  within, and whether it is revoked). They are deliberately different, because a
+  client filling the live type from a token would hand a reader an empty
+  `PrincipalID` that reads as "granted to nobody" rather than as "the wire does
+  not say".
+- **Stop extracting attribution optionally.**
+  `GRPCExecutionContextFromIncomingIfPresent` is **deleted**. A
+  capability-bearing path requires the capability, so a call carrying no
+  carriers at all is refused exactly like one carrying half of them. A consumer
+  that relied on `present=false` now fails to compile rather than silently
+  keeping its old path, which is the point.
 - **Stop authorizing from bare claims.** Read claims off a `*Verified` and
   nowhere else. Claims that were never verified, or were mutated after
   verification, cannot reach an authorization decision.
@@ -383,6 +474,13 @@ not per package — `grpctransport` is carried by the rest, so read the total:
 cd workcontext
 go test ./... -coverprofile=cover.out -covermode=atomic -coverpkg=./...
 go tool cover -func=cover.out | awk '/^total:/ {print $3}'
+```
+
+The `one implementation` sweep is a required check and runs at the repository
+root:
+
+```bash
+./scripts/check-one-implementation.sh
 ```
 
 Until core#691 is released, this module is pinned to a **pseudo-version of

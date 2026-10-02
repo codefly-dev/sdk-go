@@ -98,14 +98,20 @@ func ReadAuthority(ctx context.Context, names ...AuthorityValueName) (*Authority
 		if err != nil || strings.TrimSpace(value) == "" {
 			return nil, fmt.Errorf("%w: %s", ErrAuthorityValueMissing, name)
 		}
-		if pinned, ok := authorityPin(name); ok && pinned != value {
-			return nil, fmt.Errorf("%w: %s", ErrAuthorityValueChanged, name)
-		}
 		values[name] = value
 	}
-	authority := &Authority{readAt: time.Now().UTC(), values: values}
-	pinAuthorityValues(values)
-	return authority, nil
+	// Compare and install together, under one hold of the write lock. Checking
+	// the pins here and writing them afterwards was a race with a wrong
+	// outcome rather than a torn read: two goroutines reading the same name
+	// across a configuration reload both saw no pin, both resolved — to
+	// different values — and both succeeded, the second pin overwriting the
+	// first. Two live *Authority values then disagreed about the audience the
+	// process runs under, and the race detector sees nothing because every
+	// access was correctly locked.
+	if err := pinAuthorityValues(values); err != nil {
+		return nil, err
+	}
+	return &Authority{readAt: time.Now().UTC(), values: values}, nil
 }
 
 // Value answers from the frozen set. It performs no lookup, so it cannot
@@ -132,12 +138,7 @@ func (a *Authority) Names() []AuthorityValueName {
 	for name := range a.values {
 		names = append(names, name)
 	}
-	sort.Slice(names, func(i, j int) bool {
-		if names[i].Name != names[j].Name {
-			return names[i].Name < names[j].Name
-		}
-		return names[i].Key < names[j].Key
-	})
+	sortAuthorityValueNames(names)
 	return names
 }
 
@@ -180,10 +181,40 @@ func authorityPin(name AuthorityValueName) (string, bool) {
 	return value, ok
 }
 
-func pinAuthorityValues(values map[AuthorityValueName]string) {
+// pinAuthorityValues installs the whole proposed set or none of it.
+//
+// It compares every member against what is already pinned before it writes any
+// member, so a set that conflicts in one name leaves the pins exactly as they
+// were. A partial install would be the same defect ReadAuthority refuses for a
+// partial read: a process running under an authority it could only half
+// establish, with the half that moved silently replaced.
+//
+// Conflicts are reported in a stable order, so two processes racing on the same
+// drift name the same value rather than whichever map iteration reached first.
+func pinAuthorityValues(values map[AuthorityValueName]string) error {
+	names := make([]AuthorityValueName, 0, len(values))
+	for name := range values {
+		names = append(names, name)
+	}
+	sortAuthorityValueNames(names)
 	authorityPinsMu.Lock()
 	defer authorityPinsMu.Unlock()
+	for _, name := range names {
+		if pinned, ok := authorityPins[name]; ok && pinned != values[name] {
+			return fmt.Errorf("%w: %s", ErrAuthorityValueChanged, name)
+		}
+	}
 	for name, value := range values {
 		authorityPins[name] = value
 	}
+	return nil
+}
+
+func sortAuthorityValueNames(names []AuthorityValueName) {
+	sort.Slice(names, func(i, j int) bool {
+		if names[i].Name != names[j].Name {
+			return names[i].Name < names[j].Name
+		}
+		return names[i].Key < names[j].Key
+	})
 }

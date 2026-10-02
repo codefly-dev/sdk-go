@@ -90,6 +90,12 @@ func newHopAuthority(t *testing.T) *hopAuthority {
 	require.NoError(t, err)
 	seals := corework.NewMemorySealSource()
 	require.NoError(t, seals.Put(hopPrincipal, hopSeal()))
+	// The delegated actor needs a live epoch of its own. An actor's authority is
+	// narrowed independently of the owner's — the owner here is one service and
+	// the actor another — so core seals the actor's epoch per hop and refuses a
+	// hop that carries none. Recording only the owner's seal left the actor
+	// unrevocable, which is a capability nobody can withdraw.
+	require.NoError(t, seals.PutEpoch(hopActor, 1))
 	return &hopAuthority{
 		minter: &corework.Authority{
 			Issuer: hopIssuer, KeyID: hopKeyID, Key: privateKey,
