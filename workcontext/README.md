@@ -60,9 +60,14 @@ It also pins the aliases by assignment (`var _ *corework.Verifier =
 a local copy with the same fields.
 
 **`TestWorkContextConformance`** runs `core/workcontext/conformance.RunWith`
-against the verification entry point this module exports. The kit drives every
-token form and every negative case through it and fails the build if any
-outcome differs. The decisive fixture is the foreign encoding: a JSON-shaped
+against the verification entry point this module exports. The kit drives **21
+fixtures** through it — every token form (session, operation, delegated,
+delegated-operation, grant) and every negative case, including a stale and a
+*future* installation revision, because the seal is compared for exact equality
+and there is no legitimate way to hold a capability sealed ahead of live — and
+fails the build if any outcome or any named sentinel differs. The single-use
+grant fixture is presented twice against one replay store, so a verifier
+without a working one passes the other twenty and fails exactly there. The decisive fixture is the foreign encoding: a JSON-shaped
 token that must be refused **before** its signature is checked, with
 `ErrNotACoreToken`. A second implementation refuses that token too — as a
 signature failure, which is the misdiagnosis the whole rule exists to prevent.
