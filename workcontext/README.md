@@ -1,13 +1,73 @@
 # `workcontext`
 
-Signing and verification of Codefly Work Contexts, and the client a module
-process uses to obtain the one credential it runs on.
+The client side of the Work Context capability: the mint-once client a module
+process obtains its one credential with, the carriers that take it to a callee,
+and typed access to the one implementation of the capability itself.
 
-It is a separate Go module so a service whose only need is to verify can import
+**This module mints nothing and verifies nothing.** The Work Context is a core
+proto, and `github.com/codefly-dev/core/workcontext` is its only
+implementation — the only code that signs one, the only code that checks a
+signature, the only encoding of either. What this module exports as a
+verification entry point *is* core's, by type alias.
+
+It is a separate Go module so a consumer can import
 `github.com/codefly-dev/sdk-go/workcontext` without inheriting the root SDK's
-transitive tail. Three direct dependencies: `codefly-dev/core` (for the
-`codefly/base/v0` proto types), `testify`, `grpc`. The gRPC carrier lives in
-`workcontext/grpctransport` so a verify-only consumer never compiles grpc.
+transitive tail. Four direct dependencies: `codefly-dev/core` (the
+`codefly/base/v0` proto types **and** `core/workcontext`), `protobuf`,
+`testify`, `grpc`. The gRPC carrier lives in `workcontext/grpctransport` so a
+consumer that never makes a gRPC call does not compile grpc.
+
+Importing `core/workcontext` pulls `protovalidate` → `cel-go` → `antlr`, which
+this module used to avoid. That was a deliberate trade and it was made the
+other way on purpose: the dependency budget existed to keep a verify-only
+consumer's `go.sum` small, and a second implementation of a signed credential
+is not a price worth paying for it.
+
+## One implementation, and the gate that keeps it that way
+
+A wire contract has exactly one implementation, in the repository that owns the
+type. Nothing outside `core/workcontext` may sign, verify or re-encode a Work
+Context.
+
+That is written down because it was broken. A second implementation lived in
+this module and signed a **hand-written JSON payload** while core signed the
+**deterministic protobuf encoding** of the same message. Both forms are
+`<base64url payload>.<base64url signature>` with an Ed25519 signature, so a
+token from either looked well-formed to the other and then failed **signature**
+verification. "Signature does not verify under key X" reads like a rotated key
+or a wrong trust root, so keys are what everyone investigated, while the actual
+problem was two encodings of one message. The host signed with this module's
+format, so a field added only to core's proto was dropped at mint and absent at
+verify on every live path.
+
+A comment would not have stopped that, and did not. Two tests do.
+
+**`TestNoSecondWorkContextImplementation`** parses every non-test file in this
+module and fails if any of them:
+
+- imports `crypto/ed25519` or `crypto/ecdsa` — this module neither signs nor
+  checks a signature, so nothing here needs a signing primitive;
+- imports `encoding/json` outside the one allowlisted file, `mint.go`, which
+  speaks the mint endpoint's HTTP bodies and never encodes a capability;
+- declares a json-tagged struct other than the mint endpoint's request and
+  response — a struct whose tags enumerate a capability's fields by hand is
+  exactly the deleted implementation, and is how a field present in the proto
+  came to be missing on the wire;
+- declares a type or func named `WorkContext*` that is not an alias of core's.
+
+It also pins the aliases by assignment (`var _ *corework.Verifier =
+(*Verifier)(nil)`), which compiles only while `Verifier` is core's type and not
+a local copy with the same fields.
+
+**`TestWorkContextConformance`** runs `core/workcontext/conformance.RunWith`
+against the verification entry point this module exports. The kit drives every
+token form and every negative case through it and fails the build if any
+outcome differs. The decisive fixture is the foreign encoding: a JSON-shaped
+token that must be refused **before** its signature is checked, with
+`ErrNotACoreToken`. A second implementation refuses that token too — as a
+signature failure, which is the misdiagnosis the whole rule exists to prevent.
+That is why the gate lives here, in the consumer: core cannot see who
+re-implements it.
 
 ## The model: mint once, sealed, verified exactly
 
@@ -39,9 +99,9 @@ its own records; a field for any of them would be a field a process could lie
 in. There is no self-reported upstream and no manifest.
 
 **A credential is sealed or it is not a credential.** Every sealed field is
-required. A token missing one does not verify, and `AttachWorkContext` refuses
-to put it on a request at all — there is no request on which an unsealed
-credential is better than no credential.
+required. A capability missing one does not verify, and `Attach` refuses to put
+it on a request at all — there is no request on which an unsealed credential is
+better than no credential.
 
 ## Obtaining the credential
 
@@ -93,71 +153,104 @@ carrier disagrees with the sealed claim rather than preferring either side.
 
 ## Verifying
 
-`VerifyWorkContext` is the only verification entry point, on both the static
-verifier and the JWKS one. It returns `VerifiedWorkContext`, which is the only
-thing that can produce verified claims — so code holding claims cannot be
-holding a hand-built protobuf, a token that was parsed and never verified, or a
-credential nobody held to an installation.
+Verification is core's, and what this module exports is core's:
 
 ```go
-verified, err := verifier.VerifyWorkContext(token, workcontext.WorkContextExpectations{
-    Issuer:   issuer,
-    Audience: myAudience,
-
-    // The delegating principal.
-    OwnerPrincipalID:   ownerID,
-    OwnerPrincipalKind: ownerKind,
-
-    // The calling principal, checked separately. nil accepts direct owner
-    // calls ONLY: a credential carrying an actor chain is refused.
-    Delegation: &workcontext.DelegationExpectations{PrincipalKind: "agent"},
-
-    // Required. A verifier that does not state where it is cannot refuse a
-    // credential from somewhere else.
-    Seal: workcontext.SealExpectations{
-        PrincipalEpoch:       epoch,
-        InstallationID:       installationID,
-        InstallationRevision: revision,
-        BuildIncarnation:     build,
-    },
-
-    // Required for an operation context; nil refuses a credential that seals one.
-    OperationBinding: &workcontext.OperationBindingExpectations{
-        BindingID: bindingID, BindingRevision: bindingRevision, BindingIncarnation: incarnation,
-    },
-})
+// workcontext.Verifier IS github.com/codefly-dev/core/workcontext.Verifier.
+verified, err := verifier.Verify(ctx, token) // *workcontext.Verified, or a refusal
 ```
-
-Scope comes last, from the verified credential:
 
 ```go
-err = workcontext.RequireWorkContextScope(verified, workcontext.WorkContextScopeRequirement{
-    ResourceKind: "evidence", Action: "append", ResourceID: recordID,
-})
+verifier := &workcontext.Verifier{
+    Issuer:    issuer,
+    Audience:  myAudience,
+    Keys:      publicKeysByKeyID,
+
+    // All four are required. A verifier missing one refuses everything rather
+    // than skipping that check, because a verifier that silently skipped the
+    // seal check would make the strongest check in the model the easiest one
+    // to omit.
+    Revisions: revisions, // the issuer's authorization revision
+    Replay:    replay,    // consumes single-use capabilities
+    Grants:    grants,    // resolves an approval a grant capability claims
+    Seals:     seals,     // the live installation, epoch, build and binding state
+}
 ```
+
+**That shape is issuer-shaped, and it is a real cost for a consumer.** A
+component that holds those four locally — the host — supplies them from its own
+state. A verify-only module does not hold them, and must back them with calls
+to whoever does: `RevisionSource`, `GrantSource` and `SealSource` are narrow
+interfaces for exactly that reason, so an implementation can be an RPC.
+`ReplayStore` has to be durable and shared when more than one process verifies,
+or single-use is not single use.
+
+Core ships `FixedRevision`, `MemoryReplayStore` and `MemorySealSource` as real
+implementations for tests and single-process cases. **`FixedRevision` is not a
+production stand-in**: it answers one number forever, so it accepts a
+superseded capability. A consumer that reaches for it in a deployment has
+turned revocation off.
+
+Scope comes last, from the verified capability, through core's scope algebra:
+
+```go
+if !workcontext.ScopeContained(
+    &basev0.WorkScopeV1{ResourceKind: "record", Actions: []string{"append"}, ResourceIds: []string{recordID}},
+    verified.EffectiveScopes(),
+) {
+    return errRefused // the capability is good and does not cover this call
+}
+```
+
+`verified.EffectiveScopes()` is the current actor's hop, or the owner's
+delegated authority when no hop has narrowed it. Asking core rather than
+walking the actor chain is what keeps one answer to "what does this caller
+hold".
 
 ### Exact binding, not scope search
 
-An operation credential names one binding, at one revision, in one incarnation,
-and verification resolves that identity. It never searches for a binding whose
-scopes would admit the call. A credential sealed to binding X presented as
-binding Y is refused **even when Y's scopes are a superset of X's** — scope
-containment is not binding identity, and a revoked narrow credential must not
-validate through a wider binding.
+An operation capability names one binding, at one revision, in one incarnation,
+and verification resolves that identity against the seal source. It never
+searches for a binding whose scopes would admit the call: a capability sealed to
+binding X presented as binding Y is refused **even when Y's scopes are a
+superset of X's**. Scope containment is not binding identity, and a revoked
+narrow capability must not validate through a wider binding.
 
-### The four refusals, and why they are four
+Core's `SealSource` deliberately has no method that lists bindings or finds one
+matching a set of scopes. Making the search unexpressible through the interface
+is what keeps it out: a search is a predicate somebody writes, and a predicate
+one case too generous grants authority nobody reviewed.
+
+### The refusals
+
+They are core's, re-exported here so `errors.Is` answers the same through
+either import path.
 
 | Sentinel | Means | What the caller does |
 | --- | --- | --- |
-| `ErrWorkContextInvalid` | the credential is wrong and cannot become right — bad signature, another installation, another build, another binding id | refuse the call; 401 |
-| `ErrWorkContextSuperseded` | it was sound when minted and has been overtaken — principal epoch, installation revision or binding revision moved | mint again, then retry once |
-| `ErrWorkContextDenied` | the credential is good and its scope does not cover this | refuse the call; 403 |
-| `ErrWorkContextUnavailable` | the key set is unreachable (transport failure, issuer 5xx/429) | retry; 503, never 401 |
+| `ErrInvalid` | wrong and cannot become right — bad signature, another audience, another installation, another build, another binding id, a malformed capability | refuse; 401 |
+| `ErrRevoked` | sound when minted, overtaken since — the principal's epoch, the installation revision, the build incarnation, a binding revision or incarnation, a revoked binding, or the authorization revision moved | mint again, retry once |
+| `ErrUnsealed` | the capability carries no seal, or names no installation | refuse; it is not a credential |
+| `ErrNotACoreToken` | the payload is not this encoding at all — most usefully, a JSON one | refuse, and do **not** report a signature problem |
+| `ErrReplayed` | a single-use capability was presented twice | refuse; this is the resume contract, not a forgery |
 
-`ErrWorkContextSuperseded` is separate from the other three on purpose. Mapped
-onto the retryable-outage path, every installation revision bump becomes a retry
-storm against a credential that is guaranteed to keep failing. Mapped onto a
-plain denial, a condition one mint would fix becomes a user-visible error.
+Two of those deserve a note, because getting either wrong costs an outage.
+
+**`ErrRevoked` is one sentinel for six reasons, deliberately.** In every one of
+them the capability was sound when it was minted and the state moved under it,
+so the holder's response is identical: mint again. A caller needs to tell "mint
+again" from "this caller is not authorized" — those read differently. It does
+not need the six reasons for a re-mint to read differently from each other, and
+a caller branching on them would be writing a policy nobody reviewed. **This
+module no longer defines a `superseded` sentinel of its own**; `ErrRevoked` is
+it.
+
+**`ErrNotACoreToken` does not wrap `ErrInvalid`.** `errors.Is(err,
+ErrInvalid)` is false for it, on purpose, so "this is another format" and "this
+capability is bad" are not reachable from one branch. A gateway should log the
+reason by name: the symptom this prevents is a token that looks valid and fails
+signature, and it cannot recur if the look-alike never reaches the signature
+check.
 
 ## Streams
 
@@ -171,7 +264,9 @@ nothing errors and the data keeps arriving.
 guard, err := workcontext.NewStreamGuard(workcontext.StreamGuardOptions{
     Interval: hostRecheckCadence,
     Recheck: func(ctx context.Context) error {
-        _, err := verifier.VerifyWorkContext(token, expectationsRightNow())
+        // The same verification an ordinary call performs, against the
+        // issuer's state as it is NOW — not the state the stream opened with.
+        _, err := verifier.Verify(ctx, token)
         return err
     },
 })
@@ -200,14 +295,23 @@ hit.
 
 - `ByAuthorizationView()` adds a digest of the effective scopes and the
   authorization revision. Safe only when the result depends on scopes alone.
-- `ByViewer()` adds the effective actor — the last actor, or the owner for a
-  direct call. Use it for anything whose content varies by who is asking: every
-  reader of a wiki holds `documents:[read]`, and a revision is a number they
-  share.
+- `ByViewer()` adds the effective actor — core's `Verified.Actor()`, or the
+  owner for a direct call — with its kind, agent identity and organization. Use
+  it for anything whose content varies by who is asking: every reader of a
+  collection holds the same read scope, and a revision is a number they share.
 
-The key prefix is `wc2:`. It changed with the installation revision going into
-the key, so a shared cache that outlives the deploy — Redis, a warehouse table —
-cannot be reached under the `wc1:` keys it still holds.
+`WriteAround` is true for a capability carrying an approval **grant hop**. That
+hop is the one audited exception to the attenuation rule, so the answer was
+computed under authority nobody else holds: caching it would serve an approved
+call's result to callers who were never approved, and reading from the cache
+would answer the approved call from an unapproved computation.
+
+The key prefix is `wc3:`. It moves whenever the key's composition does — this
+time, because the digest preimage became length-prefixed binary rather than
+JSON — so a shared cache that outlives the deploy (Redis, a warehouse table)
+cannot be reached under the keys it still holds. Those digests are framed field
+by field, so no tenant, installation or scope can contain a delimiter and spell
+another partition's key.
 
 ## What a consumer must stop doing
 
@@ -227,14 +331,21 @@ cannot be reached under the `wc1:` keys it still holds.
   refuses a runtime change to one: the host is the authority, and a value that
   drifts under a running process is an error, not a reload. `WorkspaceValue`
   answers from the pin for a pinned name, so there is no way around it.
-- **Stop verifying without a seal.** `Verify` is gone; `VerifyWorkContext` takes
-  required `SealExpectations`. A verifier that does not state which installation
-  revision and build it is on cannot refuse a credential from an earlier one.
+- **Stop verifying through this module.** `WorkContextSigner`,
+  `WorkContextVerifier`, `WorkContextJWKSVerifier`, `VerifyWorkContext`,
+  `WorkContextExpectations`, `RequireWorkContextScope` and the token type are
+  **deleted**, not deprecated. Use `core/workcontext`'s `Verifier`, which this
+  module re-exports; a consumer that was verifying here owes the four sources
+  above, and that is the honest price of there being one implementation.
 - **Stop searching bindings.** Resolve the sealed binding identity. A superset
   of scopes is not a licence to act as a different binding.
-- **Stop authorizing from bare claims.** `RequireWorkContextScope` takes a
-  `VerifiedWorkContext`. Claims that were never verified, or were mutated after
-  verification, can no longer reach an authorization decision.
+- **Stop authorizing from bare claims.** Read claims off a `*Verified` and
+  nowhere else. Claims that were never verified, or were mutated after
+  verification, cannot reach an authorization decision.
+- **Stop writing a second encoder.** If a claim is missing from the wire, it is
+  added to the proto in core and mints from there. Nothing in this repository
+  assembles, re-encodes or re-signs a capability — the gate above will say so
+  before review does.
 
 ## Running the gates
 
@@ -250,7 +361,7 @@ go mod tidy                       && (cd workcontext && go mod tidy)
 
 Coverage for this module is gated on the **module total** across both its
 packages (≥ 75%, an `awk` line in the `coverage` job of `.github/workflows/go.yml`),
-not per package — `grpctransport` is carried by the verifier, so read the total:
+not per package — `grpctransport` is carried by the rest, so read the total:
 
 ```bash
 cd workcontext
@@ -258,21 +369,36 @@ go test ./... -coverprofile=cover.out -covermode=atomic -coverpkg=./...
 go tool cover -func=cover.out | awk '/^total:/ {print $3}'
 ```
 
-## The wire, and the other implementation
+Until core#691 is released, this module is pinned to a **pseudo-version of
+core's branch** (`go get github.com/codefly-dev/core@<sha>`), not a local
+`replace`: a pseudo-version is reproducible for anyone who checks the branch
+out, and a `replace` to a worktree is not mergeable. Move it to the release when
+there is one.
 
-The signed payload is `base64url(JSON payload) + "." + base64url(Ed25519
-signature)`, with one fixed snake_case field order. Revisions and epochs travel
-as decimal strings so the complete `uint64` domain survives a JavaScript
-verifier. Decoding rejects unknown fields and trailing JSON.
+## The wire
 
-`codefly-dev/core` also has a `workcontext` package. It signs **deterministic
-binary protobuf**, not this JSON, so a token from one fails *signature*
-verification in the other — the error reads like a key-rotation problem and is
-not one. The host (`accounts`, `auth-gateway`) imports this module, so this is
-the production wire; core's package is not on any live path. Anything that adds
-a claim must add it to the payload struct pair in `work_context.go`, because a
-field present only in the proto is dropped at mint and absent at verify.
+`base64url(deterministic protobuf of codefly.base.v0.WorkContextV1) + "." +
+base64url(Ed25519 signature)`, signed by `core/workcontext` and by nothing
+else. The sealed fields are proto fields — `seal.principal_epoch`,
+`seal.installation_id`, `seal.installation_revision`,
+`seal.build_incarnation`, and for an operation capability
+`operation_binding.binding_id` / `.revision` / `.incarnation`, all three
+together or none.
 
-The golden tokens in `work_context_test.go` are shared byte-for-byte with
-sdk-js. A change to the payload changes them, and sdk-js must be regenerated in
-the same round.
+This module reads a capability's seal and lifetime with `proto.Unmarshal` into
+core's generated type and **no signature check**, in one place
+(`carrier.go`, `claimsOf`). That is sound only because nothing trusts the
+result: it fills the pre-check carriers, and it tells the mint client when its
+own freshly issued credential expires. A receiver that preferred a carrier over
+the sealed claim would have made a caller-controlled header into authority,
+which is why the incoming side refuses a disagreement instead.
+
+There are no cross-language golden tokens in this module any more. They went
+with the implementation that produced them: core mints its conformance fixtures
+fresh on every call, because a committed token carries a validity window and
+would eventually fail for the wrong reason.
+
+**Adding a claim**: add the field to the proto in `codefly-dev/core`, mint it
+from `core/workcontext`, and add a fixture for it there. There is nothing to
+change in this module, which is the point — the failure that made this rule was
+a field that existed in the proto and in nobody's encoder.

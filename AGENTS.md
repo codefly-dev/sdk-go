@@ -96,11 +96,13 @@ package line.
 | `tls.go` | workload leaf certificates, reloaded on rotation |
 | `receipts/` | effect receipts: the store, the digest, the replay/conflict interceptor |
 | `receipts/grpctransport/`, `receipts/connecttransport/` | the two transport adapters, split so neither drags the other's dependency in |
-| `workcontext/` | **separate leaf module**: the mint-once client, the seal, signing and verification |
-| `workcontext/grpctransport/` | the gRPC carrier, so verify-only consumers never compile grpc |
+| `workcontext/` | **separate leaf module**: the mint-once client, the carriers, the cache partition, the stream guard, and typed access to core's one implementation |
+| `workcontext/grpctransport/` | the gRPC carrier, so a consumer that makes no gRPC call never compiles grpc |
 
-`workcontext` exists to keep a verify-only consumer's `go.sum` small. Adding a
-dependency to it is a design change, not a detail — see the skill below.
+`workcontext` mints nothing and verifies nothing: `core/workcontext` is the only
+implementation of the capability, and this module re-exports core's verifier by
+type alias. Adding a dependency to it is still a design change, not a detail —
+see the skill below.
 
 ## Rules that bite
 
@@ -114,13 +116,21 @@ dependency to it is a design change, not a detail — see the skill below.
 - **An empty injected value is not a value.** A composition templating an unset
   variable ships the name with an empty string; `RuntimeValue` reports `false`
   so it cannot shadow the configuration a caller falls back to. Keep that.
+- **The Work Context has exactly one implementation and it is not here.**
+  `core/workcontext` signs and verifies; this module is a client of it and
+  re-exports its verifier by alias. Nothing here may sign, check a signature or
+  encode a capability — `TestNoSecondWorkContextImplementation` refuses a
+  `crypto/ed25519` import, an `encoding/json` import outside `mint.go`'s HTTP
+  bodies, a json-tagged struct that is not those bodies, and a `WorkContext*`
+  type of our own; `TestWorkContextConformance` drives core's fixtures through
+  the entry point we export. A claim added to the wire is added to the proto in
+  core, never to an encoder here. This repository once held a second
+  implementation signing hand-written JSON: a token from either format failed
+  *signature* verification in the other, which reads like a rotated key.
 - **A credential is sealed or it is not a credential.** Every field of
-  `workcontext.Seal` is required, at sign time and at verify time, and
-  `AttachWorkContext` refuses an unsealed token. A claim added to the wire must
-  be added to the payload struct pair in `work_context.go`: the signed bytes are
-  hand-written JSON, so a field present only in the proto is dropped at mint and
-  absent at verify. `codefly-dev/core` has a second `workcontext` package that
-  signs protobuf; it is wire-incompatible and no live path uses it.
+  `workcontext.Seal` is required at mint and at verify, an operation binding
+  carries its id, revision and incarnation or none of them, and `Attach`
+  refuses to put an unsealed capability on a request.
 - **An authority-bearing value is read once.** A principal, binding or audience
   comes from `ReadAuthority` at boot. `WorkspaceValue` answers from that pin for
   a pinned name, so a drift is an error rather than a reload — the process has

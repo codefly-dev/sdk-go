@@ -11,7 +11,7 @@ import (
 )
 
 const (
-	workContextGRPCMetadataName = workcontext.WorkContextHeaderName
+	workContextGRPCMetadataName = workcontext.HeaderName
 	// The installation carriers are the same names as on HTTP, because they
 	// are the same fact: gRPC metadata keys and HTTP header names are one
 	// namespace, and spelling them twice is how they drift.
@@ -27,17 +27,17 @@ const (
 // Callers construct it through NewExecutionContext and attach it through
 // WithGRPCExecutionContext. Carrier names remain SDK-owned.
 type ExecutionContext struct {
-	workContext workcontext.WorkContextToken
+	workContext string
 	operationID string
 }
 
 // NewExecutionContext validates and freezes one Work Context/operation pair.
 func NewExecutionContext(
-	workContext workcontext.WorkContextToken,
+	workContext string,
 	operationID string,
 ) (ExecutionContext, error) {
-	if workContext.Encoded() == "" {
-		return ExecutionContext{}, fmt.Errorf("%w: empty Work Context", workcontext.ErrWorkContextInvalid)
+	if workContext == "" {
+		return ExecutionContext{}, fmt.Errorf("%w: empty Work Context", workcontext.ErrInvalid)
 	}
 	if err := validateOperationID(operationID); err != nil {
 		return ExecutionContext{}, err
@@ -48,9 +48,10 @@ func NewExecutionContext(
 	}, nil
 }
 
-// WorkContext returns the opaque signed capability. Trust decisions still
-// require WorkContextVerifier.
-func (execution ExecutionContext) WorkContext() workcontext.WorkContextToken {
+// Capability returns the opaque signed capability. It is a string, and a trust
+// decision still requires core's verifier: nothing a transport hands back has
+// been verified by being transported.
+func (execution ExecutionContext) Capability() string {
 	return execution.workContext
 }
 
@@ -70,16 +71,16 @@ func (execution ExecutionContext) OperationID() string {
 // the two disagreeing refuses rather than choosing between them.
 //
 // A Work Context is bound to one audience. A service calling another service
-// attaches a context the authority exchanged for the callee's audience
-// (ExchangeWorkContextAudience), never the one it received: the callee's
-// audience check rejects a forwarded context. Nothing here reads incoming
-// metadata, so this helper never forwards on its own.
+// attaches a capability the authority minted for the callee's audience, never
+// the one it received: the callee's audience check rejects a forwarded
+// capability. Nothing here reads incoming metadata, so this helper never
+// forwards on its own.
 func WithGRPCExecutionContext(
 	ctx context.Context,
 	execution ExecutionContext,
 ) (context.Context, error) {
 	if ctx == nil {
-		return nil, fmt.Errorf("%w: nil gRPC context", workcontext.ErrWorkContextInvalid)
+		return nil, fmt.Errorf("%w: nil gRPC context", workcontext.ErrInvalid)
 	}
 	validated, err := NewExecutionContext(execution.workContext, execution.operationID)
 	if err != nil {
@@ -99,14 +100,14 @@ func WithGRPCExecutionContext(
 		if len(existing.Get(carrier)) != 0 {
 			return nil, fmt.Errorf(
 				"%w: outgoing gRPC metadata %q is already set",
-				workcontext.ErrWorkContextInvalid, carrier,
+				workcontext.ErrInvalid, carrier,
 			)
 		}
 	}
 	return metadata.AppendToOutgoingContext(
 		ctx,
 		workContextGRPCMetadataName,
-		validated.workContext.Encoded(),
+		validated.workContext,
 		operationIDGRPCMetadataName,
 		validated.operationID,
 		installationIDGRPCMetadataName,
@@ -121,30 +122,27 @@ func WithGRPCExecutionContext(
 // does not verify Work Context trust.
 func GRPCExecutionContextFromIncoming(ctx context.Context) (ExecutionContext, error) {
 	if ctx == nil {
-		return ExecutionContext{}, fmt.Errorf("%w: nil gRPC context", workcontext.ErrWorkContextInvalid)
+		return ExecutionContext{}, fmt.Errorf("%w: nil gRPC context", workcontext.ErrInvalid)
 	}
 	values, ok := metadata.FromIncomingContext(ctx)
 	if !ok {
-		return ExecutionContext{}, fmt.Errorf("%w: missing incoming gRPC metadata", workcontext.ErrWorkContextInvalid)
+		return ExecutionContext{}, fmt.Errorf("%w: missing incoming gRPC metadata", workcontext.ErrInvalid)
 	}
 	workContexts := values.Get(workContextGRPCMetadataName)
 	if len(workContexts) != 1 {
 		return ExecutionContext{}, fmt.Errorf(
 			"%w: incoming gRPC Work Context requires exactly one value",
-			workcontext.ErrWorkContextInvalid,
+			workcontext.ErrInvalid,
 		)
 	}
 	operationIDs := values.Get(operationIDGRPCMetadataName)
 	if len(operationIDs) != 1 {
 		return ExecutionContext{}, fmt.Errorf(
 			"%w: incoming gRPC operation ID requires exactly one value",
-			workcontext.ErrWorkContextInvalid,
+			workcontext.ErrInvalid,
 		)
 	}
-	workContext, err := workcontext.ParseWorkContextToken(workContexts[0])
-	if err != nil {
-		return ExecutionContext{}, err
-	}
+	workContext := workContexts[0]
 	if err := checkIncomingInstallation(values, workContext); err != nil {
 		return ExecutionContext{}, err
 	}
@@ -159,7 +157,7 @@ func GRPCExecutionContextFromIncoming(ctx context.Context) (ExecutionContext, er
 // carriers decoration that a reader would nonetheless log and believe.
 func checkIncomingInstallation(
 	values metadata.MD,
-	token workcontext.WorkContextToken,
+	token string,
 ) error {
 	sealedID, sealedRevision, err := workcontext.SealedInstallation(token)
 	if err != nil {
@@ -176,13 +174,13 @@ func checkIncomingInstallation(
 		if len(presented) != 1 {
 			return fmt.Errorf(
 				"%w: incoming gRPC %s requires exactly one value",
-				workcontext.ErrWorkContextInvalid, carrier.name,
+				workcontext.ErrInvalid, carrier.name,
 			)
 		}
 		if presented[0] != carrier.sealed {
 			return fmt.Errorf(
 				"%w: incoming gRPC %s is %q and the credential seals %q",
-				workcontext.ErrWorkContextInvalid, carrier.name, presented[0], carrier.sealed,
+				workcontext.ErrInvalid, carrier.name, presented[0], carrier.sealed,
 			)
 		}
 	}
@@ -196,7 +194,7 @@ func GRPCExecutionContextFromIncomingIfPresent(
 	ctx context.Context,
 ) (execution ExecutionContext, present bool, err error) {
 	if ctx == nil {
-		return ExecutionContext{}, false, fmt.Errorf("%w: nil gRPC context", workcontext.ErrWorkContextInvalid)
+		return ExecutionContext{}, false, fmt.Errorf("%w: nil gRPC context", workcontext.ErrInvalid)
 	}
 	values, ok := metadata.FromIncomingContext(ctx)
 	if !ok {
@@ -223,15 +221,15 @@ func GRPCExecutionContextFromIncomingIfPresent(
 
 func validateOperationID(operationID string) error {
 	if operationID == "" {
-		return fmt.Errorf("%w: operation ID is required", workcontext.ErrWorkContextInvalid)
+		return fmt.Errorf("%w: operation ID is required", workcontext.ErrInvalid)
 	}
 	if strings.TrimSpace(operationID) != operationID {
-		return fmt.Errorf("%w: operation ID is not canonical", workcontext.ErrWorkContextInvalid)
+		return fmt.Errorf("%w: operation ID is not canonical", workcontext.ErrInvalid)
 	}
 	if len(operationID) > maxOperationIDBytes {
 		return fmt.Errorf(
 			"%w: operation ID exceeds %d bytes",
-			workcontext.ErrWorkContextInvalid,
+			workcontext.ErrInvalid,
 			maxOperationIDBytes,
 		)
 	}
@@ -245,7 +243,7 @@ func validateOperationID(operationID string) error {
 		case '-', '_', '.', ':':
 			continue
 		default:
-			return fmt.Errorf("%w: operation ID contains unsupported characters", workcontext.ErrWorkContextInvalid)
+			return fmt.Errorf("%w: operation ID contains unsupported characters", workcontext.ErrInvalid)
 		}
 	}
 	return nil

@@ -1,6 +1,6 @@
 ---
 name: dual-module-change
-description: Use when a change touches workcontext/ — the leaf module — or both it and the root SDK. Covers the dependency budget that is the module's whole reason to exist, the two go.mod/go.sum pairs that must be tidied independently, the two different coverage gates, and how a consumer resolves a version of a Go submodule. Reach for it when a root-module command reports "ok" but workcontext was never compiled, when `go mod tidy` at the root leaves workcontext dirty, or before adding any import to workcontext.
+description: Use when a change touches workcontext/ — the leaf module — or both it and the root SDK. Covers the dependency budget and the one rule that overrides it (the Work Context has one implementation, core's), the two go.mod/go.sum pairs that must be tidied independently, the two different coverage gates, and how a consumer resolves a version of a Go submodule. Reach for it when a root-module command reports "ok" but workcontext was never compiled, when `go mod tidy` at the root leaves workcontext dirty, or before adding any import to workcontext.
 ---
 
 # Changing the two modules
@@ -14,20 +14,36 @@ That is the contract. Everything below follows from it.
 
 ## The dependency budget
 
-`workcontext/go.mod` currently has three direct requirements — `core` (for the
-`codefly/base/v0` proto types), `testify`, `grpc` — and five indirect ones. The
-root SDK's indirect list is roughly fifty.
+`workcontext/go.mod` has four direct requirements — `core` (the
+`codefly/base/v0` proto types **and** `core/workcontext`), `protobuf`,
+`testify`, `grpc`. The root SDK's indirect list is roughly fifty.
 
-**Adding an import to `workcontext` is a design change.** Before you do:
+The fourth one arrived by decision, not by accident, and the decision is worth
+knowing before you argue from the budget: `core/workcontext` pulls
+`protovalidate` → `cel-go` → `antlr`, which this module used to avoid, and it
+was taken anyway because the Work Context has exactly one implementation and it
+is core's. A smaller `go.sum` is not worth a second implementation of a signed
+credential. See `workcontext/README.md`, "One implementation, and the gate that
+keeps it that way".
 
-- Can the type come from `codefly/base/v0`, which the module already has?
+**Adding a further import to `workcontext` is still a design change.** Before
+you do:
+
+- Can the type come from `codefly/base/v0` or `core/workcontext`, which the
+  module already has?
 - Does it belong in `workcontext/grpctransport/` instead? That subpackage exists
-  so a verify-only consumer never compiles grpc. Anything transport-shaped goes
-  there, not beside the verifier.
+  so a consumer that makes no gRPC call never compiles grpc. Anything
+  transport-shaped goes there.
 - Does it belong in the root SDK, with `workcontext` left alone?
 
 If none of those work, say in the PR body what the consumer's `go.sum` now
 costs. Growth is a decision someone makes, not a side effect of an import line.
+
+**One import is refused outright**: nothing in this module may import
+`crypto/ed25519` or `crypto/ecdsa`, and only `mint.go` may import
+`encoding/json` (the mint endpoint's HTTP bodies).
+`TestNoSecondWorkContextImplementation` fails the build on either, which is the
+gate rather than this paragraph.
 
 The root module must never import `workcontext` to reach shared code. That would
 make the leaf module a dependency of the thing it was split out of, and a

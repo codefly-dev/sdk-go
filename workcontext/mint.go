@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -140,15 +141,18 @@ type MintOptions struct {
 // Credential is the sealed capability a process holds for its execution. It is
 // obtained once by Mint and replaced only by renewal at expiry.
 type Credential struct {
-	token     WorkContextToken
+	token     string
 	seal      Seal
 	binding   *OperationBinding
 	issuedAt  time.Time
 	expiresAt time.Time
 }
 
-// Token returns the opaque signed capability.
-func (c Credential) Token() WorkContextToken { return c.token }
+// Token returns the opaque signed capability, as it travels. It is a string and
+// not a type of this module's: a capability is an opaque string until a Verifier
+// has had it, and a typed wrapper here would offer the reassurance of a check
+// nobody performed.
+func (c Credential) Token() string { return c.token }
 
 // Seal returns the execution this credential is bound to.
 func (c Credential) Seal() Seal { return c.seal }
@@ -172,7 +176,7 @@ func (c Credential) ExpiresAt() time.Time { return c.expiresAt }
 // Attach installs the credential on an outbound HTTP request: the signed
 // capability and, beside it, the installation it is sealed to.
 func (c Credential) Attach(request *http.Request) error {
-	return AttachWorkContext(request, c.token)
+	return Attach(request, c.token)
 }
 
 // MintClient obtains and renews one credential for one execution.
@@ -398,11 +402,8 @@ func (c *MintClient) credentialFrom(payload []byte) (Credential, error) {
 	if err := decoder.Decode(&body); err != nil {
 		return Credential{}, fmt.Errorf("%w: decode mint response: %v", ErrMintRefused, err)
 	}
-	token, err := ParseWorkContextToken(body.WorkContext)
-	if err != nil {
-		return Credential{}, fmt.Errorf("%w: %v", ErrMintRefused, err)
-	}
-	claims, seal, binding, err := readSealedToken(token)
+	token := body.WorkContext
+	claims, seal, binding, err := sealOf(token)
 	if err != nil {
 		return Credential{}, fmt.Errorf("%w: %v", ErrMintRefused, err)
 	}
@@ -412,9 +413,10 @@ func (c *MintClient) credentialFrom(payload []byte) (Credential, error) {
 			ErrMintRefused, body.InstallationID, seal.InstallationID,
 		)
 	}
-	if body.BuildIncarnation != "" && body.BuildIncarnation != seal.BuildIncarnation {
+	if body.BuildIncarnation != "" &&
+		body.BuildIncarnation != strconv.FormatUint(seal.BuildIncarnation, 10) {
 		return Credential{}, fmt.Errorf(
-			"%w: mint reported build incarnation %q and sealed %q",
+			"%w: mint reported build incarnation %q and sealed %d",
 			ErrMintRefused, body.BuildIncarnation, seal.BuildIncarnation,
 		)
 	}

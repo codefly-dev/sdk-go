@@ -13,21 +13,21 @@ import (
 // draining a snapshot computed under authority that no longer exists. Nothing
 // in the stream fails, nothing is logged, and the data keeps arriving.
 func TestStreamTerminatesWhenTheCredentialIsSuperseded(t *testing.T) {
-	clock := workContextTestTime
-	token, _, err := workContextTestSigner(t, clock).StartTask(workContextTestInput())
-	require.NoError(t, err)
-	verifier := workContextTestVerifier(t, clock)
+	clock := testClock
+	a := newAuthority(t)
+	token := a.start(t, mintInput{})
+	verifier := a.verifier(t)
 
-	// The verifier's view of the installation revision, which the host moves
-	// while the stream is open.
-	held := workContextTestExpected()
+	// The host's live view of the installation revision, which it moves while
+	// the stream is open. The re-check is core's verify against it, which is
+	// what an ordinary call performs.
 	rechecks := 0
 	guard, err := NewStreamGuard(StreamGuardOptions{
 		Interval: 30 * time.Second,
 		Now:      func() time.Time { return clock },
-		Recheck: func(context.Context) error {
+		Recheck: func(ctx context.Context) error {
 			rechecks++
-			_, verifyErr := verifier.VerifyWorkContext(token, held)
+			_, verifyErr := verifier.Verify(ctx, token)
 			return verifyErr
 		},
 	})
@@ -50,13 +50,16 @@ func TestStreamTerminatesWhenTheCredentialIsSuperseded(t *testing.T) {
 	require.NoError(t, guard.Terminated())
 
 	// The host moves the installation on. The next message past the cadence is
-	// refused, and the refusal says the credential is superseded rather than
-	// invalid, so the caller knows a fresh credential would be accepted.
-	held.Seal.InstallationRevision++
+	// refused, and the refusal says the state moved under the credential
+	// (ErrRevoked) rather than that the credential is malformed, so the caller
+	// knows a fresh credential would be accepted.
+	moved := testSeal
+	moved.InstallationRevision++
+	require.NoError(t, a.seals.Put(testPrincipal, moved))
 	clock = clock.Add(31 * time.Second)
 	err = guard.BeforeSend(t.Context())
 	require.ErrorIs(t, err, ErrStreamTerminated)
-	require.ErrorIs(t, err, ErrWorkContextSuperseded)
+	require.ErrorIs(t, err, ErrRevoked)
 	require.ErrorIs(t, guard.Terminated(), ErrStreamTerminated)
 }
 
@@ -65,14 +68,14 @@ func TestStreamTerminatesWhenTheCredentialIsSuperseded(t *testing.T) {
 // revision must not resurrect a stream that has already been refused: the
 // messages it would send were computed under authority that was withdrawn.
 func TestATerminatedStreamIsNotResumed(t *testing.T) {
-	clock := workContextTestTime
+	clock := testClock
 	refuse := true
 	guard, err := NewStreamGuard(StreamGuardOptions{
 		Interval: time.Second,
 		Now:      func() time.Time { return clock },
 		Recheck: func(context.Context) error {
 			if refuse {
-				return ErrWorkContextSuperseded
+				return ErrRevoked
 			}
 			return nil
 		},
@@ -92,20 +95,20 @@ func TestATerminatedStreamIsNotResumed(t *testing.T) {
 
 func TestStreamGuardValidatesItsCadence(t *testing.T) {
 	_, err := NewStreamGuard(StreamGuardOptions{Interval: time.Minute})
-	require.ErrorIs(t, err, ErrWorkContextInvalid)
+	require.ErrorIs(t, err, ErrInvalid)
 	require.ErrorContains(t, err, "needs a re-check")
 
 	for name, interval := range map[string]time.Duration{
-		"zero":         0,
-		"sub-second":   500 * time.Millisecond,
-		"beyond a TTL": WorkContextMaxTTL + time.Second,
+		"zero":             0,
+		"sub-second":       500 * time.Millisecond,
+		"beyond the bound": maxStreamRecheckInterval + time.Second,
 	} {
 		t.Run(name, func(t *testing.T) {
 			_, err := NewStreamGuard(StreamGuardOptions{
 				Interval: interval,
 				Recheck:  func(context.Context) error { return nil },
 			})
-			require.ErrorIs(t, err, ErrWorkContextInvalid)
+			require.ErrorIs(t, err, ErrInvalid)
 			require.ErrorContains(t, err, "interval")
 		})
 	}
@@ -115,9 +118,9 @@ func TestStreamGuardValidatesItsCadence(t *testing.T) {
 		Recheck:  func(context.Context) error { return nil },
 	})
 	require.NoError(t, err)
-	require.ErrorIs(t, guard.BeforeSend(nil), ErrWorkContextInvalid)
+	require.ErrorIs(t, guard.BeforeSend(nil), ErrInvalid)
 
 	var absent *StreamGuard
-	require.ErrorIs(t, absent.BeforeSend(context.Background()), ErrWorkContextInvalid)
+	require.ErrorIs(t, absent.BeforeSend(context.Background()), ErrInvalid)
 	require.NoError(t, absent.Terminated())
 }

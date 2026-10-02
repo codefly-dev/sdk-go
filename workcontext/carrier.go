@@ -1,0 +1,221 @@
+package workcontext
+
+import (
+	"encoding/base64"
+	"fmt"
+	"net/http"
+	"strconv"
+	"strings"
+
+	"google.golang.org/protobuf/proto"
+)
+
+const (
+	// HeaderName is the only HTTP carrier for a signed capability. Product code
+	// calls Attach instead of naming it. It is spelled in lower case because
+	// gRPC metadata keys must be, and an HTTP header name is case-insensitive:
+	// one spelling for one fact, rather than two that drift.
+	HeaderName = "x-codefly-work-context"
+
+	// InstallationIDHeaderName and InstallationRevisionHeaderName carry the
+	// installation a capability is sealed to, beside the capability.
+	//
+	// They exist so the far end can refuse a call before it decodes a token,
+	// and for no other reason: the installation that governs a call is the one
+	// inside the signature. A receiver that finds a carrier disagreeing with
+	// the seal refuses the call rather than preferring either, because a header
+	// is caller-controlled and a seal is not.
+	InstallationIDHeaderName       = "x-codefly-installation-id"
+	InstallationRevisionHeaderName = "x-codefly-installation-revision"
+
+	// MaxTokenBytes bounds a capability this module will carry or read.
+	MaxTokenBytes = 32 * 1024
+)
+
+// Attach installs a capability on an outbound request: the signed capability
+// and, beside it, the installation it is sealed to.
+//
+// It refuses an unsealed capability outright. A credential is sealed or it is
+// not a credential, and the moment to find that out is before a call is made on
+// it rather than at the far end, where the refusal names an installation
+// mismatch for a capability that never named an installation at all.
+func Attach(request *http.Request, encoded string) error {
+	if request == nil {
+		return fmt.Errorf("%w: nil request", ErrInvalid)
+	}
+	if request.Header == nil {
+		request.Header = make(http.Header)
+	}
+	id, revision, err := SealedInstallation(encoded)
+	if err != nil {
+		return err
+	}
+	request.Header.Set(HeaderName, encoded)
+	request.Header.Set(InstallationIDHeaderName, id)
+	request.Header.Set(InstallationRevisionHeaderName, revision)
+	return nil
+}
+
+// FromHeaders reads the capability a request carries. It returns the encoded
+// token and nothing else: a token is a string until a Verifier has had it, and
+// an accessor that handed back claims here would be an accessor somebody
+// authorizes from.
+func FromHeaders(headers http.Header) (string, error) {
+	if headers == nil {
+		return "", fmt.Errorf("%w: no headers", ErrInvalid)
+	}
+	values := headers.Values(HeaderName)
+	if len(values) == 0 || strings.TrimSpace(values[0]) == "" {
+		return "", fmt.Errorf("%w: no %s header", ErrInvalid, HeaderName)
+	}
+	if len(values) > 1 {
+		return "", fmt.Errorf("%w: %s appears %d times", ErrInvalid, HeaderName, len(values))
+	}
+	encoded := values[0]
+	if err := checkCarriedInstallation(headers.Get(InstallationIDHeaderName),
+		headers.Get(InstallationRevisionHeaderName), encoded); err != nil {
+		return "", err
+	}
+	return encoded, nil
+}
+
+// checkCarriedInstallation refuses a request whose installation carriers
+// disagree with the seal. Agreement is required when a carrier is present and
+// the carriers are required together: half of a pre-check is a pre-check that
+// passes for the wrong reason.
+func checkCarriedInstallation(id, revision, encoded string) error {
+	if id == "" && revision == "" {
+		return nil
+	}
+	if id == "" || revision == "" {
+		return fmt.Errorf(
+			"%w: %s and %s travel together; one was presented without the other",
+			ErrInvalid, InstallationIDHeaderName, InstallationRevisionHeaderName,
+		)
+	}
+	sealedID, sealedRevision, err := SealedInstallation(encoded)
+	if err != nil {
+		return err
+	}
+	if id != sealedID {
+		return fmt.Errorf(
+			"%w: %s carries %q and the capability is sealed to %q",
+			ErrInvalid, InstallationIDHeaderName, id, sealedID,
+		)
+	}
+	if revision != sealedRevision {
+		return fmt.Errorf(
+			"%w: %s carries %q and the capability is sealed to %q",
+			ErrInvalid, InstallationRevisionHeaderName, revision, sealedRevision,
+		)
+	}
+	return nil
+}
+
+// SealedInstallation reads the installation a capability is sealed to, for a
+// transport that names it beside the capability.
+//
+// It reads the capability's own content without checking the signature, which
+// is sound only because nothing trusts the result: the carrier it fills is a
+// pre-check, and a receiver that preferred it over the sealed claim would have
+// made the carrier into authority. A capability with no readable seal is an
+// error here, so no transport can attach one while leaving the installation
+// blank.
+func SealedInstallation(encoded string) (id string, revision string, err error) {
+	claims, err := claimsOf(encoded)
+	if err != nil {
+		return "", "", err
+	}
+	seal := claims.GetSeal()
+	if seal.GetInstallationId() == "" || seal.GetInstallationRevision() == 0 {
+		return "", "", fmt.Errorf("%w: the capability names no installation", ErrUnsealed)
+	}
+	return seal.GetInstallationId(), strconv.FormatUint(seal.GetInstallationRevision(), 10), nil
+}
+
+// claimsOf decodes a capability's claims WITHOUT establishing any trust in
+// them. Nothing in this module authorizes from what it returns: the two callers
+// are the pre-check carriers above, and the mint client reading the lifetime
+// and the seal of a capability the host just handed it over an authenticated
+// channel.
+//
+// It decodes core's encoding with core's generated type, so there is no second
+// reading of the wire here. The one thing it must not become is a verification:
+// there is no signature check in it and there must never be one, because a
+// second place that checks a signature is a second implementation whatever it
+// is called.
+func claimsOf(encoded string) (*Claims, error) {
+	if strings.TrimSpace(encoded) == "" {
+		return nil, fmt.Errorf("%w: empty capability", ErrInvalid)
+	}
+	if len(encoded) > MaxTokenBytes {
+		return nil, fmt.Errorf("%w: capability exceeds %d bytes", ErrInvalid, MaxTokenBytes)
+	}
+	payload, signature, found := strings.Cut(encoded, ".")
+	if !found || payload == "" || signature == "" {
+		return nil, fmt.Errorf("%w: capability is not <payload>.<signature>", ErrInvalid)
+	}
+	raw, err := base64.RawURLEncoding.DecodeString(payload)
+	if err != nil {
+		return nil, fmt.Errorf("%w: payload is not base64url: %v", ErrInvalid, err)
+	}
+	if _, err := base64.RawURLEncoding.DecodeString(signature); err != nil {
+		return nil, fmt.Errorf("%w: signature is not base64url: %v", ErrInvalid, err)
+	}
+	claims := &Claims{}
+	if err := proto.Unmarshal(raw, claims); err != nil {
+		return nil, fmt.Errorf("%w: payload is not a WorkContextV1: %v", ErrInvalid, err)
+	}
+	return claims, nil
+}
+
+// sealOf reads the claims, the seal and the operation binding of a capability
+// the host has just issued over an authenticated channel.
+//
+// It requires a whole seal: every field, and for an operation binding all three
+// of its fields or none of them. A partial seal is refused here and not carried,
+// because a capability sealed to an installation with no revision, or to a
+// binding id at no revision, names an authority nobody approved — and the field
+// that is missing is the one an attacker would choose to leave out.
+func sealOf(encoded string) (*Claims, Seal, *OperationBinding, error) {
+	claims, err := claimsOf(encoded)
+	if err != nil {
+		return nil, Seal{}, nil, err
+	}
+	sealed := claims.GetSeal()
+	if sealed == nil {
+		return nil, Seal{}, nil, fmt.Errorf("%w: capability carries no seal", ErrUnsealed)
+	}
+	seal := Seal{
+		PrincipalEpoch:       sealed.GetPrincipalEpoch(),
+		InstallationID:       sealed.GetInstallationId(),
+		InstallationRevision: sealed.GetInstallationRevision(),
+		BuildIncarnation:     sealed.GetBuildIncarnation(),
+	}
+	switch {
+	case seal.PrincipalEpoch == 0:
+		return nil, Seal{}, nil, fmt.Errorf("%w: the seal names no principal epoch", ErrUnsealed)
+	case seal.InstallationID == "":
+		return nil, Seal{}, nil, fmt.Errorf("%w: the seal names no installation", ErrUnsealed)
+	case seal.InstallationRevision == 0:
+		return nil, Seal{}, nil, fmt.Errorf("%w: the seal names no installation revision", ErrUnsealed)
+	case seal.BuildIncarnation == 0:
+		return nil, Seal{}, nil, fmt.Errorf("%w: the seal names no build incarnation", ErrUnsealed)
+	}
+	bound := claims.GetOperationBinding()
+	if bound == nil {
+		return claims, seal, nil, nil
+	}
+	binding := &OperationBinding{
+		ID:          bound.GetBindingId(),
+		Revision:    bound.GetRevision(),
+		Incarnation: bound.GetIncarnation(),
+	}
+	if binding.ID == "" || binding.Revision == 0 || binding.Incarnation == 0 {
+		return nil, Seal{}, nil, fmt.Errorf(
+			"%w: an operation binding carries its id, revision and incarnation or none of them",
+			ErrUnsealed,
+		)
+	}
+	return claims, seal, binding, nil
+}

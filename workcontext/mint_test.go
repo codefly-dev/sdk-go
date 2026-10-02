@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"slices"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -20,15 +21,18 @@ import (
 // count is the acceptance criterion: a process that runs for an hour must not
 // have announced itself every fifteen seconds.
 type mintHost struct {
-	t          *testing.T
-	server     *httptest.Server
-	requests   atomic.Uint64
-	presented  atomic.Value // the last projected token the host was shown
-	now        func() time.Time
-	lifetime   time.Duration
-	audience   string
-	seal       Seal
-	echoWrong  bool
+	t         *testing.T
+	server    *httptest.Server
+	requests  atomic.Uint64
+	presented atomic.Value // the last projected token the host was shown
+	now       func() time.Time
+	lifetime  time.Duration
+	audience  string
+	authority *authority
+	echoWrong bool
+	// binding, when set, makes the host mint an operation capability sealed to
+	// that binding.
+	binding    string
 	refuseWith int
 	// mintAudience, when set, makes the host answer with a credential for an
 	// audience other than the one asked for.
@@ -39,7 +43,7 @@ func newMintHost(t *testing.T, now func() time.Time) *mintHost {
 	t.Helper()
 	host := &mintHost{
 		t: t, now: now, lifetime: 15 * time.Minute,
-		audience: "warden.evidence", seal: workContextTestSeal(),
+		audience: testAudience, authority: newAuthority(t),
 	}
 	host.server = httptest.NewServer(http.HandlerFunc(host.handle))
 	t.Cleanup(host.server.Close)
@@ -58,16 +62,15 @@ func (h *mintHost) handle(writer http.ResponseWriter, request *http.Request) {
 		writer.WriteHeader(http.StatusBadRequest)
 		return
 	}
-	input := workContextTestInput()
-	input.Audience = body.Audience
+	audience := body.Audience
 	if h.mintAudience != "" {
-		input.Audience = h.mintAudience
+		audience = h.mintAudience
 	}
-	input.Seal = h.seal
-	input.TTL = h.lifetime
-	token, _, err := workContextTestSigner(h.t, h.now()).StartTask(input)
-	require.NoError(h.t, err)
-	response := mintResponse{WorkContext: token.Encoded(), InstallationID: h.seal.InstallationID}
+	// The host mints with core's Authority, because that is what the host does.
+	// A test endpoint that assembled a token itself would be a second
+	// implementation wearing a test's clothes.
+	token := h.authority.startAt(h.t, h.now(), mintInput{audience: audience, binding: h.binding}, h.lifetime)
+	response := mintResponse{WorkContext: token, InstallationID: testInstallation}
 	if h.echoWrong {
 		response.InstallationID = "installation-the-host-did-not-seal"
 	}
@@ -87,7 +90,7 @@ func newTestMintClient(t *testing.T, host *mintHost, path string, now func() tim
 	t.Helper()
 	settings := MintOptions{
 		URL:                host.server.URL,
-		Audience:           "warden.evidence",
+		Audience:           testAudience,
 		ProjectedToken:     ProjectedTokenFile(path),
 		ProjectionAudience: "accounts",
 		Now:                now,
@@ -106,23 +109,23 @@ func newTestMintClient(t *testing.T, host *mintHost, path string, now func() tim
 // minted once per surface every fifteen seconds — 240 times an hour, each one
 // an audit event recording that nothing had changed.
 func TestMintOncePerExecutionAndRenewOnlyAtExpiry(t *testing.T) {
-	clock := workContextTestTime
+	clock := testClock
 	now := func() time.Time { return clock }
 	host := newMintHost(t, now)
 	client := newTestMintClient(t, host, projectedFile(t, "projected-token-1"), now)
 
 	first, err := client.Credential(t.Context())
 	require.NoError(t, err)
-	require.Equal(t, workContextTestSeal(), first.Seal())
+	require.Equal(t, testSeal, first.Seal())
 	require.EqualValues(t, 1, host.requests.Load())
 
 	// Every call for the next twelve minutes is answered from the credential
 	// already held. Nothing reaches the host.
 	for minute := range 12 {
-		clock = workContextTestTime.Add(time.Duration(minute) * time.Minute)
+		clock = testClock.Add(time.Duration(minute) * time.Minute)
 		again, err := client.Credential(t.Context())
 		require.NoError(t, err)
-		require.Equal(t, first.Token().Encoded(), again.Token().Encoded())
+		require.Equal(t, first.Token(), again.Token())
 	}
 	require.EqualValues(t, 1, host.requests.Load(), "holding a credential must not talk to the host")
 
@@ -135,7 +138,7 @@ func TestMintOncePerExecutionAndRenewOnlyAtExpiry(t *testing.T) {
 	// this replaces made 240 in the same hour, one per surface every fifteen
 	// seconds, each recording that nothing had changed.
 	for minute := 12; minute <= 60; minute++ {
-		clock = workContextTestTime.Add(time.Duration(minute) * time.Minute)
+		clock = testClock.Add(time.Duration(minute) * time.Minute)
 		_, err := client.Credential(t.Context())
 		require.NoError(t, err)
 	}
@@ -150,7 +153,7 @@ func TestMintOncePerExecutionAndRenewOnlyAtExpiry(t *testing.T) {
 // renewal is what makes the rotation a non-event; caching it would make the
 // process fail at its first renewal and need a restart to recover.
 func TestRenewalRereadsTheRotatedProjectedToken(t *testing.T) {
-	clock := workContextTestTime
+	clock := testClock
 	now := func() time.Time { return clock }
 	host := newMintHost(t, now)
 	path := projectedFile(t, "projected-token-before-rotation")
@@ -161,7 +164,7 @@ func TestRenewalRereadsTheRotatedProjectedToken(t *testing.T) {
 	require.Equal(t, "Bearer projected-token-before-rotation", host.presented.Load())
 
 	require.NoError(t, os.WriteFile(path, []byte("projected-token-after-rotation"), 0o600))
-	clock = workContextTestTime.Add(14 * time.Minute)
+	clock = testClock.Add(14 * time.Minute)
 	_, err = client.Credential(t.Context())
 	require.NoError(t, err)
 	require.Equal(t, "Bearer projected-token-after-rotation", host.presented.Load(),
@@ -177,7 +180,7 @@ func TestRenewalRereadsTheRotatedProjectedToken(t *testing.T) {
 // process would mint a new credential sealed to a value the host never
 // approved for it, and nothing downstream could tell.
 func TestRenewalRefusesWhenTheBootReadAuthorityHasDrifted(t *testing.T) {
-	clock := workContextTestTime
+	clock := testClock
 	now := func() time.Time { return clock }
 	host := newMintHost(t, now)
 	drifted := errors.New("audience changed under a running process")
@@ -191,7 +194,7 @@ func TestRenewalRefusesWhenTheBootReadAuthorityHasDrifted(t *testing.T) {
 	require.EqualValues(t, 0, pin.checks.Load(), "the first mint is not a renewal")
 
 	pin.err = drifted
-	clock = workContextTestTime.Add(14 * time.Minute)
+	clock = testClock.Add(14 * time.Minute)
 	_, err = client.Credential(t.Context())
 	require.ErrorIs(t, err, ErrMintRefused)
 	require.ErrorContains(t, err, "audience changed")
@@ -214,7 +217,7 @@ func (s *stubAuthority) Recheck(context.Context) error {
 // signed one, and a client that preferred the echo would hold a credential
 // whose installation it had been told wrongly.
 func TestMintRefusesAnEchoThatDisagreesWithTheSignature(t *testing.T) {
-	now := func() time.Time { return workContextTestTime }
+	now := func() time.Time { return testClock }
 	host := newMintHost(t, now)
 	host.echoWrong = true
 	client := newTestMintClient(t, host, projectedFile(t, "projected"), now)
@@ -229,9 +232,9 @@ func TestMintRefusesAnEchoThatDisagreesWithTheSignature(t *testing.T) {
 // error in the process that is wrong rather than an authorization error in the
 // service it calls.
 func TestMintRefusesACredentialForAnotherAudience(t *testing.T) {
-	now := func() time.Time { return workContextTestTime }
+	now := func() time.Time { return testClock }
 	host := newMintHost(t, now)
-	host.mintAudience = "warden.other"
+	host.mintAudience = "codefly.other-audience"
 	client := newTestMintClient(t, host, projectedFile(t, "projected"), now)
 
 	_, err := client.Credential(t.Context())
@@ -243,7 +246,7 @@ func TestMintRefusesACredentialForAnotherAudience(t *testing.T) {
 // client that confused them would either spin against a permanent refusal or
 // give up on a transient one.
 func TestMintSeparatesARefusalFromAnOutage(t *testing.T) {
-	now := func() time.Time { return workContextTestTime }
+	now := func() time.Time { return testClock }
 	for status, sentinel := range map[int]error{
 		http.StatusForbidden:           ErrMintRefused,
 		http.StatusUnauthorized:        ErrMintRefused,
@@ -287,11 +290,11 @@ func TestProjectedTokenFileRefusesWhatIsNotAToken(t *testing.T) {
 // Principal, installation and build are the host's to establish; a field for
 // any of them would be a field a process could lie in.
 func TestMintRequestSelfReportsNoIdentity(t *testing.T) {
-	encoded, err := json.Marshal(mintRequest{Audience: "warden.evidence", ProjectionAudience: "accounts"})
+	encoded, err := json.Marshal(mintRequest{Audience: testAudience, ProjectionAudience: "accounts"})
 	require.NoError(t, err)
 	var fields map[string]any
 	require.NoError(t, json.Unmarshal(encoded, &fields))
-	require.Equal(t, []string{"audience", "projection_audience"}, sortedUnique(keysOf(fields)))
+	require.Equal(t, []string{"audience", "projection_audience"}, keysOf(fields))
 }
 
 func keysOf(fields map[string]any) []string {
@@ -299,14 +302,15 @@ func keysOf(fields map[string]any) []string {
 	for name := range fields {
 		names = append(names, name)
 	}
-	return names
+	slices.Sort(names)
+	return slices.Compact(names)
 }
 
 // A credential request that was answered by an address nothing configured has
 // already left with the projected token attached. Retrying would send it again,
 // so a redirect is a permanent refusal and the process must not serve.
 func TestMintRefusesARedirectedRequest(t *testing.T) {
-	now := func() time.Time { return workContextTestTime }
+	now := func() time.Time { return testClock }
 	elsewhere := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
 		writer.WriteHeader(http.StatusOK)
 	}))
@@ -318,7 +322,7 @@ func TestMintRefusesARedirectedRequest(t *testing.T) {
 
 	client, err := NewMintClient(MintOptions{
 		URL:                redirector.URL,
-		Audience:           "warden.evidence",
+		Audience:           testAudience,
 		ProjectedToken:     ProjectedTokenFile(projectedFile(t, "projected")),
 		ProjectionAudience: "accounts",
 		Now:                now,
@@ -333,7 +337,7 @@ func TestMintRefusesARedirectedRequest(t *testing.T) {
 func TestNewMintClientValidatesItsConfiguration(t *testing.T) {
 	valid := MintOptions{
 		URL:                "https://accounts.internal/platform/_mint",
-		Audience:           "warden.evidence",
+		Audience:           testAudience,
 		ProjectedToken:     ProjectedTokenFile("/var/run/secrets/token"),
 		ProjectionAudience: "accounts",
 	}
@@ -358,4 +362,35 @@ func TestNewMintClientValidatesItsConfiguration(t *testing.T) {
 			require.ErrorIs(t, err, ErrMintRefused)
 		})
 	}
+}
+
+// The credential a process holds, and what it puts on a call. The sealed
+// values come off the signature rather than the response body, so what a
+// caller reads here is what a verifier will compare against.
+func TestCredentialSurfaceComesFromTheSignedCapability(t *testing.T) {
+	now := func() time.Time { return testClock }
+	host := newMintHost(t, now)
+	host.binding = testBinding
+	client := newTestMintClient(t, host, projectedFile(t, "projected"), now)
+
+	credential, err := client.Credential(t.Context())
+	require.NoError(t, err)
+	require.Equal(t, testSeal, credential.Seal())
+	require.Equal(t,
+		&OperationBinding{ID: testBinding, Revision: 2, Incarnation: 1},
+		credential.OperationBinding(),
+	)
+	require.Equal(t, testClock, credential.IssuedAt())
+	require.Equal(t, testClock.Add(15*time.Minute), credential.ExpiresAt())
+
+	// OperationBinding hands back a copy: a caller that mutated it must not be
+	// able to change what the credential reports it is bound to.
+	mutated := credential.OperationBinding()
+	mutated.ID = "binding-the-caller-preferred"
+	require.Equal(t, testBinding, credential.OperationBinding().ID)
+
+	request := httptest.NewRequest(http.MethodPost, "/records", nil)
+	require.NoError(t, credential.Attach(request))
+	require.Equal(t, credential.Token(), request.Header.Get(HeaderName))
+	require.Equal(t, testInstallation, request.Header.Get(InstallationIDHeaderName))
 }
