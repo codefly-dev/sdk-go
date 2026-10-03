@@ -532,3 +532,41 @@ func TestACredentialAtExactlyTheCeilingIsAccepted(t *testing.T) {
 		"a host minting at exactly the ceiling must not be refused by this client's default")
 	require.Equal(t, testClock.Add(corework.MaxTTLCeiling), credential.ExpiresAt())
 }
+
+// Core 4cb260d3 made the sealed execution OPTIONAL, because a principal that
+// bears no approved build — a person at a terminal — must not have one
+// invented for it. That turns the mint response's echo cross-check into a
+// PRESENCE question, which it was not before.
+//
+// GetBuildIncarnation() answers 0 both for "absent" and for a value core says
+// is never legitimate (an incarnation starts at 1), so comparing an echo
+// against that zero accepted a host echoing "0" against a capability that
+// seals no execution at all — a host asserting an execution the issuer does
+// not hold.
+func TestAnEchoedIncarnationIsRefusedWhenTheCapabilitySealsNoExecution(t *testing.T) {
+	clock := &movableClock{at: testClock}
+	host := newMintHost(t, clock.now)
+	// A capability for a principal the issuer holds no approved build for,
+	// which is the human-session shape.
+	host.noApprovedBuild = true
+	// And a host that echoes an incarnation anyway.
+	host.echoIncarnation = "0"
+	client := newTestMintClient(t, host, projectedFile(t, "projected"), clock.now)
+
+	_, err := client.Credential(context.Background())
+	require.ErrorIs(t, err, ErrMintRefused)
+	require.ErrorContains(t, err, "seals no execution at all")
+}
+
+// And a capability that DOES seal an execution still cross-checks by value, so
+// the presence branch did not replace the comparison.
+func TestAnEchoedIncarnationStillCrossChecksByValue(t *testing.T) {
+	clock := &movableClock{at: testClock}
+	host := newMintHost(t, clock.now)
+	host.echoIncarnation = "99"
+	client := newTestMintClient(t, host, projectedFile(t, "projected"), clock.now)
+
+	_, err := client.Credential(context.Background())
+	require.ErrorIs(t, err, ErrMintRefused)
+	require.ErrorContains(t, err, "sealed 11")
+}

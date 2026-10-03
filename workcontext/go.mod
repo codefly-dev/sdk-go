@@ -3,7 +3,7 @@ module github.com/codefly-dev/sdk-go/workcontext
 go 1.27.0
 
 require (
-	github.com/codefly-dev/core v0.7.2-0.20261003145432-67ee72204f68
+	github.com/codefly-dev/core v0.7.2-0.20261003160146-4cb260d3d726
 	github.com/stretchr/testify v1.12.1
 	google.golang.org/grpc v1.83.2
 	google.golang.org/protobuf v1.36.12

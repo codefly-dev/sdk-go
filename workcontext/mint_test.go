@@ -64,6 +64,15 @@ type mintHost struct {
 	// before runs at the top of every request, so a test can hold one open.
 	before func()
 
+	// noApprovedBuild mints for a principal the issuer holds no approved build
+	// for, which is the human-session shape: the capability seals no execution.
+	noApprovedBuild bool
+
+	// echoIncarnation overrides the build incarnation the host ECHOES in its
+	// JSON body, which is only for catching a host and a signature that
+	// disagree.
+	echoIncarnation string
+
 	// replay makes the host IDEMPOTENT: it answers every request with this
 	// exact token. A real mint endpoint that deduplicates by projected token
 	// does the same thing.
@@ -129,7 +138,9 @@ func (h *mintHost) handle(writer http.ResponseWriter, request *http.Request) {
 	// The host mints with core's Authority, because that is what the host does.
 	// A test endpoint that assembled a token itself would be a second
 	// implementation wearing a test's clothes.
-	token, err := h.authority.tryStartAt(mintedAt, mintInput{audience: audience, binding: h.binding}, lifetime)
+	token, err := h.authority.tryStartAt(mintedAt, mintInput{
+		audience: audience, binding: h.binding, humanSession: h.noApprovedBuild,
+	}, lifetime)
 	if err != nil {
 		// Recorded and answered with a 503, never asserted here: this is the
 		// server's goroutine.
@@ -141,6 +152,9 @@ func (h *mintHost) handle(writer http.ResponseWriter, request *http.Request) {
 		token = h.replay
 	}
 	response := mintResponse{WorkContext: token, InstallationID: testInstallation}
+	if h.echoIncarnation != "" {
+		response.BuildIncarnation = h.echoIncarnation
+	}
 	if h.echoWrong {
 		response.InstallationID = "installation-the-host-did-not-seal"
 	}

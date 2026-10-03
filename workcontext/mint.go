@@ -1190,12 +1190,31 @@ func (c *MintClient) credentialFrom(payload []byte, audience string) (Credential
 			ErrMintRefused, body.InstallationID, seal.GetInstallationId(),
 		)
 	}
-	if body.BuildIncarnation != "" &&
-		body.BuildIncarnation != strconv.FormatUint(seal.GetBuildIncarnation(), 10) {
-		return Credential{}, fmt.Errorf(
-			"%w: mint reported build incarnation %q and sealed %d",
-			ErrMintRefused, body.BuildIncarnation, seal.GetBuildIncarnation(),
-		)
+	if body.BuildIncarnation != "" {
+		// PRESENCE, not value. The sealed execution became OPTIONAL in core
+		// 4cb260d3, because a principal that bears no approved build — a
+		// person at a terminal — must not have one invented for it. So a
+		// capability can legitimately carry no incarnation, and
+		// GetBuildIncarnation() answers 0 for both "absent" and a value core
+		// says is never legitimate (an incarnation starts at 1).
+		//
+		// Comparing the echo against that zero would have accepted a host
+		// echoing "0" against a capability bearing no execution at all, which
+		// is a host asserting an execution the issuer does not hold. The echo
+		// is only for catching a host and a signature that disagree, but
+		// "disagree" has to include "one of them says nothing".
+		if seal.BuildIncarnation == nil {
+			return Credential{}, fmt.Errorf(
+				"%w: mint reported build incarnation %q and the capability seals no execution at all",
+				ErrMintRefused, body.BuildIncarnation,
+			)
+		}
+		if body.BuildIncarnation != strconv.FormatUint(seal.GetBuildIncarnation(), 10) {
+			return Credential{}, fmt.Errorf(
+				"%w: mint reported build incarnation %q and sealed %d",
+				ErrMintRefused, body.BuildIncarnation, seal.GetBuildIncarnation(),
+			)
+		}
 	}
 	// The audience the host signed must be the audience read from the pin.
 	// This is the check an optional pin beside a free-string Audience could not

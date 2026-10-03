@@ -777,8 +777,8 @@ root:
 
 ### This module merges on a pseudo-version, deliberately
 
-`workcontext/go.mod` pins **`v0.7.2-0.20261003145432-67ee72204f68`** — core at
-`67ee7220` — and not a release tag, because there is no tag to move to and will
+`workcontext/go.mod` pins **`v0.7.2-0.20261003160146-4cb260d3d726`** — core at
+`4cb260d3` — and not a release tag, because there is no tag to move to and will
 not be one before this merges. Core's `version/info.codefly.yaml` already says
 `0.8.0`, but its `version-tag.yml` cuts the tag from the **merge commit** of
 core#692 and core never tags by hand; core#692 is still open on two owner
@@ -828,11 +828,30 @@ re-pinning is bookkeeping, not an upgrade.
 
 `base64url(deterministic protobuf of codefly.base.v0.WorkContextV1) + "." +
 base64url(Ed25519 signature)`, signed by `core/workcontext` and by nothing
-else. The sealed fields are proto fields — `seal.principal_epoch`,
-`seal.installation_id`, `seal.installation_revision`,
-`seal.build_incarnation`, and for an operation capability
-`operation_binding.binding_id` / `.revision` / `.incarnation`, all three
-together or none.
+else. The sealed fields are proto fields — `seal.installation_id`,
+`seal.installation_revision`, and `seal.image_digest` /
+`seal.build_incarnation` as a **pair or neither**; plus, for an operation
+capability, `operation_binding.binding_id` / `.revision` / `.incarnation`, all
+three together or none. Each actor hop carries its own epoch.
+
+**The execution pair is optional, and absent is a real answer.** Core
+`4cb260d3` moved the approved build out of the live `Seal` and into
+`SealSource.ApprovedBuild`, keyed on the **principal**: reading it from the
+owner's installation record made a derived capability's execution describe the
+owner's workload however many hops had been added, and a hop's principal does
+not hold the owner's installation at all. So every hop now attests its own, and
+a principal that bears no execution — a person at a terminal — seals none
+rather than having a value invented for it.
+
+**If you read the execution off `Credential.Seal()`, mind the zero.**
+`GetImageDigest()` answers `""` and `GetBuildIncarnation()` answers `0` both for
+"this principal bears no execution" and for a value core says is never
+legitimate, since an incarnation starts at 1. Treating zero as "missing or
+invalid" is a bug: it is an answer. This module hit it in its own mint-response
+cross-check, where a host echoing `"0"` matched a capability that sealed no
+execution at all — a host asserting an execution the issuer does not hold,
+passing the check whose job is to catch exactly that. Ask about presence before
+comparing.
 
 This module no longer reads a capability itself. `corework.Inspect` runs the
 size bound, the envelope, `CheckEncoding`, `proto.Unmarshal`, **protovalidate**

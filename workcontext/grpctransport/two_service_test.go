@@ -90,6 +90,11 @@ func newHopAuthority(t *testing.T) *hopAuthority {
 	require.NoError(t, err)
 	seals := corework.NewMemorySealSource()
 	require.NoError(t, seals.Put(hopPrincipal, hopSeal()))
+	// Per PRINCIPAL, and for BOTH of them: the actor exercises the derived
+	// capability, so the actor's own approved build is what a hop attests
+	// against. Recording only the owner's is the defect this move closes.
+	require.NoError(t, seals.PutApprovedBuild(hopPrincipal, hopImageDigest, hopApprovedBuildIncarnation))
+	require.NoError(t, seals.PutApprovedBuild(hopActor, hopImageDigest, hopApprovedBuildIncarnation))
 	// The delegated actor needs a live epoch of its own. An actor's authority is
 	// narrowed independently of the owner's — the owner here is one service and
 	// the actor another — so core seals the actor's epoch per hop and refuses a
@@ -194,6 +199,15 @@ func (s *serviceA) call(ctx context.Context, request *healthv1.HealthCheckReques
 			})
 		}
 		exchanged, _, err := s.authority.minter.Child(ctx, verified, corework.ChildInput{
+			// THE HOP ATTESTS ITS OWN EXECUTION. The derived capability is
+			// exercised by hopActor, so what the issuer approves for hopActor
+			// is what this must match — previously the execution came off the
+			// OWNER's installation seal, which described the wrong workload
+			// the moment a delegation existed.
+			Execution: corework.Execution{
+				ImageDigest:      hopImageDigest,
+				BuildIncarnation: hopApprovedBuildIncarnation,
+			},
 			PrincipalID:   hopActor,
 			PrincipalKind: "service",
 			DelegationID:  "delegation-hop",
@@ -275,19 +289,24 @@ func newHopTopology(t *testing.T) *hopTopology {
 	return topology
 }
 
-// hopSeal is the execution both services in the hop run as: one installation,
-// one revision, one build. A hop crosses an audience boundary inside one
-// execution, so the seal is the same on both sides of it.
+// hopSeal is the INSTALLATION both services in the hop hold authority through:
+// one installation, one revision. A hop crosses an audience boundary inside
+// one execution, so the seal is the same on both sides of it.
+//
+// The execution is no longer here. It is recorded per principal through
+// PutApprovedBuild and attested per hop through ChildInput.Execution, which is
+// the point of the move: a hop's principal does not hold the owner's
+// installation, so an execution read from the owner's seal described the wrong
+// workload the moment a delegation was added.
 func hopSeal() workcontext.Seal {
 	return workcontext.Seal{
 		InstallationID:       "installation-hop",
 		InstallationRevision: 12,
-		BuildIncarnation:     9,
-		// The approved build for this installation, required now: a seal that
-		// names none names no execution to match a caller against.
-		ImageDigest: hopImageDigest,
 	}
 }
+
+// hopApprovedBuild is the build the issuer approves for the hop's principals.
+const hopApprovedBuildIncarnation = 9
 
 const hopImageDigest = "sha256:2222222222222222222222222222222222222222222222222222222222222222"
 
@@ -296,11 +315,12 @@ const hopImageDigest = "sha256:2222222222222222222222222222222222222222222222222
 func (h *hopTopology) startTask(t *testing.T) string {
 	t.Helper()
 	token, _, err := h.authority.minter.Start(context.Background(), corework.StartInput{
-		// What this caller attests it is running, matched against the build
-		// the seal names as approved.
+		// What this caller attests it is running, matched against the build the
+		// ISSUER approves for this principal — read through ApprovedBuild now,
+		// not off the installation seal.
 		Execution: corework.Execution{
 			ImageDigest:      hopImageDigest,
-			BuildIncarnation: hopSeal().BuildIncarnation,
+			BuildIncarnation: hopApprovedBuildIncarnation,
 		},
 		Audience: audienceA, TenantID: hopTenant, OwnerPrincipalID: hopPrincipal,
 		OwnerPrincipalKind: "service", TaskID: "task-hop",
@@ -422,6 +442,11 @@ func TestServiceHopExchangeMayAttenuateButNeverWiden(t *testing.T) {
 func mustReissueForB(t *testing.T, authority *hopAuthority, parent *workcontext.Verified) string {
 	t.Helper()
 	exchanged, _, err := authority.minter.Child(context.Background(), parent, corework.ChildInput{
+		// The actor's own approved build, attested at the hop.
+		Execution: corework.Execution{
+			ImageDigest:      hopImageDigest,
+			BuildIncarnation: hopApprovedBuildIncarnation,
+		},
 		PrincipalID:   hopActor,
 		PrincipalKind: "service",
 		DelegationID:  "delegation-hop",

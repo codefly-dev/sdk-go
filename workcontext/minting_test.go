@@ -20,15 +20,22 @@ import (
 // testSeal is the live sealed state the authority holds.
 var (
 	testClock = time.Date(2026, 10, 2, 12, 0, 0, 0, time.UTC)
-	testSeal  = Seal{
+	// A seal is INSTALLATION STATE ONLY now. The execution moved to
+	// SealSource.ApprovedBuild, keyed on the principal, because reading it
+	// from the owner's installation record made a derived capability's
+	// execution describe the owner's workload however many hops had been
+	// added — and a hop's principal does not hold the owner's installation at
+	// all, so a derivation had nothing to attest against even in principle.
+	testSeal = Seal{
 		InstallationID:       testInstallation,
 		InstallationRevision: 3,
-		BuildIncarnation:     11,
-		// The approved build for this installation. It is REQUIRED now: a seal
-		// that names no image digest names no execution to match a caller
-		// against, so the mint has nothing to attest.
-		ImageDigest: testImageDigest,
 	}
+	// testApprovedBuild is what the issuer approves for testPrincipal, which
+	// is what a caller's attested Execution is compared against.
+	testApprovedBuild = struct {
+		digest      string
+		incarnation uint64
+	}{digest: testImageDigest, incarnation: 11}
 	// testLiveBinding is the binding as the ISSUER holds it: granted to one
 	// principal, within one installation. A capability carries only the first,
 	// third and fourth of these — see SealedOperationBinding.
@@ -42,13 +49,16 @@ var (
 )
 
 const (
-	testIssuer       = "codefly.test-authority"
-	testAudience     = "codefly.test-audience"
-	testKeyID        = "test-key-1"
-	testTenant       = "tenant-1"
-	testPrincipal    = "principal-1"
-	testInstallation = "installation-1"
-	testBinding      = "binding-1"
+	testIssuer    = "codefly.test-authority"
+	testAudience  = "codefly.test-audience"
+	testKeyID     = "test-key-1"
+	testTenant    = "tenant-1"
+	testPrincipal = "principal-1"
+	// testHumanPrincipal bears no approved build: a person at a terminal runs
+	// no workload the issuer has admitted.
+	testHumanPrincipal = "principal-human-1"
+	testInstallation   = "installation-1"
+	testBinding        = "binding-1"
 	// testImageDigest is the image-manifest digest the test "runs", which the
 	// seal names as approved and the mint attests against.
 	testImageDigest = "sha256:1111111111111111111111111111111111111111111111111111111111111111"
@@ -69,6 +79,14 @@ func newAuthority(t *testing.T) *authority {
 	t.Helper()
 	seals := corework.NewMemorySealSource()
 	require.NoError(t, seals.Put(testPrincipal, testSeal))
+	// The approved build is recorded per PRINCIPAL, separately from the
+	// installation seal.
+	require.NoError(t, seals.PutApprovedBuild(
+		testPrincipal, testApprovedBuild.digest, testApprovedBuild.incarnation))
+	// The human principal gets a seal and an epoch and DELIBERATELY NO
+	// approved build, which is what ErrNoApprovedBuild answers.
+	require.NoError(t, seals.Put(testHumanPrincipal, testSeal))
+	require.NoError(t, seals.PutEpoch(testHumanPrincipal, testPrincipalEpoch))
 	// The owner's epoch is recorded through PutEpoch like any other
 	// principal's. Seal no longer carries it: it had two sources, and
 	// revocation could be UNDONE — advancing the epoch left stored seals
@@ -135,6 +153,12 @@ type mintInput struct {
 	binding      string
 	taskID       string
 	organization string
+
+	// humanSession mints for a principal the issuer holds NO approved build
+	// for — a person at a terminal. The capability then seals no execution,
+	// which core 4cb260d3 made representable instead of something every mint
+	// had to invent a value for.
+	humanSession bool
 }
 
 // start mints a session capability, sealed to the live values above.
@@ -161,6 +185,18 @@ func (a *authority) startAt(t *testing.T, now time.Time, input mintInput, lifeti
 // mistake, exactly as the review predicted this shape would.
 func (a *authority) tryStartAt(now time.Time, input mintInput, lifetime time.Duration) (string, error) {
 	minter := *a.core
+	owner, kind := testPrincipal, "service"
+	execution := corework.Execution{
+		ImageDigest:      testImageDigest,
+		BuildIncarnation: testApprovedBuild.incarnation,
+	}
+	if input.humanSession {
+		// No approved build is recorded for this principal and no Execution is
+		// attested. Core refuses the correspondence in BOTH directions, so
+		// attesting one here would be refused too.
+		owner, kind = testHumanPrincipal, "human"
+		execution = corework.Execution{}
+	}
 	minter.Now = func() time.Time { return now }
 	if input.tenant == "" {
 		input.tenant = testTenant
@@ -176,14 +212,12 @@ func (a *authority) tryStartAt(now time.Time, input mintInput, lifetime time.Dur
 	}
 	token, _, err := minter.Start(context.Background(), corework.StartInput{
 		// What the caller attests it is running, matched against the build the
-		// seal names as approved. A mint without it is refused.
-		Execution: corework.Execution{
-			ImageDigest:      testImageDigest,
-			BuildIncarnation: testSeal.BuildIncarnation,
-		},
+		// ISSUER approves FOR THIS PRINCIPAL. Empty for a principal that bears
+		// no execution, which core answers with ErrNoApprovedBuild.
+		Execution:          execution,
 		TenantID:           input.tenant,
-		OwnerPrincipalID:   testPrincipal,
-		OwnerPrincipalKind: "service",
+		OwnerPrincipalID:   owner,
+		OwnerPrincipalKind: kind,
 		TaskID:             input.taskID,
 		Audience:           input.audience,
 		AuthorityScopes:    input.scopes,
@@ -223,12 +257,20 @@ func (a *authority) childAs(t *testing.T, parent string, input hopInput) string 
 	t.Helper()
 	require.NotNil(t, a.seals, "delegation needs a seal source this test can record an actor epoch in")
 	require.NoError(t, a.seals.PutEpoch(input.principal, 1))
+	// And the hop's own approved build, because a derivation now attests the
+	// execution IT is running rather than inheriting the owner's.
+	require.NoError(t, a.seals.PutApprovedBuild(
+		input.principal, testApprovedBuild.digest, testApprovedBuild.incarnation))
 	if input.kind == "" {
 		input.kind = "service"
 	}
 	verified, err := a.verifier(t).Verify(context.Background(), parent)
 	require.NoError(t, err)
 	token, _, err := a.core.Child(context.Background(), verified, corework.ChildInput{
+		Execution: corework.Execution{
+			ImageDigest:      testApprovedBuild.digest,
+			BuildIncarnation: testApprovedBuild.incarnation,
+		},
 		PrincipalID:    input.principal,
 		PrincipalKind:  input.kind,
 		AgentID:        input.agent,
