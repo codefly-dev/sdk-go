@@ -35,6 +35,14 @@ var structurallyRefused = map[string]bool{
 	"zero-build-incarnation":     true, // ErrInvalid: zero is not an incarnation
 	"partial-operation-binding":  true, // ErrInvalid: an id at no revision
 	"actor-without-epoch":        true, // ErrInvalid: a principal nobody can revoke
+
+	// The encoding itself. Core's Verify now refuses unknown fields
+	// recursively and non-canonical encodings, and Inspect reaches the same
+	// answer — so a capability with a field appended and re-signed is refused
+	// here too, with no key and no network. This fixture arrived with the
+	// settled surface and the exactness assertion below is what found it,
+	// which is the reason that assertion exists.
+	"unknown-field": true, // ErrInvalid: an appended field, re-signed
 }
 
 // TestTheSDKParsePathsAgreeWithCore drives every fixture in core's kit through

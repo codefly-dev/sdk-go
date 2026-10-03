@@ -283,14 +283,25 @@ func hopSeal() workcontext.Seal {
 		InstallationID:       "installation-hop",
 		InstallationRevision: 12,
 		BuildIncarnation:     9,
+		// The approved build for this installation, required now: a seal that
+		// names none names no execution to match a caller against.
+		ImageDigest: hopImageDigest,
 	}
 }
+
+const hopImageDigest = "sha256:2222222222222222222222222222222222222222222222222222222222222222"
 
 // startTask issues the capability the external caller holds: for service A
 // only.
 func (h *hopTopology) startTask(t *testing.T) string {
 	t.Helper()
 	token, _, err := h.authority.minter.Start(context.Background(), corework.StartInput{
+		// What this caller attests it is running, matched against the build
+		// the seal names as approved.
+		Execution: corework.Execution{
+			ImageDigest:      hopImageDigest,
+			BuildIncarnation: hopSeal().BuildIncarnation,
+		},
 		Audience: audienceA, TenantID: hopTenant, OwnerPrincipalID: hopPrincipal,
 		OwnerPrincipalKind: "service", TaskID: "task-hop",
 		InstallationID:  hopSeal().InstallationID,

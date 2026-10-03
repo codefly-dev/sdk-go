@@ -105,6 +105,18 @@ naming the format before any key lookup is the only diagnosis that points at the
 format. That is why the gate lives here,
 in the consumer: core cannot see who re-implements it.
 
+**One field in that build is load-bearing and easy to miss.**
+`TrustTheConformanceFixtureKey` must be copied from the settings: the fixture
+key's private half is derivable from core's source, so a verifier refuses it
+unless it says in as many words that it is a test. Leaving it out made all 35
+fixtures fail with *"key `conformance-1` is the conformance fixture key"* — a
+consumer doing exactly the right thing refusing everything.
+
+Which is the argument **for** building the verifier field by field rather than
+calling `settings.Verifier()`: a field core adds to the contract lands here as
+a failing test. Through the constructor it would have been inherited silently
+and this module would have learned nothing.
+
 What the kit proves is **behavioural**: this entry point reaches core's
 accept/refuse decision with core's named reason on every fixture. It does not
 prove identity — an equivalent second implementation would pass the same
@@ -126,6 +138,15 @@ three are now core's answer rather than a local one:
 | `seal-without-installation` | `ErrInvalid` (the schema reaches it first) | `ErrUnsealed`, with a test pinning the divergence |
 | `actor-without-epoch` | `ErrInvalid` | **accepted** — the actor chain was never read, so a principal nobody can revoke went on the wire |
 | zero epoch / revision / incarnation, partial binding | `ErrInvalid` | `ErrUnsealed` |
+
+**The seal is four fields, and `ImageDigest` is one of them.** `WorkSealV1`
+gained `image_digest` as a **required** field: a seal names the approved build
+for its installation, and a mint attests the execution it is actually running
+against it (`StartInput.Execution{ImageDigest, BuildIncarnation}`). A seal that
+names no digest names no execution to match a caller against, so core refuses
+to record one. `Credential.Seal()` returns the carried seal as core's own
+message, which is why that field arriving needed no code change here — see
+`SealedValues`.
 
 **`ErrUnsealed` no longer exists, and that is the end of this class of defect.**
 `WorkContextV1.seal` and `WorkActorV1.principal_epoch` are schema-**required**
@@ -305,7 +326,22 @@ hold-off bounds `Refresh` too, which the generation check alone does not: a
 receiver whose live state lags refuses each FRESH credential, and every refusal
 is a new generation.
 
-**The lifetime ceiling is the host's, and there is no client-side one.** A
+**There are two lifetime ceilings, deliberately.** Core's `Authority.MaxTTL`
+(one hour by default) is the primary one, at the minter where it binds every
+client. `MintOptions.MaxCredentialLifetime` (24h by default) is the second, at
+the process that holds the credential.
+
+Keeping both is a decision taken twice. It was deleted once on core's advice
+that the cap now lives at the minter, and a review was right that deleting it
+was a **weakening**: `MaxTTL` has no ceiling of its own — core honours any
+positive value, and its own error says *"raise `Authority.MaxTTL` deliberately
+if that is wanted"* — and core's `Verify` does not bound a lifetime at use at
+all. So a misconfigured host minting month-long credentials would be refused by
+nothing else. Two layers enforcing one rule is not the duplication this module
+exists to prevent: that was two *implementations* of one decision reaching
+different answers.
+
+**What follows is the ceiling's effect on #47's arithmetic:** A
 review asked for a client-side cap because core checked only that a TTL was
 positive; this carried one, labelled a stopgap whose condition was "it goes
 when core has a cap". Core has one — `Authority.MaxTTL`, defaulting to
@@ -439,7 +475,7 @@ either import path.
 
 | Sentinel | Means | What the caller does |
 | --- | --- | --- |
-| `ErrInvalid` | wrong and cannot become right — bad signature, another issuer, another audience, a schema violation, **no seal at all**, a seal naming no installation, a zero epoch/revision/incarnation, a partial binding, **an actor hop with no epoch**, a malformed capability, an expired or not-yet-valid window | refuse; 401 |
+| `ErrInvalid` | wrong and cannot become right — bad signature, another issuer, another audience, a schema violation, **no seal at all**, a seal naming no installation or no image digest, a zero epoch/revision/incarnation, a partial binding, **an actor hop with no epoch**, **an unknown field or a non-canonical encoding**, a malformed capability, an expired or not-yet-valid window | refuse; 401 |
 | `ErrRevoked` | sound when minted, overtaken since — the principal's epoch, an actor hop's epoch, the installation revision, the build incarnation, a binding revision or incarnation, a revoked binding, **a binding granted to another principal or in another installation**, an installation the principal no longer holds, or the authorization revision moved | mint again, retry once |
 | `ErrNotACoreToken` | the payload is not this encoding at all — most usefully, a JSON one | refuse, and do **not** report a signature problem |
 | `ErrReplayed` | a single-use capability was presented twice | refuse; this is the resume contract, not a forgery |

@@ -1048,8 +1048,8 @@ func TestWorkContextConformance(t *testing.T) {
 		Issuer:   settings.Issuer,
 		Audience: settings.Audience,
 		// Settings.Keys is map[string][]byte so holding settings needs no
-		// signing import; the verifier's own field is the typed one.
-		Keys:      corework.FixtureKeys(),
+		// signing import; PublicKeys() is the typed form the verifier takes.
+		Keys:      settings.PublicKeys(),
 		Revisions: settings.Revisions,
 		// One replay store for the whole run: the kit presents the single-use
 		// grant fixture twice and requires ErrReplayed, which a fresh store per
@@ -1058,6 +1058,18 @@ func TestWorkContextConformance(t *testing.T) {
 		Grants: settings.Grants,
 		Seals:  settings.Seals,
 		Now:    settings.Now,
+		// Copied from the kit rather than written here, and it is REQUIRED: the
+		// fixture key's private half is derivable from core's source, so a
+		// verifier refuses it unless it says in as many words that it is a
+		// test. Leaving it out made every one of the 35 fixtures fail with
+		// "key \"conformance-1\" is the conformance fixture key" — a consumer
+		// doing exactly the right thing refusing everything.
+		//
+		// Which is the argument FOR building this field by field rather than
+		// calling settings.Verifier(): a new field core adds to the contract
+		// lands here as a failing test. Through the constructor it would have
+		// been inherited silently and this module would have learned nothing.
+		TrustTheConformanceFixtureKey: settings.TrustTheConformanceFixtureKey,
 	}
 	conformance.RunWith(t, settings, func(ctx context.Context, token string) error {
 		_, err := exported.Verify(ctx, token)

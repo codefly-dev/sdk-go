@@ -171,16 +171,16 @@ func TestStreamGuardValidatesItsConfiguration(t *testing.T) {
 func TestTheStreamRecheckDoesNotConsumeASingleUseCapability(t *testing.T) {
 	settings := conformance.New(time.Now())
 	verifier := &Verifier{
-		Issuer:    settings.Issuer,
-		Audience:  settings.Audience,
-		Keys:      corework.FixtureKeys(),
-		Revisions: settings.Revisions,
-		Replay:    settings.Replay,
-		Grants:    settings.Grants,
-		Seals:     settings.Seals,
-		Now:       settings.Now,
+		Issuer:                        settings.Issuer,
+		Audience:                      settings.Audience,
+		Keys:                          settings.PublicKeys(),
+		Revisions:                     settings.Revisions,
+		Replay:                        settings.Replay,
+		Grants:                        settings.Grants,
+		Seals:                         settings.Seals,
+		Now:                           settings.Now,
+		TrustTheConformanceFixtureKey: settings.TrustTheConformanceFixtureKey,
 	}
-
 	fixtures, err := corework.Fixtures(settings.Now())
 	require.NoError(t, err)
 	var grant corework.Fixture

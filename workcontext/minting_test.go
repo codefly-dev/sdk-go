@@ -24,6 +24,10 @@ var (
 		InstallationID:       testInstallation,
 		InstallationRevision: 3,
 		BuildIncarnation:     11,
+		// The approved build for this installation. It is REQUIRED now: a seal
+		// that names no image digest names no execution to match a caller
+		// against, so the mint has nothing to attest.
+		ImageDigest: testImageDigest,
 	}
 	// testLiveBinding is the binding as the ISSUER holds it: granted to one
 	// principal, within one installation. A capability carries only the first,
@@ -45,6 +49,9 @@ const (
 	testPrincipal    = "principal-1"
 	testInstallation = "installation-1"
 	testBinding      = "binding-1"
+	// testImageDigest is the image-manifest digest the test "runs", which the
+	// seal names as approved and the mint attests against.
+	testImageDigest = "sha256:1111111111111111111111111111111111111111111111111111111111111111"
 	// testPrincipalEpoch is the owner's live epoch, which the seal source
 	// answers rather than the seal carrying it.
 	testPrincipalEpoch = 7
@@ -104,6 +111,11 @@ func (a *authority) verifier(t *testing.T) *Verifier {
 		Grants:    noGrants{},
 		Seals:     a.seals,
 		Now:       a.now,
+		// These tests mint with core's FIXTURE key, whose private half is
+		// derivable from core's source — so a verifier refuses it unless it
+		// says, in as many words, that it is a test. A production verifier
+		// leaving this unset is the point of the field.
+		TrustTheConformanceFixtureKey: true,
 	}
 }
 
@@ -150,6 +162,12 @@ func (a *authority) startAt(t *testing.T, now time.Time, input mintInput, lifeti
 		input.scopes = []*basev0.WorkScopeV1{scope("document", "read")}
 	}
 	token, _, err := minter.Start(context.Background(), corework.StartInput{
+		// What the caller attests it is running, matched against the build the
+		// seal names as approved. A mint without it is refused.
+		Execution: corework.Execution{
+			ImageDigest:      testImageDigest,
+			BuildIncarnation: testSeal.BuildIncarnation,
+		},
 		TenantID:           input.tenant,
 		OwnerPrincipalID:   testPrincipal,
 		OwnerPrincipalKind: "service",
