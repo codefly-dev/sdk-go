@@ -447,9 +447,7 @@ func (c *MintClient) Credential(ctx context.Context) (Credential, error) {
 	if ctx == nil {
 		return Credential{}, fmt.Errorf("%w: nil context", ErrMintRefused)
 	}
-	return c.obtain(ctx, mintReasonRenewal, func(held *Credential) bool {
-		return held == nil || c.dueForRenewalLocked(*held)
-	})
+	return c.obtain(ctx, mintReasonRenewal, nil)
 }
 
 // Refresh replaces a credential the host has refused — ErrRevoked from a
@@ -495,10 +493,12 @@ func (c *MintClient) Refresh(ctx context.Context, refused Credential) (Credentia
 		)
 	}
 	return c.obtain(ctx, mintReasonRefresh, func(held *Credential) bool {
-		// Somebody else was refused on the same credential and has already
-		// replaced it. Minting again here would be the second mint for one
-		// revocation, which is the thing this client exists not to do.
-		return held != nil && held.generation == refused.generation
+		// The credential that was refused is still the one being held, so it
+		// has to be replaced. If it is NOT — somebody else was refused on the
+		// same credential and has already replaced it — this asks for nothing,
+		// and obtain's own freshness check decides whether the replacement can
+		// be handed over as it stands.
+		return held.generation == refused.generation
 	})
 }
 
@@ -511,15 +511,24 @@ const (
 	mintReasonRefresh
 )
 
-// obtain is the one path that mints. needed decides, against the credential
-// currently held, whether a new one is wanted; it is called under the lock.
+// obtain is the one path that mints.
+//
+// wanted is an EXTRA reason to mint, asked of the credential currently held and
+// called under the lock; nil means "no reason beyond freshness". Freshness
+// itself is checked here for every caller, which is the point: Refresh used to
+// return the held credential whenever its generation had already moved on,
+// without looking at whether that replacement was still usable — so a caller
+// refused on an old generation was handed a replacement that had since
+// EXPIRED. A credential leaves this function only if it is not due for
+// renewal, whoever asked and for whatever reason.
 func (c *MintClient) obtain(
-	ctx context.Context, reason mintReason, needed func(held *Credential) bool,
+	ctx context.Context, reason mintReason, wanted func(held *Credential) bool,
 ) (Credential, error) {
 	for {
 		c.mu.Lock()
 		held := c.credential
-		if !needed(held) {
+		if held != nil && !c.dueForRenewalLocked(*held) &&
+			(wanted == nil || !wanted(held)) {
 			credential := *held
 			c.mu.Unlock()
 			return credential, nil

@@ -264,3 +264,96 @@ func TestCachePartitionWritesAroundAnApprovalGrant(t *testing.T) {
 	}
 	require.Equal(t, 2, seen, "the kit must have offered one session and one grant capability")
 }
+
+// The viewer digest's AGENT and ORGANIZATION dimensions, each on its own.
+//
+// The dynamic review's mutation removed both from the preimage and
+// TestCachePartitionByViewerSeparatesSubjectsSharingAView and
+// TestCachePartitionByViewerFollowsTheEffectiveActor both still passed — they
+// vary the principal id, so they cover the dimension that was always there and
+// say nothing about the two that were added. Two tests that survive a mutation
+// are two tests that were not evidence for the guarantee they were cited for.
+//
+// These vary one field at a time, holding everything else equal, so each
+// dimension has a test that fails when it leaves the digest.
+func TestCachePartitionByViewerSeparatesTheSameAgentPrincipalAtDifferentAgents(t *testing.T) {
+	a := newAuthority(t)
+	scopes := []*basev0.WorkScopeV1{scope("document", "read")}
+	parent := a.start(t, mintInput{scopes: scopes})
+
+	// One principal, one kind, one organization, two agent manifests. An agent
+	// is a distinct caller: two deployments of the same agent principal answer
+	// to different code, so an answer computed for one must not be served to
+	// the other.
+	first, err := a.verifier(t).Verify(context.Background(), a.childAs(t, parent, hopInput{
+		principal: "agent-principal", kind: "agent", agent: "agent-manifest-a", scopes: scopes,
+	}))
+	require.NoError(t, err)
+	second, err := a.verifier(t).Verify(context.Background(), a.childAs(t, parent, hopInput{
+		principal: "agent-principal", kind: "agent", agent: "agent-manifest-b", scopes: scopes,
+	}))
+	require.NoError(t, err)
+
+	require.Equal(t,
+		partition(t, first, ByAuthorizationView()).Key,
+		partition(t, second, ByAuthorizationView()).Key,
+		"the two hold the same scopes, so they share an authorization view",
+	)
+	require.NotEqual(t,
+		partition(t, first, ByViewer()).Key,
+		partition(t, second, ByViewer()).Key,
+		"the agent identity is part of the viewer: same principal, different code",
+	)
+}
+
+func TestCachePartitionByViewerSeparatesOneActorActingInTwoOrganizations(t *testing.T) {
+	a := newAuthority(t)
+	scopes := []*basev0.WorkScopeV1{scope("document", "read")}
+	parent := a.start(t, mintInput{scopes: scopes})
+
+	// One principal, two organizations. Authorization is evaluated per
+	// organization, so a service principal acting in two of them is two
+	// viewers — sharing a partition would serve one organization's answer to
+	// the other, which is the worst shape this digest exists to prevent.
+	first, err := a.verifier(t).Verify(context.Background(), a.childAs(t, parent, hopInput{
+		principal: "shared-actor", organization: "organization-a", scopes: scopes,
+	}))
+	require.NoError(t, err)
+	second, err := a.verifier(t).Verify(context.Background(), a.childAs(t, parent, hopInput{
+		principal: "shared-actor", organization: "organization-b", scopes: scopes,
+	}))
+	require.NoError(t, err)
+
+	require.Equal(t,
+		partition(t, first, ByAuthorizationView()).Key,
+		partition(t, second, ByAuthorizationView()).Key,
+	)
+	require.NotEqual(t,
+		partition(t, first, ByViewer()).Key,
+		partition(t, second, ByViewer()).Key,
+		"authorization is evaluated per organization, so the organization is part of the viewer",
+	)
+}
+
+// And the kind, which travels with the id for the same reason: an id is unique
+// within a kind, not across kinds.
+func TestCachePartitionByViewerSeparatesTheSameIdAtDifferentKinds(t *testing.T) {
+	a := newAuthority(t)
+	scopes := []*basev0.WorkScopeV1{scope("document", "read")}
+	parent := a.start(t, mintInput{scopes: scopes})
+
+	asService, err := a.verifier(t).Verify(context.Background(), a.childAs(t, parent, hopInput{
+		principal: "ambiguous-id", kind: "service", scopes: scopes,
+	}))
+	require.NoError(t, err)
+	asAgent, err := a.verifier(t).Verify(context.Background(), a.childAs(t, parent, hopInput{
+		principal: "ambiguous-id", kind: "agent", agent: "agent-manifest-a", scopes: scopes,
+	}))
+	require.NoError(t, err)
+
+	require.NotEqual(t,
+		partition(t, asService, ByViewer()).Key,
+		partition(t, asAgent, ByViewer()).Key,
+		"an id is unique within a kind, not across kinds",
+	)
+}

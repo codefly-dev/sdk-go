@@ -228,17 +228,39 @@ func (a *authority) startAt(t *testing.T, now time.Time, input mintInput, lifeti
 // recording one fails at the mint, which is the right place for it to fail.
 func (a *authority) child(t *testing.T, parent string, principal string, scopes []*basev0.WorkScopeV1) string {
 	t.Helper()
+	return a.childAs(t, parent, hopInput{principal: principal, scopes: scopes})
+}
+
+// hopInput names the dimensions of one delegation hop. agent and organization
+// are separate fields because they are separate dimensions of the viewer: a
+// test that varied only the principal left both of them uncovered, which is
+// exactly what the dynamic review's mutation showed.
+type hopInput struct {
+	principal    string
+	kind         string
+	agent        string
+	organization string
+	scopes       []*basev0.WorkScopeV1
+}
+
+func (a *authority) childAs(t *testing.T, parent string, input hopInput) string {
+	t.Helper()
 	require.NotNil(t, a.seals, "delegation needs a seal source this test can record an actor epoch in")
-	require.NoError(t, a.seals.PutEpoch(principal, 1))
+	require.NoError(t, a.seals.PutEpoch(input.principal, 1))
+	if input.kind == "" {
+		input.kind = "service"
+	}
 	verified, err := a.verifier(t).Verify(context.Background(), parent)
 	require.NoError(t, err)
 	token, _, err := a.core.Child(context.Background(), verified, corework.ChildInput{
-		PrincipalID:   principal,
-		PrincipalKind: "service",
-		DelegationID:  "delegation-" + principal,
-		GrantedScopes: scopes,
-		Audience:      testAudience,
-		TTL:           10 * time.Minute,
+		PrincipalID:    input.principal,
+		PrincipalKind:  input.kind,
+		AgentID:        input.agent,
+		OrganizationID: input.organization,
+		DelegationID:   "delegation-" + input.principal,
+		GrantedScopes:  input.scopes,
+		Audience:       testAudience,
+		TTL:            10 * time.Minute,
 	})
 	require.NoError(t, err)
 	return token

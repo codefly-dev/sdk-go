@@ -127,11 +127,21 @@ var jsonAllowlist = map[string]string{
 }
 
 // mintEndpointJSONTypes are the only structs in this module that may carry
-// json tags. They are the mint endpoint's two bodies. A payload struct pair for
-// a capability — the shape of the implementation this module deleted — is a
-// third entry here, which is a failing test rather than a review comment
-// somebody might not leave.
-var mintEndpointJSONTypes = []string{"mintRequest", "mintResponse"}
+// json tags, and mintEndpointJSONFile is the only file they may be declared in.
+//
+// The pair matters. Allowing them by NAME alone let any file declare a type
+// called mintRequest or mintResponse and inherit the exemption — so
+// `extra/payload.go` could hold a json-tagged `mintRequest` enumerating a
+// capability's fields by hand, which is precisely the deleted implementation,
+// and the gate would be green. The exemption is a property of one file's two
+// declarations, not of two identifiers.
+//
+// A payload struct pair for a capability is a third entry here, which is a
+// failing test rather than a review comment somebody might not leave.
+var (
+	mintEndpointJSONTypes = []string{"mintRequest", "mintResponse"}
+	mintEndpointJSONFile  = "mint.go"
+)
 
 // coreModulePath is the module whose types this one aliases. An alias has to
 // resolve into it, or it is a local type wearing core's name.
@@ -195,6 +205,9 @@ func TestNoSecondWorkContextImplementation(t *testing.T) {
 		require.True(t, paths[allowed],
 			"the json allowlist names %q, which is not a file in this module", allowed)
 	}
+	require.Contains(t, jsonAllowlist, mintEndpointJSONFile,
+		"the file allowed to carry json TAGS must be the file allowed to IMPORT encoding/json; "+
+			"two lists that can drift are two lists")
 }
 
 // inspectForSecondImplementation is the whole check over one parsed file,
@@ -434,22 +447,11 @@ func aliasesCore(target ast.Expr, coreImports map[string]bool) bool {
 // borrow the allowance by being declared beside them.
 func inspectJSONTags(file sourceFile) []string {
 	allowed := map[ast.Node]bool{}
-	for _, declaration := range file.syntax.Decls {
-		general, ok := declaration.(*ast.GenDecl)
-		if !ok {
-			continue
-		}
-		for _, spec := range general.Specs {
-			typed, ok := spec.(*ast.TypeSpec)
-			if !ok || !slices.Contains(mintEndpointJSONTypes, typed.Name.Name) {
-				continue
-			}
-			if structure, ok := typed.Type.(*ast.StructType); ok {
-				allowed[structure] = true
-			}
-		}
+	// Only the mint endpoint's own file may hold them. Elsewhere the names earn
+	// nothing, so the walk below finds the tags and refuses them.
+	if file.path == mintEndpointJSONFile {
+		allowed = allowedMintBodies(file)
 	}
-
 	var findings []string
 	ast.Inspect(file.syntax, func(node ast.Node) bool {
 		structure, ok := node.(*ast.StructType)
@@ -465,16 +467,41 @@ func inspectJSONTags(file sourceFile) []string {
 				continue
 			}
 			findings = append(findings, fmt.Sprintf(
-				"%s declares a struct with json tags outside %v.\n"+
-					"Only the mint endpoint's bodies are JSON here. A JSON-tagged struct describing a\n"+
-					"capability's fields is the second implementation: core signs the deterministic protobuf\n"+
-					"encoding, and a field enumerated by hand is a field dropped at mint and absent at verify.",
-				file.path, mintEndpointJSONTypes))
+				"%s declares a struct with json tags. Only %v in %s may.\n"+
+					"A JSON-tagged struct describing a capability's fields is the second implementation:\n"+
+					"core signs the deterministic protobuf encoding, and a field enumerated by hand is a\n"+
+					"field dropped at mint and absent at verify. Naming a type mintRequest somewhere else\n"+
+					"does not inherit the endpoint's exemption — the exemption is that file's, not the\n"+
+					"identifier's.",
+				file.path, mintEndpointJSONTypes, mintEndpointJSONFile))
 			return true
 		}
 		return true
 	})
 	return findings
+}
+
+// allowedMintBodies returns the struct nodes of the mint endpoint's two bodies,
+// identified by node so a THIRD json-tagged type declared beside them cannot
+// borrow the allowance.
+func allowedMintBodies(file sourceFile) map[ast.Node]bool {
+	allowed := map[ast.Node]bool{}
+	for _, declaration := range file.syntax.Decls {
+		general, ok := declaration.(*ast.GenDecl)
+		if !ok {
+			continue
+		}
+		for _, spec := range general.Specs {
+			typed, ok := spec.(*ast.TypeSpec)
+			if !ok || !slices.Contains(mintEndpointJSONTypes, typed.Name.Name) {
+				continue
+			}
+			if structure, ok := typed.Type.(*ast.StructType); ok {
+				allowed[structure] = true
+			}
+		}
+	}
+	return allowed
 }
 
 // TestTheGateCatchesItsOwnBypasses drives the checks over source written to
@@ -506,7 +533,7 @@ func payload() any {
 		Scopes []string ` + "`json:\"scopes\"`" + `
 	}{}
 }`,
-			says: "json tags outside",
+			says: "struct with json tags",
 		},
 		"a json-tagged type declared inside a function": {
 			path: "carrier.go",
@@ -517,7 +544,7 @@ func payload() any {
 	}
 	return sealedClaims{}
 }`,
-			says: "json tags outside",
+			says: "struct with json tags",
 		},
 		"a WorkContext type declared inside a function": {
 			path: "carrier.go",
