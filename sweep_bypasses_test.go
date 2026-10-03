@@ -200,8 +200,11 @@ func TestTheRefSweepSeesNamespacedBranches(t *testing.T) {
 	runIn(t, seed, "git", "branch", "-M", "main")
 	runIn(t, seed, "git", "remote", "add", "origin", remote)
 	runIn(t, seed, "git", "push", "--quiet", "origin", "main")
-	// Namespaced, exactly the shape the glob dropped.
-	for _, branch := range []string{"badges", "connectory/welcome", "dependabot/go_modules/gomod-abc"} {
+	// Namespaced, exactly the shape the glob dropped. The names are SYNTHETIC:
+	// these were copied off the live remote, where one of them is a
+	// third-party bot's branch, and a fixture that names something outside
+	// this repository is a fixture that goes stale when that thing does.
+	for _, branch := range []string{"badges", "team/welcome", "dependabot/go_modules/gomod-abc"} {
 		runIn(t, seed, "git", "push", "--quiet", "origin", "main:refs/heads/"+branch)
 	}
 
@@ -213,7 +216,7 @@ func TestTheRefSweepSeesNamespacedBranches(t *testing.T) {
 	copyFile(t, checker, filepath.Join(clone, "scripts", "check-one-implementation.sh"))
 
 	listed := listRefs(t, clone, "main", "")
-	require.Contains(t, listed, "origin/connectory/welcome",
+	require.Contains(t, listed, "origin/team/welcome",
 		"a namespaced branch was dropped: this is the defect the glob had")
 	require.Contains(t, listed, "origin/dependabot/go_modules/gomod-abc",
 		"a doubly namespaced branch was dropped")
@@ -223,7 +226,7 @@ func TestTheRefSweepSeesNamespacedBranches(t *testing.T) {
 	// And the head ref is excluded while everything else stays.
 	withHead := listRefs(t, clone, "main", "badges")
 	require.NotContains(t, withHead, "origin/badges")
-	require.Contains(t, withHead, "origin/connectory/welcome")
+	require.Contains(t, withHead, "origin/team/welcome")
 }
 
 // And the sweep REFUSES when it can see fewer refs than the remote publishes,
