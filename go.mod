@@ -62,26 +62,29 @@ require (
 	gopkg.in/yaml.v3 v3.0.1 // indirect
 )
 
-// RETRACTED: every version below publishes a SECOND Work Context
-// implementation, which this module's one-implementation rule forbids and which
-// a consumer can still pin today.
+// RETRACTED: the ROOT module's versions that publish a second Work Context
+// implementation.
 //
 // A branch that carries it can be deleted. A TAG CANNOT: it is an immutable
 // published artifact, `go get sdk-go@v0.1.65` resolves it right now, and the
 // module proxy has it cached forever. So the rule for a tag is not "clean", it
-// is RETRACTED — which is the one mechanism Go provides for "this published
-// version should not be used", and `go get` and `go list -m -u` both report it.
+// is RETRACTED — the one mechanism Go provides for "this published version
+// should not be used", which `go get` and `go list -m -u` both report.
 //
-// Nineteen of them, measured by sweeping every published tag rather than by
-// reading the names: v0.1.51 through v0.1.68 and v0.2.0. An executed review
-// counted fifteen and stopped at v0.1.65; v0.1.66, v0.1.67, v0.1.68 and v0.2.0
-// carry it too, the last being the highest version this module has published.
+// FIFTEEN, not nineteen, and the difference is the finding that corrected this.
+// A previous revision retracted v0.1.51 through v0.1.68 and v0.2.0 on the
+// strength of sweeping each tag's whole TREE. But from v0.1.66 the files moved
+// under workcontext/, which has its own go.mod — so the root module's zip for
+// those versions does not contain them, the root versions are CLEAN, and the
+// module that carries them is github.com/codefly-dev/sdk-go/workcontext, whose
+// go.mod had no retract at all. Retracting a clean version is not a safe error
+// in the same direction: it tells consumers to move off something that was
+// never the problem, while the thing that was stayed resolvable.
 //
-// TWO THINGS THIS DOES NOT DO, both of which belong to whoever tags releases:
-// a retraction takes effect only once a NEW version is tagged carrying this
+// workcontext/go.mod retracts the leaf side.
+//
+// TWO THINGS THIS DOES NOT DO, both belonging to whoever tags releases: a
+// retraction takes effect only once a NEW version is tagged carrying this
 // go.mod, and nothing here deletes anything from the proxy, because nothing
 // can.
-retract (
-	v0.2.0 // the same, moved under workcontext/
-	[v0.1.51, v0.1.68] // a second Work Context implementation at the root
-)
+retract [v0.1.51, v0.1.65] // a second Work Context implementation at the root

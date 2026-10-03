@@ -20,8 +20,9 @@
 # there is no checkout to type-check — which is why it reads imports with
 # go/parser (scripts/importsof) rather than with a regex.
 #
-# THE PREDICATE IS AN ABSOLUTE BAN ON SIGNING, with a named allowlist — not a
-# conjunction. It used to be "imports a signing primitive AND mentions
+# THE PREDICATE IS DENY BY DEFAULT: an import not on its module's list in
+# scripts/allowed-imports.txt is a finding. It used to be a ban on signing with
+# a named allowlist — a denylist — and it is not that any more. It used to be "imports a signing primitive AND mentions
 # WorkContext", which a second implementation defeats by putting the signer in
 # one file and the wrapper in another; and its pattern was anchored on the
 # opening quote, so "golang.org/x/crypto/ed25519" did not match at all. Now any
@@ -63,79 +64,46 @@ set -euo pipefail
 # Where this script lives, so the import reader beside it can be built.
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-# Any of these in an import path is a signature, a MAC, or a library that mints
-# bearer tokens. The bare "crypto" package is included: crypto.Signer signs
-# Ed25519 with no ed25519 import anywhere.
-# Signatures, MACs and anything that mints a bearer token. The bare "crypto" is
-# included: crypto.Signer signs Ed25519 with no ed25519 import anywhere.
-# crypto/cipher and the block ciphers are here because a GMAC or a CMAC is a
-# MAC assembled from a cipher, which names no MAC.
-primitives='^crypto$|^crypto/hkdf$|^crypto/pbkdf2$|^crypto/sha512$|^crypto/sha1$|^crypto/sha3$|^crypto/md5$|^crypto/ed25519$|^crypto/ecdsa$|^crypto/rsa$|^crypto/dsa$|^crypto/hmac$|^crypto/ecdh$|^crypto/elliptic$|^crypto/subtle$|^crypto/cipher$|^crypto/aes$|^crypto/des$|^crypto/rc4$|^crypto/sha3$|x/crypto/|jose|jwt|jwx|paseto|macaroon|branca|ed25519'
-# Second encodings of the message. protojson is a complete JSON encoding of a
-# protobuf message on its own, which is how the deleted implementation's payload
-# would come back without an encoding/json import.
-# The LOW-LEVEL protobuf runtime and the LEGACY protobuf module belong here as
-# well, and did not until the two gates were compared entry by entry: the AST
-# gate banned protoiface, protoimpl and github.com/golang/protobuf/proto while
-# this script passed all three — measured, `ok working tree (4 Go files)`,
-# exit 0 — in the module where this script is the only gate. A message's own
-# ProtoMethods().Unmarshal is a complete decode naming no codec package, and the
-# legacy module's proto.Unmarshal is the same capability at another path.
-encoders='encoding/protojson|encoding/protowire|known/anypb|^encoding/gob$|^encoding/asn1$|^encoding/xml$|runtime/protoiface|runtime/protoimpl|^github.com/golang/protobuf/proto$'
-# Opening a credential's envelope by hand. base64 plus proto.Unmarshal is the
-# whole of a second parser, and the AST gate reaches only the workcontext module
-# — a compiling root package with a base64/JSON credential decoder and its own
-# seal rule passed this sweep.
+# THE POLICY IS DENY BY DEFAULT and it is read from scripts/allowed-imports.txt,
+# which the Go gate reads too.
 #
-# base64 is not the only way to spell it, which is why this is a list and not
-# one path: encoding/pem decodes a base64 body, mime.WordDecoder decodes
-# base64, and base32/ascii85 are alternative envelopes a host could be talked
-# into. encoding/hex and encoding/binary are deliberately absent: neither can
-# open core's envelope, which is base64url.
-envelope='^encoding/base64$|^encoding/base32$|^encoding/ascii85$|^encoding/pem$|^mime$|^mime/'
-
+# What was here was three regexes and a per-file exception list — a DENYLIST,
+# and every round of review found the next name it was missing. The last pair
+# was `crypto/mldsa` signing a `WorkContextV1` that `encoding/json/v2` had
+# encoded in the deleted format; a reviewer ran this script's extracted
+# predicate over both and both were "permitted", along with protodelim,
+# grpc/encoding and `C`. The allowlist existed by then — in `go test`, which
+# reads a checkout, while THIS is the only thing that runs over a published ref
+# and is the required check. One policy, both places.
 status=0
 
-# allowed <path> <pattern> — the exceptions, each with a reason in the comment.
-# The mint client builds and owns its own TLS transport, which needs tls for the
-# configuration and x509 for the caller's root pool. Nothing else here may.
-allowed() {
-  case "$1|$2" in
-    'workcontext/mint.go|crypto/tls') return 0 ;;
-    'workcontext/mint.go|crypto/x509') return 0 ;;
-    'tls.go|crypto/tls') return 0 ;;
-    'tls.go|crypto/x509') return 0 ;;
-    # The receipts digest canonicalises a receipt REQUEST, never a capability.
-    'receipts/digest.go|google.golang.org/protobuf/encoding/protojson') return 0 ;;
-    # ENCODES a tenant and installation id into a cache key; opens no envelope.
-    # The AST gate additionally holds that file to the ENCODE methods, which is
-    # the half this script cannot check.
-    'workcontext/cache_partition.go|encoding/base64') return 0 ;;
-    # The runtime's own configuration document, which is not a capability. The
-    # AST gate cannot reach the root module, so this is named here instead.
-    'configuration_document.go|encoding/json') return 0 ;;
-    # The mint endpoint's two HTTP bodies. In the workcontext module the AST
-    # gate additionally holds this to the TWO TYPES; here it is by path only,
-    # which is the weaker half and is why the AST gate exists.
-    'workcontext/mint.go|encoding/json') return 0 ;;
-    # One call: the mint response's Content-Type must be declared and must be
-    # application/json. mime is banned otherwise because WordDecoder decodes
-    # base64 with no base64 import.
-    'workcontext/mint.go|mime') return 0 ;;
-    # The two digests, and the receipts store's row digest. A hash is not a
-    # signature; a hand-rolled HMAC over one is the residue named in the header.
-    'workcontext/cache_partition.go|crypto/sha256') return 0 ;;
-    'receipts/digest.go|crypto/sha256') return 0 ;;
-    'receipts/postgres.go|crypto/sha256') return 0 ;;
-    # The receipts DIGEST, which canonicalises a receipt REQUEST. By exact
-    # path: this was `receipts/*`, permitting encoding/json anywhere under
-    # receipts, while the AST gate named one file — so the two gates disagreed
-    # about the same directory and the looser one was this script, which is the
-    # only gate the ref sweep runs. Measured from the tree: receipts/digest.go
-    # is the only non-test file there that imports it.
-    'receipts/digest.go|encoding/json') return 0 ;;
+policy="$here/allowed-imports.txt"
+if [ ! -r "$policy" ]; then
+  echo "FAIL cannot read the import policy at $policy." >&2
+  echo "     Deny-by-default with no list permits nothing or everything; neither is a gate." >&2
+  exit 1
+fi
+
+# allowed_root and allowed_leaf hold one permitted import per line as
+# `<path>` or `<path> file file …`, bracketed so a fixed-string match cannot
+# match a prefix: `crypto/sha` must not pass because `crypto/sha256` is listed.
+allowed_root="$(mktemp)"
+allowed_leaf="$(mktemp)"
+awk '$1 == "root" { $1 = ""; sub(/^ /, ""); print "<" $0 ">" }' "$policy" > "$allowed_root"
+awk '$1 == "leaf" { $1 = ""; sub(/^ /, ""); print "<" $0 ">" }' "$policy" > "$allowed_leaf"
+# Historical paths, added ONLY in ref mode. See the policy file's own comment:
+# deny-by-default describes today's tree, and sweeping two years of tags with it
+# flagged 33 clean versions for a renamed core package and a Postgres driver.
+if [ "$#" -gt 0 ]; then
+  awk '$1 == "legacy" { print "<" $2 ">" }' "$policy" >> "$allowed_root"
+  awk '$1 == "legacy" { print "<" $2 ">" }' "$policy" >> "$allowed_leaf"
+fi
+# module_of <path> -> root | leaf
+module_of() {
+  case "$1" in
+    workcontext/*) printf 'leaf\n' ;;
+    *) printf 'root\n' ;;
   esac
-  return 1
 }
 
 # IMPORTS ARE READ BY GO'S OWN PARSER, not by a regex over lines.
@@ -185,34 +153,33 @@ imports_of_files() {
 }
 
 # offending_import <path> <importpath> -> true when this import is a finding.
+#
+# `import "C"` is not an import path at all, it is an exit from every rule here:
+# a MAC built through the host's crypto library names no Go package. It is
+# named so the message says that, rather than only "not on the list".
 offending_import() {
-  local path="$1" imported="$2"
-  case "$imported" in
-    'crypto/tls'|'crypto/x509')
-      # TLS plumbing, still held to the allowlist.
-      allowed "$path" "$imported" && return 1
-      return 0
-      ;;
-    'crypto/rand')
-      # Randomness is not a key.
-      return 1
-      ;;
-    'crypto/sha256')
-      # The ONE hash with uses here — three digests — held to them by the AST
-      # gate's file and symbol rule. The others are not waved through:
-      # hkdf.Extract(sha512.New, …) and pbkdf2.Key(sha512.New, …) are HMAC, and
-      # both passed this script while `crypto/sha512` sat in the "a hash is not
-      # a signature" list beside it.
-      allowed "$path" "$imported" && return 1
-      return 0
-      ;;
-  esac
-  if printf '%s' "$imported" | grep -Eq "($primitives)|($encoders)|($envelope)" ||
-    [ "$imported" = "encoding/json" ]; then
-    allowed "$path" "$imported" && return 1
+  local path="$1" imported="$2" list entry files
+  if [ "$imported" = "C" ]; then
     return 0
   fi
-  return 1
+  case "$(module_of "$path")" in
+    leaf) list="$allowed_leaf" ;;
+    *) list="$allowed_root" ;;
+  esac
+  # Module-wide: the line is just the path.
+  grep -qxF "<$imported>" "$list" && return 1
+  # Or held to NAMED FILES, which is what keeps this as strict as the denylist
+  # it replaced: that one held encoding/json to named paths, and a module-wide
+  # line let any root file have it.
+  entry=$(grep -F "<$imported " "$list" | head -1)
+  if [ -n "$entry" ]; then
+    files=${entry#"<$imported "}
+    files=${files%>}
+    for allowed_file in $files; do
+      [ "$allowed_file" = "$path" ] && return 1
+    done
+  fi
+  return 0
 }
 
 carrying_in_tree() {
@@ -332,20 +299,26 @@ if [ "$status" -ne 0 ]; then
   cat >&2 <<'MSG'
 
 A wire contract has exactly one implementation, in the repository that owns the
-type: codefly-dev/core/workcontext. The files above import a signature, a MAC, a
-token library or a second encoding of the message.
+type: codefly-dev/core/workcontext. The imports above are not on their module's
+allowlist in scripts/allowed-imports.txt.
 
-There is no "and it also mentions WorkContext" condition any more: that was
-satisfied by splitting a signer across two files. If a file above has an honest
-need for one of these, add it to allowed() by path WITH A REASON, so the next
-reader sees the argument rather than the exception.
+THIS IS DENY BY DEFAULT, and that is the point. The rule here was a denylist of
+names for ten rounds of review and every round found the next name — hkdf, then
+sha512, then protoiface, and finally crypto/mldsa signing a WorkContextV1 that
+encoding/json/v2 had encoded in the deleted format, with every gate green. If an
+import above is honest, add it to scripts/allowed-imports.txt WITH A REASON, in
+a reviewed diff. That is the cost, and it is one line instead of a round.
 
-Delete them and reach core's Verifier through workcontext/core.go. This
-repository once held a second implementation signing hand-written JSON. The
-signatures were sound; the key id is a field inside the payload, so reading a
-protobuf payload as JSON yielded no key id and the failure surfaced as "unknown
-key" / "signature does not verify under key X" — which reads like a rotated key,
-so keys are what everyone investigated.
+`import "C"` is refused outright: cgo is not a package name to add to a list, it
+is an exit from every rule here — a MAC built through the host's crypto library
+names no Go package at all.
+
+Reach core's Verifier through workcontext/core.go. This repository once held a
+second implementation signing hand-written JSON. The signatures were sound; the
+key id is a field inside the payload, so reading a protobuf payload as JSON
+yielded no key id and the failure surfaced as "unknown key" / "signature does
+not verify under key X" — which reads like a rotated key, so keys are what
+everyone investigated.
 MSG
 fi
 exit "$status"

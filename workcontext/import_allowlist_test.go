@@ -10,6 +10,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -46,86 +47,66 @@ import (
 //   - Anything a dependency does. This is a rule about what THIS repository
 //     spells.
 
-// allowedImports is every import path a module's non-test code may use.
+// allowedImports is every import path a module's non-test code may use, READ
+// FROM scripts/allowed-imports.txt.
 //
-// Measured from the tree with `go list`, not written from memory, and the test
-// below fails in BOTH directions: an import that is not here is a finding, and
-// an entry here that nothing imports is deleted, because a permission nobody
+// It was a map in this file, and that was the hole: the ref sweep is the only
+// thing that runs over a published ref, and it had its own denylist — so a
+// branch carrying `crypto/mldsa` and `encoding/json/v2`, which is the round-six
+// second implementation, swept `ok` in the job that is a required check. Two
+// policies is one policy and one hole. One file now, read by both.
+//
+// The test below fails in BOTH directions: an import not in the file is a
+// finding, and a line nothing imports is deleted, because a permission nobody
 // uses is precedent for the next reader.
-var allowedImports = map[string][]string{
-	"root": {
-		"bufio", "bytes", "context", "database/sql", "embed",
-		"encoding/binary", "encoding/json", "errors", "fmt", "io", "os",
-		"path/filepath", "runtime/debug", "sort", "strconv", "strings",
-		"sync", "time",
-		// scripts/importsof reads a Go file's imports WITH GO'S OWN PARSER,
-		// because the sweep's awk extractor was walked past five more times —
-		// `import "\x63rypto/ed25519"` compiles, is crypto/ed25519 to the
-		// compiler, and is not that string to anything matching text. It is a
-		// main package that ships to nobody; being here is what makes it
-		// visible rather than exempt.
-		"go/parser", "go/token",
-		// The ONE hash, for three digests. A hand-rolled HMAC over it is the
-		// residue named above.
-		"crypto/sha256",
-		// The workload's own TLS, which is this module's job.
-		"crypto/tls", "crypto/x509",
-		"connectrpc.com/connect",
-		"github.com/codefly-dev/core/composition",
-		"github.com/codefly-dev/core/configurations",
-		"github.com/codefly-dev/core/generated/go/codefly/base/v0",
-		"github.com/codefly-dev/core/generated/go/codefly/runnable/v0",
-		"github.com/codefly-dev/core/network",
-		"github.com/codefly-dev/core/resources",
-		"github.com/codefly-dev/core/runnable",
-		"github.com/codefly-dev/core/standards",
-		"github.com/codefly-dev/core/wool",
-		"github.com/codefly-dev/sdk-go/receipts",
-		"google.golang.org/grpc",
-		"google.golang.org/grpc/codes",
-		"google.golang.org/grpc/metadata",
-		"google.golang.org/grpc/status",
-		// The receipts digest canonicalises a receipt REQUEST, never a
-		// capability, and the replay path resolves a response type at runtime.
-		// Each is held to files and symbols by the rules in
-		// one_implementation_test.go; being on this list is necessary and not
-		// sufficient.
-		"google.golang.org/protobuf/encoding/protojson",
-		"google.golang.org/protobuf/proto",
-		"google.golang.org/protobuf/reflect/protodesc",
-		"google.golang.org/protobuf/reflect/protoreflect",
-		"google.golang.org/protobuf/reflect/protoregistry",
-		"google.golang.org/protobuf/types/descriptorpb",
-		"google.golang.org/protobuf/types/dynamicpb",
-		"google.golang.org/protobuf/types/known/durationpb",
-	},
-	"leaf": {
-		"bytes", "context", "encoding/binary", "encoding/hex", "errors",
-		"fmt", "io", "mime", "net/http", "net/url", "os", "slices",
-		"strconv", "strings", "sync", "sync/atomic", "time",
-		"crypto/sha256",
-		"crypto/tls", "crypto/x509",
-		// Held to ENCODE-only in one file, and to two types in one file,
-		// by the rules in one_implementation_test.go.
-		"encoding/base64", "encoding/json",
-		"github.com/codefly-dev/core/generated/go/codefly/base/v0",
-		"github.com/codefly-dev/core/workcontext",
-		"github.com/codefly-dev/sdk-go/workcontext",
-		"google.golang.org/grpc",
-		"google.golang.org/grpc/codes",
-		"google.golang.org/grpc/metadata",
-		"google.golang.org/grpc/status",
-		"google.golang.org/protobuf/proto",
-	},
+func allowedImportsFor(t *testing.T, module string) []string {
+	t.Helper()
+	policy := loadImportPolicy(t)
+	require.Contains(t, policy, module, "the policy file lists no module %q", module)
+	return policy[module]
+}
+
+// loadImportPolicy parses the shared policy file.
+func loadImportPolicy(t *testing.T) map[string][]string {
+	t.Helper()
+	raw, err := os.ReadFile(filepath.Join("..", "scripts", "allowed-imports.txt"))
+	require.NoError(t, err, "the import policy is the gate; a gate with no policy is not one")
+
+	policy := map[string][]string{}
+	for index, line := range strings.Split(string(raw), "\n") {
+		trimmed := strings.TrimSpace(line)
+		if trimmed == "" || strings.HasPrefix(trimmed, "#") {
+			continue
+		}
+		module, rest, found := strings.Cut(trimmed, " ")
+		require.True(t, found, "line %d is not `<module> <importpath> [file …]`: %q", index+1, line)
+		// A line may name the FILES that may have the import. This package
+		// checks module membership; the file list is what keeps the ref sweep
+		// as strict as the denylist it replaced, and the Go gate's own
+		// narrowedImports holds the same imports to files AND symbols.
+		path, _, _ := strings.Cut(rest, " ")
+		require.Contains(t, []string{"root", "leaf", "legacy"}, module,
+			"line %d names %q, which is not root, leaf or legacy", index+1, module)
+		// `legacy` is the historical allowance, applied by the sweep to
+		// published refs only — never to the working tree, which is what this
+		// package checks. It is kept out of the module lists deliberately: a
+		// path in it must not become permitted in a checkout, and
+		// TestTheHistoricalImportAllowanceCarriesNothingCapabilityShaped is
+		// what holds it to being benign.
+		policy[module] = append(policy[module], strings.TrimSpace(path))
+	}
+	require.NotEmpty(t, policy["root"])
+	require.NotEmpty(t, policy["leaf"])
+	return policy
 }
 
 // TestEveryImportIsOnItsModulesAllowlist is the deny-by-default rule.
 func TestEveryImportIsOnItsModulesAllowlist(t *testing.T) {
 	for _, module := range loadModules(t) {
-		_, ok := allowedImports[module.name]
-		require.True(t, ok, "no allowlist for module %q", module.name)
+		allowed := allowedImportsFor(t, module.name)
+		require.NotEmpty(t, allowed)
 
-		for _, finding := range unallowedImports(module.name, importsOfModule(t, module)) {
+		for _, finding := range unallowedImports(module.name, allowed, importsOfModule(t, module)) {
 			t.Error(finding)
 		}
 
@@ -138,7 +119,7 @@ func TestEveryImportIsOnItsModulesAllowlist(t *testing.T) {
 func TestTheAllowlistHasNoUnusedPermission(t *testing.T) {
 	for _, module := range loadModules(t) {
 		used := importsOfModule(t, module)
-		for _, spec := range allowedImports[module.name] {
+		for _, spec := range allowedImportsFor(t, module.name) {
 			require.Contains(t, used, spec,
 				"allowedImports[%q] permits %q and no file in that module imports it. "+
 					"An unused permission is precedent; delete the line.", module.name, spec)
@@ -156,34 +137,36 @@ func TestTheAllowlistHasNoUnusedPermission(t *testing.T) {
 // This asserts the loader's patterns reach such a package, because the rule
 // above is only as wide as what it was handed.
 func TestTestdataIsNotAHidingPlace(t *testing.T) {
-	repository, err := filepath.Abs("..")
-	require.NoError(t, err)
-	// A real package under testdata, created for this test and removed with it.
-	directory := filepath.Join(repository, "receipts", "testdata", "gateprobe")
-	require.NoError(t, os.MkdirAll(directory, 0o750))
-	t.Cleanup(func() {
-		_ = os.RemoveAll(filepath.Join(repository, "receipts", "testdata"))
-	})
-	require.NoError(t, os.WriteFile(filepath.Join(directory, "signer.go"),
-		[]byte(`package gateprobe
+	// IN A TEMPORARY DIRECTORY, NOT IN THE REPOSITORY. The first version of
+	// this test created receipts/testdata/gateprobe and its cleanup removed
+	// receipts/testdata — the PARENT. Nothing lives there today, so it did no
+	// harm here, but a test that deletes a directory it did not create will
+	// delete somebody's fixtures the day they add some, and running the suite
+	// is not supposed to be a destructive act. A reviewer was right to call
+	// that a major finding rather than a nit.
+	//
+	// What is actually being asserted is a property of testdataPatterns, which
+	// takes a directory — so it is handed one that belongs to this test.
+	root := t.TempDir()
+	probe := filepath.Join(root, "receipts", "testdata", "gateprobe")
+	require.NoError(t, os.MkdirAll(probe, 0o750))
+	require.NoError(t, os.WriteFile(filepath.Join(probe, "signer.go"),
+		[]byte("package gateprobe\n\nimport \"crypto/ed25519\"\n\n"+
+			"func Sign(key ed25519.PrivateKey, payload []byte) []byte {\n"+
+			"\treturn ed25519.Sign(key, payload)\n}\n"), 0o600))
 
-import "crypto/ed25519"
+	require.Contains(t, testdataPatterns(t, root), "./receipts/testdata/...",
+		"the loader must be given the testdata packages explicitly; ./... does not match them, "+
+			"and a reviewer imported a complete Ed25519 signer from one")
 
-// Sign is the shape a reviewer imported from a root file.
-func Sign(key ed25519.PrivateKey, payload []byte) []byte {
-	return ed25519.Sign(key, payload)
-}
-`), 0o600))
+	// A directory with no testdata in it yields no patterns, so the walk is
+	// not simply returning everything.
+	require.Empty(t, testdataPatterns(t, t.TempDir()))
 
-	patterns := testdataPatterns(t, repository)
-	require.Contains(t, patterns, "./receipts/testdata/...",
-		"the loader must be given the testdata packages explicitly; ./... does not match them")
-
-	// And the rule refuses it, which is the point of reaching it.
-	findings := unallowedImports("root", map[string][]string{
+	// And the rule refuses what is in there, which is the point of reaching it.
+	require.NotEmpty(t, unallowedImports("root", allowedImportsFor(t, "root"), map[string][]string{
 		"crypto/ed25519": {"receipts/testdata/gateprobe/signer.go"},
-	})
-	require.NotEmpty(t, findings, "a signer under testdata is still a signer")
+	}), "a signer under testdata is still a signer")
 }
 
 // A package that does not type-check is a package this gate has not read, and
@@ -231,8 +214,7 @@ func importsOfModule(t *testing.T, module loadedModule) map[string][]string {
 // only way to ask "would this refuse crypto/mldsa?" through it is to commit
 // crypto/mldsa. A rule that cannot be probed is a rule nobody has tested, which
 // is the finding that prompted this whole file.
-func unallowedImports(module string, used map[string][]string) []string {
-	allowed := allowedImports[module]
+func unallowedImports(module string, allowed []string, used map[string][]string) []string {
 	var findings []string
 	for _, spec := range sortedKeys(used) {
 		files := strings.Join(used[spec], ", ")
@@ -300,9 +282,8 @@ func TestTheImportAllowlistRefusesTheNextName(t *testing.T) {
 		"cgo": {"leaf", "C"},
 	} {
 		t.Run(name, func(t *testing.T) {
-			findings := unallowedImports(probe.module, map[string][]string{
-				probe.spec: {"second_implementation.go"},
-			})
+			findings := unallowedImports(probe.module, allowedImportsFor(t, probe.module),
+				map[string][]string{probe.spec: {"second_implementation.go"}})
 			require.NotEmpty(t, findings,
 				"%q is not on the %s allowlist and must be a finding", probe.spec, probe.module)
 			if probe.spec == "C" {
@@ -321,11 +302,12 @@ func TestTheImportAllowlistRefusesTheNextName(t *testing.T) {
 	// by refusing everything — which is also the mutation guard for the cases
 	// above.
 	for _, module := range []string{"root", "leaf"} {
+		allowed := allowedImportsFor(t, module)
 		used := map[string][]string{}
-		for _, spec := range allowedImports[module] {
+		for _, spec := range allowed {
 			used[spec] = []string{"real.go"}
 		}
-		require.Empty(t, unallowedImports(module, used),
+		require.Empty(t, unallowedImports(module, allowed, used),
 			"module %s refuses an import it actually has", module)
 	}
 }
@@ -362,17 +344,43 @@ func (m loadedModule) relative(loaded *packages.Package, file *ast.File) string 
 // file. The go tool excludes `testdata` from WILDCARD matching, not from
 // importing, so a package there is shipped code that no `./...` ever mentions.
 // It is loaded by explicit pattern for that reason.
+// loadModules type-checks both modules ONCE per test binary.
+//
+// Cached because it is not cheap: the leaf suite went from 60s to 247s when the
+// type-checked gates arrived, and every one of them was re-running the same
+// load. The result is read-only — findings are computed from it, nothing
+// mutates it — so one load serves every test, and the gates stay fast enough
+// that nobody is tempted to skip them.
 func loadModules(t *testing.T) []loadedModule {
 	t.Helper()
+	loadOnce.Do(func() { loadedModules, loadErr = loadBothModules() })
+	require.NoError(t, loadErr)
+	require.NotEmpty(t, loadedModules)
+	return loadedModules
+}
+
+var (
+	loadOnce      sync.Once
+	loadedModules []loadedModule
+	loadErr       error
+)
+
+func loadBothModules() ([]loadedModule, error) {
 	repository, err := filepath.Abs("..")
-	require.NoError(t, err)
+	if err != nil {
+		return nil, fmt.Errorf("resolve the repository root: %w", err)
+	}
 
 	modules := []loadedModule{
 		{name: "root", dir: repository},
 		{name: "leaf", dir: filepath.Join(repository, "workcontext")},
 	}
 	for index := range modules {
-		patterns := append([]string{"./..."}, testdataPatterns(t, modules[index].dir)...)
+		found, err := testdataPackages(modules[index].dir)
+		if err != nil {
+			return nil, err
+		}
+		patterns := append([]string{"./..."}, found...)
 		loaded, err := packages.Load(&packages.Config{
 			Mode: packages.NeedName | packages.NeedFiles | packages.NeedSyntax |
 				packages.NeedTypes | packages.NeedTypesInfo | packages.NeedDeps |
@@ -380,30 +388,41 @@ func loadModules(t *testing.T) []loadedModule {
 			Dir:   modules[index].dir,
 			Tests: true,
 		}, patterns...)
-		require.NoError(t, err, "loading module %s", modules[index].name)
-		require.NotEmpty(t, loaded, "module %s loaded no packages", modules[index].name)
+		if err != nil {
+			return nil, fmt.Errorf("loading module %s: %w", modules[index].name, err)
+		}
+		if len(loaded) == 0 {
+			return nil, fmt.Errorf("module %s loaded no packages", modules[index].name)
+		}
 		for _, one := range loaded {
 			// A package that does not type-check is a package this gate has not
 			// read, and a gate that passes what it could not read is the
-			// fail-open this repository has now fixed four times.
+			// fail-open this repository has now fixed five times.
 			for _, problem := range one.Errors {
-				t.Fatalf("module %s: %s did not type-check: %s.\n"+
-					"The type-based rules cannot run on a package that does not compile, and "+
-					"skipping it would be a gate reporting success for code it never read.",
+				return nil, fmt.Errorf(
+					"module %s: %s did not type-check: %s. The type-based rules cannot run on a "+
+						"package that does not compile, and skipping it would be a gate reporting "+
+						"success for code it never read",
 					modules[index].name, one.PkgPath, problem)
 			}
 		}
 		modules[index].packages = loaded
 	}
-	return modules
+	return modules, nil
 }
 
 // testdataPatterns names every package under a testdata directory, which
 // `./...` deliberately does not match.
 func testdataPatterns(t *testing.T, dir string) []string {
 	t.Helper()
+	patterns, err := testdataPackages(dir)
+	require.NoError(t, err)
+	return patterns
+}
+
+func testdataPackages(dir string) ([]string, error) {
 	var patterns []string
-	require.NoError(t, filepath.WalkDir(dir, func(path string, entry os.DirEntry, err error) error {
+	walkErr := filepath.WalkDir(dir, func(path string, entry os.DirEntry, err error) error {
 		if err != nil || !entry.IsDir() {
 			return err //nolint:wrapcheck // the walk's own error, returned as-is
 		}
@@ -414,18 +433,18 @@ func testdataPatterns(t *testing.T, dir string) []string {
 		if entry.Name() != "testdata" {
 			return nil
 		}
-		patterns = append(patterns, "./"+filepath.ToSlash(mustRel(t, dir, path))+"/...")
+		relative, relErr := filepath.Rel(dir, path)
+		if relErr != nil {
+			return relErr //nolint:wrapcheck // the walk's own error
+		}
+		patterns = append(patterns, "./"+filepath.ToSlash(relative)+"/...")
 		return filepath.SkipDir
-	}))
+	})
+	if walkErr != nil {
+		return nil, fmt.Errorf("walk %s for testdata: %w", dir, walkErr)
+	}
 	sort.Strings(patterns)
-	return patterns
-}
-
-func mustRel(t *testing.T, base string, path string) string {
-	t.Helper()
-	relative, err := filepath.Rel(base, path)
-	require.NoError(t, err)
-	return relative
+	return patterns, nil
 }
 
 // typesAreAvailable is a guard on the loader itself: if NeedTypes ever stops

@@ -150,6 +150,7 @@ func sweepOf(t *testing.T, script string, name string, source string) (string, e
 	t.Helper()
 	repository := t.TempDir()
 	require.NoError(t, os.WriteFile(filepath.Join(repository, name), []byte(source), 0o600))
+	require.NoError(t, os.MkdirAll(filepath.Join(repository, "scripts"), 0o755))
 	for _, command := range [][]string{
 		{"git", "init", "--quiet"},
 		{"git", "add", "."},
@@ -159,6 +160,12 @@ func sweepOf(t *testing.T, script string, name string, source string) (string, e
 		output, err := run.CombinedOutput()
 		require.NoError(t, err, "%s: %s", command, output)
 	}
+	// THE POLICY TRAVELS WITH THE SCRIPT. The sweep reads
+	// scripts/allowed-imports.txt beside itself, so a throwaway repository with
+	// only the script in it would fail for want of a policy rather than on the
+	// probe — which is a test passing for the wrong reason in the file whose
+	// subject is exactly that.
+	copyPolicy(t, filepath.Dir(script), filepath.Join(repository, "scripts"))
 	sweep := exec.Command("bash", script)
 	sweep.Dir = repository
 	sweep.Env = sweepEnv(t)
@@ -291,6 +298,14 @@ func runIn(t *testing.T, dir string, command string, args ...string) {
 	require.NoError(t, err, "%s %v: %s", command, args, output)
 }
 
+// copyPolicy puts the real import policy beside a throwaway copy of the script.
+func copyPolicy(t *testing.T, fromDir string, toDir string) {
+	t.Helper()
+	require.NoError(t, os.MkdirAll(toDir, 0o755))
+	copyFile(t, filepath.Join(fromDir, "allowed-imports.txt"),
+		filepath.Join(toDir, "allowed-imports.txt"))
+}
+
 func copyFile(t *testing.T, from string, to string) {
 	t.Helper()
 	content, err := os.ReadFile(from)
@@ -382,6 +397,7 @@ func TestTheSweepRefusesWhenItCouldNotLook(t *testing.T) {
 		runIn(t, repository, "git", "branch", "gitlinked")
 		require.NoError(t, os.MkdirAll(filepath.Join(repository, "scripts"), 0o755))
 		copyFile(t, checker, filepath.Join(repository, "scripts", "check-one-implementation.sh"))
+		copyPolicy(t, filepath.Dir(checker), filepath.Join(repository, "scripts"))
 
 		run := exec.Command("bash", "scripts/check-one-implementation.sh", "gitlinked")
 		run.Dir = repository
@@ -484,6 +500,7 @@ func clonedRemote(t *testing.T, sweep string, checker string, branch string) str
 	require.NoError(t, os.MkdirAll(filepath.Join(clone, "scripts"), 0o755))
 	copyFile(t, sweep, filepath.Join(clone, "scripts", "sweep-published-refs.sh"))
 	copyFile(t, checker, filepath.Join(clone, "scripts", "check-one-implementation.sh"))
+	copyPolicy(t, filepath.Dir(checker), filepath.Join(clone, "scripts"))
 	return clone
 }
 

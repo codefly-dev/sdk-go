@@ -27,3 +27,23 @@ require (
 	google.golang.org/genproto/googleapis/api v0.0.0-20260819154853-08b0e4226688 // indirect
 	google.golang.org/genproto/googleapis/rpc v0.0.0-20260825221802-da73d73af1c5 // indirect
 )
+
+// RETRACTED: every version of THIS module published before the second Work
+// Context implementation was deleted from it.
+//
+// This module carries the files from root tag v0.1.66 onward — they live under
+// workcontext/, which is this module, so the root module's zip excludes them
+// and the root module's retract directive says nothing about them. A review
+// found the root retraction aimed at the wrong module and confirmed it from the
+// cache: github.com/codefly-dev/sdk-go/workcontext@v0.0.0-20260928181007-c1fc359f112f
+// resolves today and its zip contains work_context.go.
+//
+// A RANGE OF PSEUDO-VERSIONS, because this module has never been tagged: every
+// version of it that a consumer can resolve is a pseudo-version of a commit,
+// and every commit before this change carries the implementation. The high
+// bound is a timestamp later than any of them and earlier than any release that
+// could carry this file, so it covers all of them and none of what comes after.
+//
+// Effective only once workcontext/vX.Y.Z is tagged carrying this go.mod, which
+// is the owner's release step.
+retract [v0.0.0, v0.0.0-20261004000000-zzzzzzzzzzzz]

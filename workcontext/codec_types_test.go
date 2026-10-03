@@ -142,9 +142,28 @@ func inspectCodecUses(loaded *packages.Package, file *ast.File, path string) []s
 			if kind == nil {
 				continue
 			}
+			// A NAMED CAPABILITY IS ANSWERED FIRST, by its row. The
+			// interface walk below is transitive now, and a generated
+			// message's own internals must not be what decides a call that a
+			// row already permits.
+			if named := capabilityWithin(kind, map[types.Type]bool{}); named != "" {
+				if permittedCapabilityCodec(path, named) {
+					continue
+				}
+				findings = append(findings, fmt.Sprintf(
+					"%s applies %s to %s, which is or contains %s.\n"+
+						"A Work Context message passes through a codec only where a row names it.\n"+
+						"Reading one off the wire is corework.Inspect's job, and it returns the claims\n"+
+						"it decoded. This catches it THROUGH a field as well: a *Claims embedded in\n"+
+						"mintRequest put a whole capability on the wire through a row written for two\n"+
+						"strings, and the alias lived in another file, so no syntactic rule could see it.",
+					path, function.FullName(), kind, named))
+				continue
+			}
 			// A TYPE PARAMETER OR AN INTERFACE IS NOT A TYPE, it is a
 			// promise that one will turn up at the call site — which is
-			// exactly where a capability turned up in six separate probes.
+			// exactly where a capability turned up in seven separate probes,
+			// the last of them wrapped in a concrete struct.
 			if isUnknownToTheGate(kind) {
 				if permittedIndirection(loaded, file, call.Pos()) {
 					continue
@@ -159,19 +178,51 @@ func inspectCodecUses(loaded *packages.Package, file *ast.File, path string) []s
 					path, function.FullName(), kind, codecIndirectionObjects))
 				continue
 			}
-			if named := capabilityWithin(kind, map[types.Type]bool{}); named != "" {
-				if permittedCapabilityCodec(path, named) {
-					continue
-				}
-				findings = append(findings, fmt.Sprintf(
-					"%s applies %s to %s, which is or contains %s.\n"+
-						"A Work Context message passes through a codec only where a row names it.\n"+
-						"Reading one off the wire is corework.Inspect's job, and it returns the claims\n"+
-						"it decoded. This catches it THROUGH a field as well: a *Claims embedded in\n"+
-						"mintRequest put a whole capability on the wire through a row written for two\n"+
-						"strings, and the alias lived in another file, so no syntactic rule could see it.",
-					path, function.FullName(), kind, named))
+		}
+		return true
+	})
+
+	// A CAPABILITY HANDED INTO ONE OF THE PERMITTED INDIRECTIONS.
+	//
+	// The indirections exist because those four functions take an interface by
+	// design, and the exemption was granted at the CODEC call inside them. But
+	// nothing looked at their CALLERS, so
+	//
+	//	decodeDocument(name, payload, &basev0.WorkContextV1{})
+	//
+	// reached a json.Unmarshal of a capability through an exemption written for
+	// the runtime's own configuration documents — and configuration_document.go
+	// decodes into the generated struct, whose json tags are snake_case, which
+	// IS the deleted format. The hole was named at 04e93c0 as needing go/types;
+	// having go/types did not close it, because the rule was still only about
+	// codec calls.
+	//
+	// There is no row here and there is not going to be one: these four take a
+	// caller's own messages, never a capability.
+	ast.Inspect(file, func(node ast.Node) bool {
+		call, ok := node.(*ast.CallExpr)
+		if !ok {
+			return true
+		}
+		indirection := indirectionFunctionOf(loaded, call.Fun)
+		if indirection == "" {
+			return true
+		}
+		for _, argument := range call.Args {
+			kind := loaded.TypesInfo.TypeOf(argument)
+			named := capabilityWithin(kind, map[types.Type]bool{})
+			if named == "" {
+				continue
 			}
+			findings = append(findings, fmt.Sprintf(
+				"%s passes %s, which is or contains %s, into %s.\n"+
+					"That function is on the codec-indirection allowlist because it takes an\n"+
+					"interface BY DESIGN — a caller's own request, response or configuration\n"+
+					"document. The exemption is for the codec call inside it, not for handing it a\n"+
+					"capability: decodeDocument json-decodes into its destination, and a\n"+
+					"WorkContextV1's json tags are snake_case, which is the format this module\n"+
+					"deleted. corework.Inspect reads a capability.",
+				path, kind, named, indirection))
 		}
 		return true
 	})
@@ -204,6 +255,45 @@ func inspectCodecUses(loaded *packages.Package, file *ast.File, path string) []s
 		return true
 	})
 	return findings
+}
+
+// indirectionFunctionOf names the permitted indirection an expression calls, or
+// "". It is the same (package, Receiver.Function) key the exemption uses, so
+// the two cannot disagree about which function is meant.
+func indirectionFunctionOf(loaded *packages.Package, expression ast.Expr) string {
+	var identifier *ast.Ident
+	switch typed := expression.(type) {
+	case *ast.Ident:
+		identifier = typed
+	case *ast.SelectorExpr:
+		identifier = typed.Sel
+	default:
+		return ""
+	}
+	object, ok := loaded.TypesInfo.Uses[identifier]
+	if !ok {
+		object = loaded.TypesInfo.Defs[identifier]
+	}
+	function, ok := object.(*types.Func)
+	if !ok || function.Pkg() == nil {
+		return ""
+	}
+	qualified := function.Name()
+	if signature, ok := function.Type().(*types.Signature); ok && signature.Recv() != nil {
+		receiver := signature.Recv().Type()
+		if pointer, ok := types.Unalias(receiver).(*types.Pointer); ok {
+			receiver = pointer.Elem()
+		}
+		named, ok := types.Unalias(receiver).(*types.Named)
+		if !ok || named.Obj() == nil {
+			return ""
+		}
+		qualified = named.Obj().Name() + "." + function.Name()
+	}
+	if slices.Contains(codecIndirectionObjects[function.Pkg().Path()], qualified) {
+		return function.Pkg().Path() + "." + qualified
+	}
+	return ""
 }
 
 // codecFunctionOf resolves an expression to a codec function's OBJECT, or nil.
@@ -254,19 +344,78 @@ func codecFunctionOf(loaded *packages.Package, expression ast.Expr) *types.Func 
 }
 
 // isUnknownToTheGate reports whether a type says "whatever the caller passes"
-// — an interface, or a type parameter, which is the same answer.
+// — an interface, a type parameter, or anything that CONTAINS one.
 //
 // It had an explicit *types.TypeParam branch, and a mutation showed the branch
 // was dead: a type parameter's underlying type IS its constraint interface, so
-// types.IsInterface already returns true for one. Two readings of the same
-// question, one of them untestable, so it is deleted rather than left as a
-// branch no test can reach.
+// types.IsInterface already returns true for one.
+//
+// THE "CONTAINS" PART IS THE ROUND-SEVEN BLOCKER, and it needed no handwritten
+// anything:
+//
+//	type envelopeTarget struct{ proto.Message }
+//
+//	func decode(raw []byte, dst *basev0.WorkContextV1) error {
+//	    return proto.Unmarshal(raw, &envelopeTarget{Message: dst})
+//	}
+//
+// The wrapper is CONCRETE, so checking the outer type answered "known"; the
+// capability walk descended into it, reached `proto.Message`, and had no
+// interface case so returned nothing; and the syntactic gate resolved
+// `envelopeTarget` as neither a capability nor a codec interface. Three checks,
+// three misses, and the embedded interface's promoted ProtoReflect delegates
+// to the capability — so this is the ordinary protobuf decoder, which the
+// documented handwritten-wire-walk exception does not cover.
+//
+// A struct carrying an interface IS an interface as far as a codec is
+// concerned: what it holds is chosen at the call site. So the walk is
+// transitive, and the only thing that makes such an argument acceptable is one
+// of the named indirections.
 func isUnknownToTheGate(kind types.Type) bool {
-	// A pointer to an interface is still an interface's worth of unknown.
-	for pointer, ok := types.Unalias(kind).(*types.Pointer); ok; pointer, ok = types.Unalias(kind).(*types.Pointer) {
-		kind = pointer.Elem()
+	return carriesAnInterface(kind, map[types.Type]bool{})
+}
+
+// carriesAnInterface walks a type for an interface or a type parameter, through
+// pointers, slices, arrays, maps, aliases and STRUCT FIELDS — embedded ones
+// included, which is where the promoted codec interface hides.
+//
+// It does not descend into CORE's own types: a generated message's internal
+// state is core's business, and a capability reached through a row is answered
+// by capabilityWithin before this is consulted.
+func carriesAnInterface(kind types.Type, seen map[types.Type]bool) bool {
+	if kind == nil || seen[kind] {
+		return false
 	}
-	return types.IsInterface(kind)
+	seen[kind] = true
+	switch typed := types.Unalias(kind).(type) {
+	case *types.Interface:
+		return true
+	case *types.TypeParam:
+		return true
+	case *types.Pointer:
+		return carriesAnInterface(typed.Elem(), seen)
+	case *types.Slice:
+		return carriesAnInterface(typed.Elem(), seen)
+	case *types.Array:
+		return carriesAnInterface(typed.Elem(), seen)
+	case *types.Map:
+		return carriesAnInterface(typed.Elem(), seen)
+	case *types.Named:
+		if types.IsInterface(typed) {
+			return true
+		}
+		if strings.HasPrefix(packagePathOf(typed.Obj()), coreModulePath) {
+			return false
+		}
+		return carriesAnInterface(typed.Underlying(), seen)
+	case *types.Struct:
+		for index := range typed.NumFields() {
+			if carriesAnInterface(typed.Field(index).Type(), seen) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // capabilityWithin names the capability a type is, or carries in a field, or
@@ -541,6 +690,42 @@ func into(raw []byte, c *basev0.WorkContextV1) error { return use(proto.Unmarsha
 		},
 		// L5's other half: the capability reached THROUGH A FIELD, by an alias
 		// declared in another file. No syntactic rule could resolve it.
+		// ROUND SEVEN'S BLOCKER: a CONCRETE wrapper around an embedded
+		// interface. No handwritten anything — the promoted ProtoReflect
+		// delegates to the capability, so this is the ordinary protobuf
+		// decoder, and three separate checks each missed it for a different
+		// reason.
+		"a concrete wrapper around an embedded codec interface": {
+			source: `type envelopeTarget struct{ proto.Message }
+
+func decode(raw []byte, dst *basev0.WorkContextV1) error {
+	return proto.Unmarshal(raw, &envelopeTarget{Message: dst})
+}`,
+			says: "interface or a type parameter",
+		},
+		// And the same hiding place one level deeper, so the walk is
+		// transitive rather than one-field-deep.
+		"an interface two structs down": {
+			source: `type inner struct{ proto.Message }
+type outer struct {
+	Name  string
+	Inner inner
+}
+
+func decode(raw []byte, dst *basev0.WorkContextV1) error {
+	wrapped := outer{Inner: inner{Message: dst}}
+	return proto.Unmarshal(raw, &wrapped.Inner)
+}`,
+			says: "interface or a type parameter",
+		},
+		// A SLICE of them, because a codec takes one element at a time and the
+		// walk must not stop at the container.
+		"an interface behind a slice": {
+			source: `type batch []proto.Message
+
+func decode(raw []byte, all batch) error { return proto.Unmarshal(raw, all[0]) }`,
+			says: "interface or a type parameter",
+		},
 		// L5, as executed: json.Marshal of a struct whose EMBEDDED field is a
 		// capability, through an alias declared in another file. The argument's
 		// own type is concrete — mintRequest — so no interface rule fires and
@@ -627,6 +812,26 @@ func (other) Handle(raw []byte, m proto.Message) error { return proto.Unmarshal(
 						"every method spelled the same")
 			})
 		}
+	})
+
+	// A CAPABILITY HANDED INTO A PERMITTED INDIRECTION. The exemption is for
+	// the codec call inside those four functions; their callers were never
+	// looked at, and configuration_document.go json-decodes into its
+	// destination with the generated struct's snake_case tags.
+	t.Run("a capability passed into a permitted indirection", func(t *testing.T) {
+		const rootPath = "github.com/codefly-dev/sdk-go"
+		loaded, file := typeCheckedProbeIn(t, rootPath, preamble+`func decodeDocument(name string, content []byte, destination any) error {
+	return json.Unmarshal(content, destination)
+}
+
+func read(raw []byte) (*basev0.WorkContextV1, error) {
+	claims := &basev0.WorkContextV1{}
+	return claims, decodeDocument("work-context", raw, claims)
+}`)
+		findings := inspectCodecUses(loaded, file, "configuration_document.go")
+		require.NotEmpty(t, findings,
+			"the exemption is for the codec INSIDE decodeDocument, not for handing it a capability")
+		require.Contains(t, strings.Join(findings, "\n"), "into github.com/codefly-dev/sdk-go.decodeDocument")
 	})
 
 	// A POINTER TO AN INTERFACE is still an interface's worth of unknown, and

@@ -6,11 +6,6 @@ import (
 	"fmt"
 	"go/ast"
 	"net/http"
-	"os"
-	"path/filepath"
-	"regexp"
-	"slices"
-	"strings"
 	"testing"
 	"time"
 
@@ -192,110 +187,52 @@ func encode(a string) ([]byte, error) { return json.Marshal(mintRequest{Audience
 		"the frozen field sets must match the structs this repository really has")
 }
 
-// B2. THE TWO GATES' BAN LISTS DISAGREED, in both directions.
+// ROUND SEVEN, BLOCKER: THE PUBLISHED-REF SWEEP WAS STILL A DENYLIST.
 //
-// Measured: four import paths the AST gate bans — the legacy protobuf module,
-// protoiface, protoimpl, and a vendored path ending /ed25519 — passed the shell
-// sweep with `ok working tree (4 Go files)`, exit 0. That is the ROOT module,
-// where the sweep is the only gate. And in the other direction the shell banned
-// crypto/cipher, crypto/aes, crypto/des and crypto/rc4 — a GMAC or a CMAC is a
-// MAC assembled from a block cipher and names no MAC — while this gate, the one
-// that reads the module the capability lives in, did not.
+// The deny-by-default rule lived in this package, which reads a CHECKOUT. The
+// ref sweep is the only thing that runs over a published ref — and it is the
+// whole of the required check — and it had its own three regexes. A reviewer
+// ran that predicate over the round-six second implementation:
 //
-// Both lists are now entry-for-entry, and THIS is what keeps them that way: two
-// lists a person maintains by hand are two lists, and the only thing that makes
-// them one is a test that fails when they differ.
-func TestTheShellSweepBansEverythingTheASTGateBans(t *testing.T) {
-	script, err := os.ReadFile(filepath.Join("..", "scripts", "check-one-implementation.sh"))
-	require.NoError(t, err)
+//	encoding/json/v2    permitted
+//	crypto/mldsa        permitted
+//	protodelim          permitted
+//	grpc/encoding       permitted
+//	C                   permitted
+//	crypto/ed25519      rejected
+//
+// So the pair that encodes a WorkContextV1 in the deleted format and signs it
+// could sit on any branch with the required check green. Two policies is one
+// policy and one hole.
+//
+// There is one policy file now, scripts/allowed-imports.txt, read by this
+// package and by the sweep. This test is what makes "one" true: it asserts the
+// file describes the tree, and the sweep's own tests assert the sweep enforces
+// the file.
+func TestOneImportPolicyGovernsTheTreeAndEveryPublishedRef(t *testing.T) {
+	policy := loadImportPolicy(t)
 
-	shell := shellBanPatterns(t, string(script))
-
-	for _, path := range bannedImports {
-		require.True(t, shell.matches(path),
-			"the AST gate bans %q and the shell sweep does not. The sweep is the ONLY gate in "+
-				"the root module, so a ban that lives only here does not hold where the deleted "+
-				"implementation actually lived.", path)
-	}
-	for _, fragment := range bannedImportSubstrings {
-		require.True(t, shell.matches("github.com/vendored/"+fragment),
-			"the AST gate bans any path containing %q and the shell sweep does not match "+
-				"a vendored one", fragment)
-	}
-	for _, prefix := range bannedImportPrefixes {
-		require.True(t, shell.matches(prefix+"ed25519"),
-			"the AST gate bans the prefix %q and the shell sweep does not", prefix)
-	}
-	for _, path := range envelopeDecoders {
-		require.True(t, shell.matches(path),
-			"the AST gate bans the envelope decoder %q and the shell sweep does not", path)
-	}
-
-	// AND THE REVERSE, which is the direction that was wrong for the cipher
-	// family. Anything the sweep refuses repository-wide must be refused here
-	// too, unless this gate holds it to named files and symbols instead —
-	// which is strictly stronger, not weaker.
-	for _, path := range []string{
-		"crypto", "crypto/ed25519", "crypto/ecdsa", "crypto/rsa", "crypto/dsa",
-		"crypto/hmac", "crypto/ecdh", "crypto/elliptic", "crypto/subtle",
-		"crypto/cipher", "crypto/aes", "crypto/des", "crypto/rc4",
-		"crypto/sha512", "crypto/sha1", "crypto/sha3", "crypto/md5",
-		"crypto/hkdf", "crypto/pbkdf2",
-		"encoding/gob", "encoding/asn1", "encoding/xml",
-		"google.golang.org/protobuf/encoding/protojson",
-		"google.golang.org/protobuf/encoding/protowire",
+	// THE SHAPES THE OLD DENYLIST PERMITTED. Each is absent from both module
+	// lists, so each is a finding wherever it appears — checkout or ref.
+	for _, spec := range []string{
+		"encoding/json/v2", "crypto/mldsa",
+		"google.golang.org/protobuf/encoding/protodelim",
+		"google.golang.org/grpc/encoding",
+		"google.golang.org/protobuf/encoding/prototext",
+		"encoding/json/jsontext", "crypto/hpke",
 	} {
-		if !shell.matches(path) {
-			continue
-		}
-		_, narrowed := narrowedImports[path]
-		require.True(t, slices.Contains(bannedImports, path) || narrowed,
-			"the shell sweep refuses %q repository-wide and this gate neither bans it nor "+
-				"holds it to named files and symbols — so the module the capability lives in "+
-				"is the one with the weaker rule", path)
-	}
-}
-
-// shellBans is the sweep's three regexes, compiled.
-type shellBans struct{ patterns []*regexp.Regexp }
-
-func (b shellBans) matches(path string) bool {
-	for _, pattern := range b.patterns {
-		if pattern.MatchString(path) {
-			return true
+		for _, module := range []string{"root", "leaf"} {
+			require.NotContains(t, policy[module], spec,
+				"%q is on the %s allowlist, so the sweep permits it on every published ref",
+				spec, module)
 		}
 	}
-	return false
-}
 
-// shellBanPatterns reads primitives=, encoders= and envelope= out of the script
-// itself, so the test cannot drift from the file it is about by being updated
-// alongside a copy of it.
-func shellBanPatterns(t *testing.T, script string) shellBans {
-	t.Helper()
-	var bans shellBans
-	for _, name := range []string{"primitives", "encoders", "envelope"} {
-		found := false
-		for _, line := range strings.Split(script, "\n") {
-			prefix := name + "='"
-			if !strings.HasPrefix(line, prefix) || !strings.HasSuffix(line, "'") {
-				continue
-			}
-			expression := strings.TrimSuffix(strings.TrimPrefix(line, prefix), "'")
-			compiled, err := regexp.Compile(expression)
-			require.NoError(t, err, "%s= is not a usable expression: %s", name, expression)
-			bans.patterns = append(bans.patterns, compiled)
-			found = true
-			break
-		}
-		require.True(t, found,
-			"no %s= assignment in check-one-implementation.sh; this test reads the script's own "+
-				"lists and cannot check a list it cannot find", name)
+	// And `C` is never on a list, because it is not a path. The sweep refuses
+	// it by name; adding it here would be a line somebody could write.
+	for _, module := range []string{"root", "leaf"} {
+		require.NotContains(t, policy[module], "C")
 	}
-	// encoding/json is handled by exact name in the sweep rather than by one of
-	// the three expressions, so it is added here to match.
-	bans.patterns = append(bans.patterns, regexp.MustCompile(`^encoding/json$`))
-	return bans
 }
 
 // B5. RequestTimeout DID NOT BOUND THE DETACHED ATTEMPT.

@@ -1,0 +1,133 @@
+# THE ONE IMPORT POLICY, read by the Go gate and by the ref sweep.
+#
+# Deny by default, per module: an import that is not listed is a finding. This
+# file exists because the policy lived only in `go test`, which reads a
+# CHECKOUT — and the ref sweep is the only thing that runs over a published ref,
+# where there is nothing to type-check. So a branch carrying `crypto/mldsa` and
+# `encoding/json/v2` — the round-six second implementation — swept `ok`, in the
+# one job that is a required check. Two policies is one policy and one hole.
+#
+# Format: `<module> <importpath>`, where <module> is `root` or `leaf`. A file
+# under workcontext/ belongs to the leaf module, everything else to the root.
+# (At a ref from before the leaf module existed, those files were root-module
+# files; the classification only picks which list, and an import on neither is a
+# finding either way, so the sweep stays conservative on old refs.)
+#
+# A line may NAME THE FILES that may have that import:
+#
+#     root crypto/sha256 receipts/digest.go receipts/postgres.go
+#
+# Without files it is module-wide. With them it is those files and no others,
+# which is what keeps the sweep as strict as the denylist it replaced — that
+# denylist held `encoding/json` to named paths, and the first draft of this file
+# listed it module-wide and let any root file have it. A probe caught that.
+#
+# WHAT THE SWEEP STILL CANNOT DO that the checkout gate does: hold an allowed
+# import to named SYMBOLS. `encoding/base64` may only ENCODE in
+# cache_partition.go, and only reading the code sees a DecodeString. A ref gets
+# the file-level rule; a checkout gets both.
+#
+# `legacy <path>` lines apply ONLY when sweeping a published ref, never to the
+# working tree. They exist because deny-by-default describes TODAY's tree, and a
+# tag from two years ago legitimately imported things this repository has since
+# stopped using — the first run of the policy over history flagged 33 clean tags
+# for a renamed core package and a Postgres driver. Archaeology is a different
+# question from "could this ship today", and answering the first one with the
+# second produces noise that makes a gate ignorable.
+#
+# MEASURED, from every published tag that does NOT carry the implementation, and
+# then read: there are seven, and not one of them is a signature, a MAC, an
+# envelope or a token library. A test asserts that, so this list cannot become
+# the hole the denylist was.
+#
+# Adding a line is a design change: it is the thing every round of review found
+# the denylist missing, in the other direction.
+
+# --- root module ---
+root bufio
+root bytes
+root connectrpc.com/connect
+root context
+root crypto/sha256 receipts/digest.go receipts/postgres.go
+root crypto/tls tls.go
+root crypto/x509 tls.go
+root database/sql
+root embed
+root encoding/binary
+root encoding/json configuration_document.go receipts/digest.go
+root errors
+root fmt
+root github.com/codefly-dev/core/composition
+root github.com/codefly-dev/core/configurations
+root github.com/codefly-dev/core/generated/go/codefly/base/v0
+root github.com/codefly-dev/core/generated/go/codefly/runnable/v0
+root github.com/codefly-dev/core/network
+root github.com/codefly-dev/core/resources
+root github.com/codefly-dev/core/runnable
+root github.com/codefly-dev/core/standards
+root github.com/codefly-dev/core/wool
+root github.com/codefly-dev/sdk-go/receipts
+root go/parser
+root go/token
+root google.golang.org/grpc
+root google.golang.org/grpc/codes
+root google.golang.org/grpc/metadata
+root google.golang.org/grpc/status
+root google.golang.org/protobuf/encoding/protojson receipts/digest.go
+root google.golang.org/protobuf/proto
+root google.golang.org/protobuf/reflect/protodesc
+root google.golang.org/protobuf/reflect/protoreflect
+root google.golang.org/protobuf/reflect/protoregistry
+root google.golang.org/protobuf/types/descriptorpb
+root google.golang.org/protobuf/types/dynamicpb
+root google.golang.org/protobuf/types/known/durationpb
+root io
+root os
+root path/filepath
+root runtime/debug
+root sort
+root strconv
+root strings
+root sync
+root time
+
+# --- leaf module (workcontext/) ---
+leaf bytes
+leaf context
+leaf crypto/sha256 workcontext/cache_partition.go
+leaf crypto/tls workcontext/mint.go
+leaf crypto/x509 workcontext/mint.go
+leaf encoding/base64 workcontext/cache_partition.go
+leaf encoding/binary
+leaf encoding/hex
+leaf encoding/json workcontext/mint.go
+leaf errors
+leaf fmt
+leaf github.com/codefly-dev/core/generated/go/codefly/base/v0
+leaf github.com/codefly-dev/core/workcontext
+leaf github.com/codefly-dev/sdk-go/workcontext
+leaf google.golang.org/grpc
+leaf google.golang.org/grpc/codes
+leaf google.golang.org/grpc/metadata
+leaf google.golang.org/grpc/status
+leaf google.golang.org/protobuf/proto
+leaf io
+leaf mime workcontext/mint.go
+leaf net/http
+leaf net/url
+leaf os
+leaf slices
+leaf strconv
+leaf strings
+leaf sync
+leaf sync/atomic
+leaf time
+
+# --- historical, published refs only (see above) ---
+legacy github.com/codefly-dev/core/configurations/standards
+legacy github.com/codefly-dev/core/shared
+legacy github.com/jackc/pgx/v5
+legacy github.com/jackc/pgx/v5/pgconn
+legacy github.com/jackc/pgx/v5/pgxpool
+legacy path
+legacy reflect
