@@ -102,11 +102,53 @@ var tlsPlumbing = map[string]struct {
 	},
 }
 
-// protoMarshalAllowlist is every file that may encode a protobuf message, and
-// what it encodes. Encoding the CAPABILITY is the second implementation; this
-// one encodes a scope, for a cache digest preimage, and never a WorkContext.
-var protoMarshalAllowlist = map[string]string{
-	"cache_partition.go": "a WorkScopeV1, for the cache digest preimage — never the capability",
+// codecAllowlist is the only codec use in this module: a file, the codec
+// operation, and THE TYPE it may be applied to.
+//
+// The type is the part that was missing. The exemptions used to be per FILE, so
+// cache_partition.go — allowed proto.Marshal for a scope — could marshal a
+// *Claims, and mint.go — allowed encoding/json for two tagged structs — could
+// json.Marshal a map[string]any holding a capability's fields, needing no tags
+// at all. Both were reproduced as AST probes that produced zero findings. A
+// whole-file exemption is an exemption for every type in the file.
+var codecAllowlist = []codecUse{
+	{file: "mint.go", operations: jsonOperations, types: mintEndpointJSONTypes,
+		reason: "the mint endpoint's two HTTP bodies, which carry the capability as an opaque string"},
+	{file: "mint.go", operations: jsonValueOperations,
+		types: append(append([]string{}, mintEndpointJSONTypes...), "RawMessage"),
+		reason: "the same two bodies, plus a RawMessage the response decoder reads into to " +
+			"require EOF — it holds nothing and is discarded"},
+	{file: "cache_partition.go", operations: protoOperations, types: []string{"WorkScopeV1"},
+		reason: "one scope, for the cache digest preimage — never a capability"},
+}
+
+type codecUse struct {
+	file       string
+	operations []string
+	types      []string
+	reason     string
+}
+
+var (
+	// The operations that take the VALUE. NewDecoder and NewEncoder are not
+	// among them: they take a reader or a writer and encode nothing, and the
+	// type that matters is the one handed to Decode or Encode afterwards —
+	// which is checked separately, because its receiver is a local variable
+	// rather than the package.
+	jsonOperations      = []string{"Marshal", "Unmarshal"}
+	jsonValueOperations = []string{"Decode", "Encode"}
+	protoOperations     = []string{"Marshal", "MarshalOptions", "Unmarshal", "UnmarshalOptions"}
+)
+
+// permittedCodecTypes is the set of type names a codec operation may be applied
+// to in this file, or nil when the file may use no codec at all.
+func permittedCodecTypes(path string, operation string) []string {
+	for _, use := range codecAllowlist {
+		if use.file == path && slices.Contains(use.operations, operation) {
+			return use.types
+		}
+	}
+	return nil
 }
 
 // workContextNameAllowlist is this module's own declarations whose names begin
@@ -233,6 +275,7 @@ func inspectForSecondImplementation(file sourceFile) []string {
 	coreImports := map[string]bool{}
 	plumbing := map[string]string{} // local name -> allowed import path
 	protoNames := map[string]bool{} // every local name google.golang.org/protobuf is reachable under
+	jsonNames := map[string]bool{}  // and encoding/json
 	for _, imported := range importsOf(file.syntax) {
 		if imported.name == "." {
 			// A dot import makes every one of a package's identifiers
@@ -252,11 +295,16 @@ func inspectForSecondImplementation(file sourceFile) []string {
 		if strings.HasPrefix(imported.path, "google.golang.org/protobuf") {
 			protoNames[imported.name] = true
 		}
+		if imported.path == "encoding/json" {
+			jsonNames[imported.name] = true
+		}
 	}
 	findings = append(findings, inspectPlumbingSymbols(file, plumbing)...)
 	findings = append(findings, inspectProtoEncoding(file, protoNames)...)
 	findings = append(findings, inspectDeclarations(file, coreImports)...)
 	findings = append(findings, inspectJSONTags(file)...)
+	findings = append(findings, inspectJSONCalls(file, jsonNames)...)
+	findings = append(findings, inspectJSONValueCalls(file, len(jsonNames) > 0)...)
 	return findings
 }
 
@@ -373,7 +421,7 @@ func inspectProtoEncoding(file sourceFile, protoNames map[string]bool) []string 
 		}
 		switch selector.Sel.Name {
 		case "Marshal", "MarshalOptions":
-			if _, allowed := protoMarshalAllowlist[file.path]; allowed {
+			if codecArgumentIsPermitted(file, node, "Marshal") {
 				return true
 			}
 		case "Unmarshal", "UnmarshalOptions":
@@ -381,6 +429,9 @@ func inspectProtoEncoding(file sourceFile, protoNames map[string]bool) []string 
 			// last blocker: a second unverified parser needs base64 to open the
 			// envelope and Unmarshal to read it. corework.Inspect does both, and
 			// hands back the claims, so nothing here needs either.
+			if codecArgumentIsPermitted(file, node, "Unmarshal") {
+				return true
+			}
 			findings = append(findings, fmt.Sprintf(
 				"%s calls %s.%s.\n"+
 					"Reading a capability off the wire is corework.Inspect's job, and it returns the\n"+
@@ -393,14 +444,13 @@ func inspectProtoEncoding(file sourceFile, protoNames map[string]bool) []string 
 			return true
 		}
 		findings = append(findings, fmt.Sprintf(
-			"%s calls %s.%s.\n"+
+			"%s calls %s.%s on a type it is not allowed to.\n"+
 				"Encoding the message is half of a signer: core signs the deterministic protobuf\n"+
 				"encoding, so MarshalOptions{Deterministic: true} over a capability is the deleted\n"+
-				"implementation with a different import list. The qualifier is resolved from the\n"+
-				"import map, so an alias does not get past this. Only %v may encode, and only\n"+
-				"because what it encodes is %v.",
-			file.path, qualifier.Name, selector.Sel.Name,
-			allowedProtoMarshalFiles(), protoMarshalReasons()))
+				"implementation with a different import list. The exemption names a FILE AND A TYPE\n"+
+				"(%v), because a whole-file exemption is an exemption for every type in the file —\n"+
+				"which is how a *Claims could be marshalled through the one meant for a scope.",
+			file.path, qualifier.Name, selector.Sel.Name, codecAllowlist))
 		return true
 	})
 	return findings
@@ -532,11 +582,11 @@ func inspectJSONTags(file sourceFile) []string {
 			}
 			findings = append(findings, fmt.Sprintf(
 				"%s declares a struct with json tags. Only %v in %s may.\n"+
-					"A JSON-tagged struct describing a capability's fields is the second implementation:\n"+
-					"core signs the deterministic protobuf encoding, and a field enumerated by hand is a\n"+
-					"field dropped at mint and absent at verify. Naming a type mintRequest somewhere else\n"+
-					"does not inherit the endpoint's exemption — the exemption is that file's, not the\n"+
-					"identifier's.",
+					"A JSON-tagged struct describing a capability's fields is the second\n"+
+					"implementation: core signs the deterministic protobuf encoding, and a field\n"+
+					"enumerated by hand is a field dropped at mint and absent at verify. Naming a type\n"+
+					"mintRequest somewhere else does not inherit the endpoint's exemption — the\n"+
+					"exemption is that file's, not the identifier's.",
 				file.path, mintEndpointJSONTypes, mintEndpointJSONFile))
 			return true
 		}
@@ -566,6 +616,76 @@ func allowedMintBodies(file sourceFile) map[ast.Node]bool {
 		}
 	}
 	return allowed
+}
+
+// inspectJSONCalls refuses a json codec call applied to anything but the mint
+// endpoint's two bodies.
+//
+// The TAG rule above is not enough on its own, and that was a reproduced gap:
+// json.Marshal of a map[string]any holding a capability's fields needs no tags
+// at all, so it produced zero findings in the one file allowed to import
+// encoding/json. Tags describe a struct; this describes what is encoded.
+func inspectJSONCalls(file sourceFile, jsonNames map[string]bool) []string {
+	if len(jsonNames) == 0 {
+		return nil
+	}
+	var findings []string
+	ast.Inspect(file.syntax, func(node ast.Node) bool {
+		selector, ok := node.(*ast.SelectorExpr)
+		if !ok {
+			return true
+		}
+		qualifier, ok := selector.X.(*ast.Ident)
+		if !ok || !jsonNames[qualifier.Name] {
+			return true
+		}
+		if !slices.Contains(jsonOperations, selector.Sel.Name) {
+			return true
+		}
+		if codecArgumentIsPermitted(file, node, selector.Sel.Name) {
+			return true
+		}
+		findings = append(findings, fmt.Sprintf(
+			"%s calls %s.%s on a type it is not allowed to.\n"+
+				"Only %v may be JSON-encoded here, by name and by type. A map[string]any holding a\n"+
+				"capability's fields needs no json tags, so the tag rule alone let it through — and a\n"+
+				"hand-enumerated capability is exactly the implementation this module deleted.",
+			file.path, qualifier.Name, selector.Sel.Name, mintEndpointJSONTypes))
+		return true
+	})
+	return findings
+}
+
+// inspectJSONValueCalls checks what a json decoder or encoder is pointed AT.
+//
+// json.NewDecoder takes a reader, so the type that matters is the one handed to
+// Decode — and its receiver is a local variable, not the package, so the
+// package-qualified rule above cannot see it.
+func inspectJSONValueCalls(file sourceFile, importsJSON bool) []string {
+	if !importsJSON {
+		return nil
+	}
+	var findings []string
+	ast.Inspect(file.syntax, func(node ast.Node) bool {
+		selector, ok := node.(*ast.SelectorExpr)
+		if !ok || !slices.Contains(jsonValueOperations, selector.Sel.Name) {
+			return true
+		}
+		// A method call on something, in a file that speaks JSON. The
+		// allowlist row for Decode/Encode is what it may be pointed at, which
+		// is a DIFFERENT row from Marshal/Unmarshal's — so the operation's own
+		// name is what selects it.
+		if codecArgumentIsPermitted(file, node, selector.Sel.Name) {
+			return true
+		}
+		findings = append(findings, fmt.Sprintf(
+			"%s calls %s on a type it is not allowed to.\n"+
+				"Only %v may be JSON-decoded or encoded here, by type. A decoder takes a reader, so\n"+
+				"the type that matters is what it is pointed at.",
+			file.path, selector.Sel.Name, mintEndpointJSONTypes))
+		return true
+	})
+	return findings
 }
 
 // TestTheGateCatchesItsOwnBypasses drives the checks over source written to
@@ -804,6 +924,43 @@ import "google.golang.org/protobuf/types/known/anypb"
 var _ = anypb.New`,
 			says: "types/known/anypb",
 		},
+		// Round-three dynamic: both of these produced ZERO findings, because
+		// the codec exemptions were per FILE. A whole-file exemption is an
+		// exemption for every type in the file.
+		"a capability JSON-encoded as a map, needing no tags": {
+			path: "mint.go",
+			source: `package workcontext
+import "encoding/json"
+func leak(c *Claims) ([]byte, error) {
+	return json.Marshal(map[string]any{
+		"installation_id": c.GetSeal().GetInstallationId(),
+		"audience":        c.GetAudience(),
+	})
+}`,
+			says: "calls json.Marshal on a type it is not allowed to",
+		},
+		"a capability decoded into, in the file allowed JSON": {
+			path: "mint.go",
+			source: `package workcontext
+import (
+	"bytes"
+	"encoding/json"
+)
+func parse(raw []byte) (*Claims, error) {
+	claims := &Claims{}
+	return claims, json.NewDecoder(bytes.NewReader(raw)).Decode(claims)
+}`,
+			says: "calls Decode on a type it is not allowed to",
+		},
+		"a capability proto-marshalled through the scope exemption": {
+			path: "cache_partition.go",
+			source: `package workcontext
+import "google.golang.org/protobuf/proto"
+func sign(c *Claims) ([]byte, error) {
+	return proto.MarshalOptions{Deterministic: true}.Marshal(c)
+}`,
+			says: "on a type it is not allowed to",
+		},
 		"a WorkContext func bound to a var": {
 			path: "carrier.go",
 			source: `package workcontext
@@ -834,7 +991,13 @@ type mintRequest struct {
 type mintResponse struct {
 	WorkContext string ` + "`json:\"work_context\"`" + `
 }
-var _ = json.Marshal`,
+func encode(audience string) ([]byte, error) {
+	return json.Marshal(mintRequest{Audience: audience})
+}
+func decode(raw []byte) (mintResponse, error) {
+	var body mintResponse
+	return body, json.Unmarshal(raw, &body)
+}`,
 		},
 		"an alias of core's type": {
 			path: "core.go",
@@ -984,22 +1147,173 @@ func envelopeDecoderReasons() []string {
 	return reasons
 }
 
-func allowedProtoMarshalFiles() []string {
-	names := make([]string, 0, len(protoMarshalAllowlist))
-	for name := range protoMarshalAllowlist {
-		names = append(names, name)
+// codecArgumentIsPermitted reports whether this codec call is applied to a
+// type the file is allowed to apply it to.
+//
+// It resolves the argument's type SYNTACTICALLY, from the file alone: a
+// composite literal names its own type, a type assertion names the asserted
+// type, an address-of or a star defers to what it wraps, and an identifier is
+// looked up among the file's var declarations, short declarations and function
+// parameters. There is no go/types here and so no cross-file inference, which
+// is a stated limit rather than a claim: what it has to catch is a codec
+// applied to something the allowlist did not name, and both reproduced probes
+// — a map[string]any and a *Claims — are named locally in the file that uses
+// them.
+//
+// An argument it cannot resolve is NOT permitted. A gate that passed what it
+// could not read would be a gate about what is easy to parse.
+func codecArgumentIsPermitted(file sourceFile, call ast.Node, operation string) bool {
+	permitted := permittedCodecTypes(file.path, operation)
+	if len(permitted) == 0 {
+		return false
 	}
-	slices.Sort(names)
-	return names
+	arguments := codecArguments(file, call)
+	if len(arguments) == 0 {
+		// A codec reference with no call to read — json.Marshal passed as a
+		// value, say. Nothing names a type, so nothing is permitted.
+		return false
+	}
+	// Only the argument carrying the VALUE is checked. An Unmarshal or Decode
+	// takes the bytes first and the destination last; a Marshal or Encode takes
+	// the value first. Requiring every argument to be an allowlisted type
+	// refused `json.Unmarshal(raw, &body)` on account of raw being []byte,
+	// which is not what the rule is about.
+	value := arguments[0]
+	if operation == "Unmarshal" || operation == "Decode" {
+		value = arguments[len(arguments)-1]
+	}
+	named := resolveTypeName(file, value)
+	return named != "" && slices.Contains(permitted, named)
 }
 
-func protoMarshalReasons() []string {
-	reasons := make([]string, 0, len(protoMarshalAllowlist))
-	for _, reason := range protoMarshalAllowlist {
-		reasons = append(reasons, reason)
+// codecArguments finds the call this codec selector belongs to and returns the
+// arguments whose types matter. For a MarshalOptions{...}.Marshal(x) chain the
+// selector sits inside the outer call, so the whole file is walked for the call
+// whose function expression contains this node.
+func codecArguments(file sourceFile, target ast.Node) []ast.Expr {
+	var arguments []ast.Expr
+	ast.Inspect(file.syntax, func(node ast.Node) bool {
+		call, ok := node.(*ast.CallExpr)
+		if !ok {
+			return true
+		}
+		contains := false
+		ast.Inspect(call.Fun, func(inner ast.Node) bool {
+			if inner == target {
+				contains = true
+			}
+			return true
+		})
+		if contains && len(call.Args) > 0 {
+			arguments = call.Args
+		}
+		return true
+	})
+	return arguments
+}
+
+// resolveTypeName names the type of an expression, syntactically, or returns ""
+// when it cannot.
+func resolveTypeName(file sourceFile, expression ast.Expr) string {
+	switch typed := expression.(type) {
+	case *ast.UnaryExpr:
+		return resolveTypeName(file, typed.X)
+	case *ast.CompositeLit:
+		return typeName(typed.Type)
+	case *ast.TypeAssertExpr:
+		return typeName(typed.Type)
+	case *ast.CallExpr:
+		// new(T) names T, not "new".
+		if function, ok := typed.Fun.(*ast.Ident); ok && function.Name == "new" && len(typed.Args) == 1 {
+			return typeName(typed.Args[0])
+		}
+		// A conversion: T(x) names T; anything else is unknown.
+		return typeName(typed.Fun)
+	case *ast.Ident:
+		return declaredTypeName(file, typed.Name)
 	}
-	slices.Sort(reasons)
-	return reasons
+	return ""
+}
+
+// typeName reduces a type expression to its bare name: *pkg.T, pkg.T, []T and
+// map[K]V all answer what a reader would call them.
+func typeName(expression ast.Expr) string {
+	switch typed := expression.(type) {
+	case *ast.StarExpr:
+		return typeName(typed.X)
+	case *ast.SelectorExpr:
+		return typed.Sel.Name
+	case *ast.Ident:
+		return typed.Name
+	case *ast.ArrayType:
+		return "[]" + typeName(typed.Elt)
+	case *ast.MapType:
+		// Deliberately not reduced to its value type: a map is never an
+		// allowlisted codec type, and naming it as one is how the json probe
+		// would have passed.
+		return "map"
+	}
+	return ""
+}
+
+// declaredTypeName looks an identifier up among this file's declarations: var
+// specs, short variable declarations, and function parameters and results.
+func declaredTypeName(file sourceFile, name string) string {
+	found := ""
+	ast.Inspect(file.syntax, func(node ast.Node) bool {
+		switch declared := node.(type) {
+		case *ast.ValueSpec:
+			for index, declaredName := range declared.Names {
+				if declaredName.Name != name {
+					continue
+				}
+				if declared.Type != nil {
+					found = typeName(declared.Type)
+					return false
+				}
+				if index < len(declared.Values) {
+					found = resolveTypeName(file, declared.Values[index])
+					return false
+				}
+			}
+		case *ast.AssignStmt:
+			if declared.Tok != token.DEFINE {
+				return true
+			}
+			for index, left := range declared.Lhs {
+				ident, ok := left.(*ast.Ident)
+				if !ok || ident.Name != name || index >= len(declared.Rhs) {
+					continue
+				}
+				found = resolveTypeName(file, declared.Rhs[index])
+				return false
+			}
+		case *ast.FuncDecl:
+			for _, list := range fieldLists(declared.Type) {
+				for _, field := range list {
+					for _, declaredName := range field.Names {
+						if declaredName.Name == name {
+							found = typeName(field.Type)
+							return false
+						}
+					}
+				}
+			}
+		}
+		return true
+	})
+	return found
+}
+
+func fieldLists(signature *ast.FuncType) [][]*ast.Field {
+	var lists [][]*ast.Field
+	if signature.Params != nil {
+		lists = append(lists, signature.Params.List)
+	}
+	if signature.Results != nil {
+		lists = append(lists, signature.Results.List)
+	}
+	return lists
 }
 
 func allowedJSONFiles() []string {

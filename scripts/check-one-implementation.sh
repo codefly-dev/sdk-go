@@ -44,6 +44,12 @@ primitives='"crypto"|crypto/ed25519|crypto/ecdsa|crypto/rsa|crypto/dsa|crypto/hm
 # protobuf message on its own, which is how the deleted implementation's payload
 # would come back without an encoding/json import.
 encoders='encoding/protojson|encoding/protowire|known/anypb|encoding/gob|encoding/asn1|encoding/xml'
+# Opening a credential's envelope by hand. base64 plus a decoder is the whole of
+# a second parser, and the AST gate reaches only the workcontext module — a
+# compiling root package with a base64/JSON credential decoder and its own seal
+# rule passed this sweep. Both are banned repository-wide, with the few honest
+# uses named in allowed() by path.
+envelope='encoding/base64'
 status=0
 
 # allowed <path> <pattern> — the exceptions, each with a reason in the comment.
@@ -57,6 +63,17 @@ allowed() {
     'tls.go|'*'crypto/x509'*) return 0 ;;
     # The receipts digest canonicalises a receipt REQUEST, never a capability.
     'receipts/digest.go|'*'encoding/protojson'*) return 0 ;;
+    # ENCODES a tenant and installation id into a cache key; opens no envelope.
+    'workcontext/cache_partition.go|'*'encoding/base64'*) return 0 ;;
+    # The runtime's own configuration document, which is not a capability. The
+    # AST gate cannot reach the root module, so this is named here instead.
+    'configuration_document.go|'*'encoding/json'*) return 0 ;;
+    # The mint endpoint's two HTTP bodies. In the workcontext module the AST
+    # gate additionally holds this to the TWO TYPES; here it is by path only,
+    # which is the weaker half and is why the AST gate exists.
+    'workcontext/mint.go|'*'encoding/json'*) return 0 ;;
+    # Effect receipts, whose rows are JSON and are not capabilities.
+    'receipts/'*'|'*'encoding/json'*) return 0 ;;
   esac
   return 1
 }
@@ -82,6 +99,10 @@ offending_imports() {
       continue
     fi
     if printf '%s' "$line" | grep -Eq "($encoders)"; then
+      allowed "$path" "$line" || printf '%s\n' "$line"
+      continue
+    fi
+    if printf '%s' "$line" | grep -Eq "($envelope|\"encoding/json\")"; then
       allowed "$path" "$line" || printf '%s\n' "$line"
     fi
   done < "$file"

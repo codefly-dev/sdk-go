@@ -595,25 +595,35 @@ func (c *MintClient) obtain(
 		// servable is the credential this call may fall back on when minting is
 		// UNAVAILABLE. A refresh has none: its caller was refused on the
 		// credential being held, so handing that same credential back would
-		// report a replacement that did not happen.
-		servable := held
-		if reason == mintReasonRefresh || held == nil || !c.now().UTC().Before(held.expiresAt) {
-			servable = nil
-		}
+		// report a replacement that did not happen. It is recomputed rather
+		// than captured wherever the clock may have moved since.
+		servable := c.servableLocked(reason)
 		if waiting := c.inflight; waiting != nil {
 			// Another goroutine is minting. Wait for it rather than queueing a
 			// second request, and let ctx cancel the wait.
-			snapshot := Credential{}
-			if servable != nil {
-				snapshot = *servable
-			}
-			canServe := servable != nil
 			c.mu.Unlock()
 			select {
 			case <-waiting:
 				continue
 			case <-ctx.Done():
-				if canServe {
+				// Re-evaluate UNDER THE LOCK, against the clock as it is now.
+				// This used to answer from a snapshot taken before the wait,
+				// so a waiter that started one second before expiry and
+				// cancelled one second after it was handed an EXPIRED
+				// credential with a nil error — and two seconds fits easily
+				// inside the default five-second request timeout.
+				c.mu.Lock()
+				terminal := c.refused
+				servableNow := c.servableLocked(reason)
+				snapshot := Credential{}
+				if servableNow != nil {
+					snapshot = *servableNow
+				}
+				c.mu.Unlock()
+				if terminal != nil {
+					return Credential{}, terminal
+				}
+				if servableNow != nil {
 					return snapshot, nil
 				}
 				// Both stay in the chain: a caller that cancelled wants to see
@@ -873,9 +883,21 @@ func (c *MintClient) mintLocked(ctx context.Context, audience string) (Credentia
 	}
 	payload, err := io.ReadAll(io.LimitReader(response.Body, maxMintResponseBytes+1))
 	if err != nil {
-		return Credential{}, fmt.Errorf("%w: read mint response: %v", ErrMintRefused, err)
+		// An OUTAGE, not a refusal. A body that stops mid-read is a connection
+		// interrupted after the headers — the host said 200 and the network
+		// went away — and classifying it ErrMintRefused made it TERMINAL once
+		// refusals started latching: one interrupted read permanently stopped
+		// a process holding a perfectly good credential, and it stayed stopped
+		// after the endpoint recovered.
+		//
+		// The underlying error stays in the chain so a caller can see what the
+		// transport did, rather than only that minting was unavailable.
+		return Credential{}, fmt.Errorf("%w: read mint response: %w", ErrMintUnavailable, err)
 	}
 	if len(payload) > maxMintResponseBytes {
+		// Terminal, unlike the read failure above: the host answered, and
+		// answered with something this client will not accept. Retrying gets
+		// the same answer.
 		return Credential{}, fmt.Errorf(
 			"%w: mint response exceeds %d bytes", ErrMintRefused, maxMintResponseBytes,
 		)
@@ -893,6 +915,15 @@ func (c *MintClient) credentialFrom(payload []byte, audience string) (Credential
 	decoder.DisallowUnknownFields()
 	if err := decoder.Decode(&body); err != nil {
 		return Credential{}, fmt.Errorf("%w: decode mint response: %v", ErrMintRefused, err)
+	}
+	// DisallowUnknownFields applies to the value just decoded and says nothing
+	// about what follows it, so a valid response with a second JSON value
+	// appended was accepted — strict parsing that stopped at the first value.
+	// The response is ONE object and nothing after it.
+	if err := decoder.Decode(new(json.RawMessage)); !errors.Is(err, io.EOF) {
+		return Credential{}, fmt.Errorf(
+			"%w: mint response carries more than one JSON value", ErrMintRefused,
+		)
 	}
 	token := body.WorkContext
 	claims, seal, binding, err := sealOf(token)

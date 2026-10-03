@@ -366,3 +366,187 @@ func hourOfCalls(t *testing.T, lifetime time.Duration, maxTTL time.Duration) (ui
 	}
 	return host.requests.Load(), client.Counts()
 }
+
+// D3 (round three). A transient response-body read failure must not stop the
+// client permanently.
+//
+// The host answers 200 and the connection goes away mid-body. That was wrapped
+// in ErrMintRefused, which became TERMINAL once refusals started latching: one
+// interrupted read permanently stopped a process holding a perfectly good
+// credential, and it stayed stopped after the endpoint recovered. A body that
+// stops mid-read is an outage.
+func TestAnInterruptedResponseBodyIsAnOutageRatherThanARefusal(t *testing.T) {
+	clock := testClock
+	now := func() time.Time { return clock }
+	host := newMintHost(t, now)
+	client := newTestMintClient(t, host, projectedFile(t, "projected"), now)
+
+	held, err := client.Credential(t.Context())
+	require.NoError(t, err)
+
+	// A 200 whose body fails partway. The transport is the client's, so the
+	// failure is injected through it rather than through a socket.
+	transport, ok := client.httpClient.Transport.(*http.Transport)
+	require.True(t, ok)
+	t.Cleanup(func() { client.httpClient.Transport = transport })
+	client.httpClient.Transport = roundTripFunc(func(request *http.Request) (*http.Response, error) {
+		return &http.Response{
+			StatusCode: http.StatusOK, Request: request,
+			Header: http.Header{"Content-Type": []string{"application/json"}},
+			Body:   io.NopCloser(interruptedBody{}),
+		}, nil
+	})
+
+	// Inside the renewal lead, so the credential in hand still has minutes.
+	clock = testClock.Add(13 * time.Minute)
+	served, err := client.Credential(t.Context())
+	require.NoError(t, err, "an interrupted read is an outage, and the held credential survives it")
+	require.Equal(t, held.Token(), served.Token())
+	require.NoError(t, client.Refused(), "and it must not be latched as terminal")
+
+	// And the endpoint recovering recovers the client.
+	client.httpClient.Transport = transport
+	clock = testClock.Add(13*time.Minute + 2*minMintBackoff)
+	fresh, err := client.Credential(t.Context())
+	require.NoError(t, err)
+	require.NotEqual(t, held.Token(), fresh.Token())
+}
+
+// interruptedBody returns a short read and then a transport failure, which is
+// what a connection dropped after the headers looks like to io.ReadAll.
+type interruptedBody struct{}
+
+func (interruptedBody) Read(p []byte) (int, error) {
+	copied := copy(p, `{"work_context":"partial`)
+	return copied, io.ErrUnexpectedEOF
+}
+
+// An oversized or malformed COMPLETE response stays terminal, because the host
+// answered and answered wrongly: retrying gets the same answer.
+func TestACompleteButUnacceptableResponseStaysTerminal(t *testing.T) {
+	now := func() time.Time { return testClock }
+	host := newMintHost(t, now)
+	client := newTestMintClient(t, host, projectedFile(t, "projected"), now)
+
+	oversized := strings.Repeat("a", maxMintResponseBytes+64)
+	client.httpClient.Transport = roundTripFunc(func(request *http.Request) (*http.Response, error) {
+		return &http.Response{
+			StatusCode: http.StatusOK, Request: request,
+			Header: http.Header{"Content-Type": []string{"application/json"}},
+			Body:   io.NopCloser(strings.NewReader(`{"work_context":"` + oversized + `"}`)),
+		}, nil
+	})
+
+	_, err := client.Credential(t.Context())
+	require.ErrorIs(t, err, ErrMintRefused)
+	require.ErrorContains(t, err, "exceeds")
+	require.ErrorIs(t, client.Refused(), ErrMintRefused)
+}
+
+// D4 (round three). A cancelled waiter must not be handed an EXPIRED credential.
+//
+// The waiter snapshotted the credential and its servability BEFORE waiting,
+// then answered from that snapshot on cancellation without re-reading the
+// clock. A waiter that started a second before expiry and cancelled a second
+// after it received an expired credential with a nil error — and two seconds
+// fits easily inside the default five-second request timeout.
+func TestACancelledWaiterIsNeverHandedAnExpiredCredential(t *testing.T) {
+	clock := testClock
+	var clockMu sync.RWMutex
+	now := func() time.Time {
+		clockMu.RLock()
+		defer clockMu.RUnlock()
+		return clock
+	}
+	host := newMintHost(t, now)
+	release := make(chan struct{})
+	var releaseOnce sync.Once
+	letGo := func() { releaseOnce.Do(func() { close(release) }) }
+	t.Cleanup(letGo)
+	client := newTestMintClient(t, host, projectedFile(t, "projected"), now)
+
+	held, err := client.Credential(t.Context())
+	require.NoError(t, err)
+	expiry := held.ExpiresAt()
+
+	// One second before expiry, with the host holding its answer: a renewal is
+	// in flight and a second caller becomes a waiter.
+	host.before = func() {
+		select {
+		case <-release:
+		case <-time.After(2 * time.Second):
+		}
+	}
+	clockMu.Lock()
+	clock = expiry.Add(-time.Second)
+	clockMu.Unlock()
+
+	renewing := make(chan struct{})
+	go func() {
+		defer close(renewing)
+		_, _ = client.Credential(context.Background())
+	}()
+	require.Eventually(t, func() bool { return host.requests.Load() == 2 },
+		2*time.Second, time.Millisecond)
+
+	// The waiter's own context is cancelled one second AFTER expiry.
+	clockMu.Lock()
+	clock = expiry.Add(time.Second)
+	clockMu.Unlock()
+	cancelled, cancel := context.WithCancel(context.Background())
+	cancel()
+	served, err := client.Credential(cancelled)
+
+	require.Error(t, err, "there is nothing servable: the held credential has expired")
+	require.ErrorIs(t, err, ErrMintUnavailable)
+	require.Empty(t, served.Token(),
+		"a cancelled waiter was handed a credential that expired at %s", expiry)
+
+	letGo()
+	<-renewing
+}
+
+// D6 (round three). DisallowUnknownFields applies to the value just decoded and
+// says nothing about what follows it, so a valid response with a second JSON
+// value appended was accepted. The response is ONE object and nothing after it.
+func TestAMintResponseCarryingTrailingJSONIsRefused(t *testing.T) {
+	now := func() time.Time { return testClock }
+	authority := newAuthority(t)
+	token := authority.start(t, mintInput{})
+
+	for name, payload := range map[string]string{
+		"a second object":   `{"work_context":"` + token + `"}{"unsupported_security_field":true}`,
+		"a trailing array":  `{"work_context":"` + token + `"}[1,2,3]`,
+		"a trailing scalar": `{"work_context":"` + token + `"} 7`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			host := newMintHost(t, now)
+			client := newTestMintClient(t, host, projectedFile(t, "projected"), now)
+			client.httpClient.Transport = roundTripFunc(func(request *http.Request) (*http.Response, error) {
+				return &http.Response{
+					StatusCode: http.StatusOK, Request: request,
+					Header: http.Header{"Content-Type": []string{"application/json"}},
+					Body:   io.NopCloser(strings.NewReader(payload)),
+				}, nil
+			})
+
+			_, err := client.Credential(t.Context())
+			require.ErrorIs(t, err, ErrMintRefused)
+			require.ErrorContains(t, err, "more than one JSON value")
+		})
+	}
+
+	// And trailing WHITESPACE is fine: a response is allowed to end in a
+	// newline, which is what most encoders write.
+	host := newMintHost(t, now)
+	client := newTestMintClient(t, host, projectedFile(t, "projected"), now)
+	client.httpClient.Transport = roundTripFunc(func(request *http.Request) (*http.Response, error) {
+		return &http.Response{
+			StatusCode: http.StatusOK, Request: request,
+			Header: http.Header{"Content-Type": []string{"application/json"}},
+			Body:   io.NopCloser(strings.NewReader(`{"work_context":"` + token + `"}` + "\n\n  ")),
+		}, nil
+	})
+	_, err := client.Credential(t.Context())
+	require.NoError(t, err, "a trailing newline is not a second value")
+}
