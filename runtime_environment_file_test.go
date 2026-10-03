@@ -12,7 +12,7 @@ import (
 func TestLoadRuntimeEnvironmentFilePreservesOpaqueValues(t *testing.T) {
 	path := writeRuntimeEnvironmentFile(
 		t,
-		"CODEFLY__MODULE=saas\n"+
+		"CODEFLY__MODULE=platform\n"+
 			"CODEFLY__OPAQUE=value with spaces=$HOME;$(touch nope)\n"+
 			"CODEFLY__MODULE=platform\n",
 		0o600,
@@ -29,7 +29,7 @@ func TestLoadRuntimeEnvironmentFilePreservesOpaqueValues(t *testing.T) {
 func TestLoadRuntimeEnvironmentFileRejectsMalformedOrForeignEntriesAtomically(t *testing.T) {
 	path := writeRuntimeEnvironmentFile(
 		t,
-		"CODEFLY__MODULE=saas\nNOT_CODEFLY=must-not-load\n",
+		"CODEFLY__MODULE=platform\nNOT_CODEFLY=must-not-load\n",
 		0o600,
 	)
 	t.Setenv("CODEFLY__MODULE", "unchanged")
@@ -40,10 +40,10 @@ func TestLoadRuntimeEnvironmentFileRejectsMalformedOrForeignEntriesAtomically(t 
 }
 
 func TestLoadRuntimeEnvironmentFileRejectsUnsafeFile(t *testing.T) {
-	path := writeRuntimeEnvironmentFile(t, "CODEFLY__MODULE=saas\n", 0o644)
+	path := writeRuntimeEnvironmentFile(t, "CODEFLY__MODULE=platform\n", 0o644)
 	require.Error(t, codefly.LoadRuntimeEnvironmentFile(path))
 
-	target := writeRuntimeEnvironmentFile(t, "CODEFLY__MODULE=saas\n", 0o600)
+	target := writeRuntimeEnvironmentFile(t, "CODEFLY__MODULE=platform\n", 0o600)
 	link := filepath.Join(t.TempDir(), "runtime.env")
 	require.NoError(t, os.Symlink(target, link))
 	require.Error(t, codefly.LoadRuntimeEnvironmentFile(link))

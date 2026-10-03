@@ -99,16 +99,16 @@ func TestEnvironmentVariables(t *testing.T) {
 
 func TestServiceSecretPreservesHyphenatedCapabilityNames(t *testing.T) {
 	ctx := context.Background()
-	t.Setenv("CODEFLY__MODULE", "saas")
-	t.Setenv("CODEFLY__SERVICE", "accounts")
+	t.Setenv("CODEFLY__MODULE", "platform")
+	t.Setenv("CODEFLY__SERVICE", "directory")
 	t.Setenv(
-		"CODEFLY__SERVICE_SECRET_CONFIGURATION__SAAS__STORE__POSTGRES__READ-ONLY-CONNECTION",
+		"CODEFLY__SERVICE_SECRET_CONFIGURATION__PLATFORM__STORE__POSTGRES__READ-ONLY-CONNECTION",
 		"postgresql://reader",
 	)
 	requireNoError(t, codefly.LoadEnvironmentVariables())
 
 	value, err := codefly.For(ctx).
-		Module("saas").
+		Module("platform").
 		Service("store").
 		Secret("postgres", "read-only-connection")
 	assert.NoError(t, err)
@@ -117,16 +117,16 @@ func TestServiceSecretPreservesHyphenatedCapabilityNames(t *testing.T) {
 
 func TestServiceSecretAcceptsNormalizedRuntimeCapabilityNames(t *testing.T) {
 	ctx := context.Background()
-	t.Setenv("CODEFLY__MODULE", "saas")
-	t.Setenv("CODEFLY__SERVICE", "accounts")
+	t.Setenv("CODEFLY__MODULE", "platform")
+	t.Setenv("CODEFLY__SERVICE", "directory")
 	t.Setenv(
-		"CODEFLY__SERVICE_SECRET_CONFIGURATION__SAAS__STORE__POSTGRES__READ_ONLY_CONNECTION",
+		"CODEFLY__SERVICE_SECRET_CONFIGURATION__PLATFORM__STORE__POSTGRES__READ_ONLY_CONNECTION",
 		"postgresql://normalized-reader",
 	)
 	requireNoError(t, codefly.LoadEnvironmentVariables())
 
 	value, err := codefly.For(ctx).
-		Module("saas").
+		Module("platform").
 		Service("store").
 		Secret("postgres", "read-only-connection")
 	assert.NoError(t, err)
@@ -137,19 +137,19 @@ func TestServiceConfigurationReadsRuntimeValuesAddedAfterSnapshot(t *testing.T) 
 	ctx := context.Background()
 	requireNoError(t, codefly.LoadEnvironmentVariables())
 	secretKey := resources.ServiceSecretConfigurationKeyFromUnique(
-		"saas/store",
+		"platform/store",
 		"postgres",
 		"read-write-connection",
 	)
 	configurationKey := resources.ServiceConfigurationKeyFromUnique(
-		"saas/store",
+		"platform/store",
 		"postgres",
 		"pool-size",
 	)
 	t.Setenv(secretKey, "postgresql://writer")
 	t.Setenv(configurationKey, "12")
 
-	query := codefly.For(ctx).Module("saas").Service("store")
+	query := codefly.For(ctx).Module("platform").Service("store")
 	secret, err := query.Secret("postgres", "read-write-connection")
 	assert.NoError(t, err)
 	assert.Equal(t, "postgresql://writer", secret)
@@ -230,11 +230,11 @@ modules:
 	writeFile(t, filepath.Join(root, "modules", "platform", "module.codefly.yaml"), `kind: module
 name: platform
 services:
-  - name: warden
+  - name: records
 `)
-	serviceDir := filepath.Join(root, "modules", "platform", "services", "warden")
+	serviceDir := filepath.Join(root, "modules", "platform", "services", "records")
 	writeFile(t, filepath.Join(serviceDir, "service.codefly.yaml"), `kind: service
-name: warden
+name: records
 version: 0.0.0
 agent:
   kind: codefly:service
@@ -248,7 +248,7 @@ endpoints:
 
 	instance, err := codefly.For(ctx).
 		Module("platform").
-		Service("warden").
+		Service("records").
 		Endpoint("rest").
 		ResolveNetworkInstance()
 	assert.NoError(t, err)
@@ -256,7 +256,7 @@ endpoints:
 		ctx,
 		"sdk-endpoint-test",
 		"platform",
-		"warden",
+		"records",
 		"",
 		&basev0.Endpoint{Name: "rest", Api: "rest"},
 	)
@@ -266,7 +266,7 @@ endpoints:
 
 	scoped, err := codefly.For(ctx).
 		Module("platform").
-		Service("warden").
+		Service("records").
 		Endpoint("rest").
 		NamingScope("agent-test").
 		ResolveNetworkInstance()

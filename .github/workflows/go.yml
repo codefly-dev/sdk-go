@@ -1,9 +1,13 @@
 name: codefly go SDK
 
 on:
-  # compat/** carries the release lines consumers pin when main holds an
-  # unreleased breaking change. A branch whose commits are pinned by a consumer
-  # is a published artifact, so it is built like one.
+  # ANY branch a consumer can pin is a published artifact and is built like
+  # one. This used to name compat/** as "the release lines consumers pin",
+  # which was a rule about a naming convention: a consumer pins a commit, and
+  # go.mod records a pseudo-version with no idea what the branch was called.
+  # The one-implementation sweep covers every published ref for the same
+  # reason, and a dependabot branch carrying the deleted implementation is what
+  # showed the convention was doing no work.
   push:
     branches: [ main, 'compat/**' ]
   pull_request:
@@ -41,6 +45,46 @@ jobs:
         run: |
           go mod tidy
           git diff --exit-code -- go.mod go.sum
+
+  # The sweep lives HERE, in the workflow that builds every ref this repository
+  # publishes, rather than in one of its own that ran on main alone. go.yml's
+  # own `on:` is the statement of which refs are built, so a gate that has to
+  # hold on all of them belongs beside the build rather than beside a list of
+  # refs that drifts from it.
+  #
+  # The job's name is load-bearing: the active ruleset on main requires the
+  # status check "no second Work Context implementation" by that exact context,
+  # so renaming this job would leave a required check that never reports.
+  one-implementation:
+    name: no second Work Context implementation
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout
+        # fetch-depth 0 so every published ref is reachable: the second step
+        # reads them out of the object database.
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          fetch-depth: 0
+      - name: Sweep every tracked Go file for a second implementation
+        run: ./scripts/check-one-implementation.sh
+      - name: Sweep every OTHER ref this repository publishes
+        # The logic lives in scripts/sweep-published-refs.sh so it can be
+        # TESTED. Inline, it was wrong and nothing could notice: it listed refs
+        # with `git for-each-ref 'refs/remotes/origin/*'`, and `*` does not
+        # cross a slash, so every namespaced branch was silently dropped. This
+        # step reported "sweeping 1 other published ref(s)" and "ok
+        # origin/badges" and went GREEN while
+        # origin/dependabot/go_modules/gomod-06d3dc2861 published
+        # workcontext/work_context.go importing crypto/ed25519.
+        #
+        # The script lists by prefix and asserts SWEPT AGAINST WHAT THE REMOTE
+        # PUBLISHES, because a gate that sweeps a subset and reports success is
+        # worse than no gate — the green is the evidence somebody acts on.
+        run: |
+          git fetch --no-tags --prune --quiet origin \
+            '+refs/heads/*:refs/remotes/origin/*'
+          ./scripts/sweep-published-refs.sh
 
   lint:
     name: lint

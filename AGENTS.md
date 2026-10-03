@@ -89,17 +89,20 @@ package line.
 | --- | --- |
 | `codefly.go` | `Init`, the immutable env snapshot, `Inject*`, process-level accessors |
 | `for.go` | the `For(ctx)` query: endpoints, configuration, secrets, workspace values |
+| `authority.go` | authority-bearing values, read once at boot; a drift is refused, never reloaded |
 | `runtime_value.go` | `RuntimeValue`, for values the runtime injects directly |
 | `runtime_environment_file.go` | loading a runtime-written env file |
 | `fixture.go` | the selected fixture, and resolving its principals by role |
 | `tls.go` | workload leaf certificates, reloaded on rotation |
 | `receipts/` | effect receipts: the store, the digest, the replay/conflict interceptor |
 | `receipts/grpctransport/`, `receipts/connecttransport/` | the two transport adapters, split so neither drags the other's dependency in |
-| `workcontext/` | **separate leaf module**: Work Context signing and verification |
-| `workcontext/grpctransport/` | the gRPC carrier, so verify-only consumers never compile grpc |
+| `workcontext/` | **separate leaf module**: the mint-once client, the carriers, the cache partition, the stream guard, and typed access to core's one implementation. Its own `AGENTS.md` holds what the two gates refuse |
+| `workcontext/grpctransport/` | the gRPC carrier, so a consumer that makes no gRPC call never compiles grpc |
 
-`workcontext` exists to keep a verify-only consumer's `go.sum` small. Adding a
-dependency to it is a design change, not a detail — see the skill below.
+`workcontext` mints nothing and verifies nothing: `core/workcontext` is the only
+implementation of the capability, and this module re-exports core's verifier by
+type alias. Adding a dependency to it is still a design change, not a detail —
+see the skill below.
 
 ## Rules that bite
 
@@ -113,12 +116,36 @@ dependency to it is a design change, not a detail — see the skill below.
 - **An empty injected value is not a value.** A composition templating an unset
   variable ships the name with an empty string; `RuntimeValue` reports `false`
   so it cannot shadow the configuration a caller falls back to. Keep that.
+- **The Work Context has exactly one implementation and it is not here.**
+  `core/workcontext` signs, verifies, and answers the *structural* question
+  through `Inspect`. Nothing here may sign, check a signature, encode a
+  capability **or decide what a capability is** — a local seal rule is a second
+  implementation even when it signs nothing, and ours disagreed with core's own
+  fixtures about which sentinel three refusals earn. Two gates hold that, and
+  **both read both modules**: `TestNoSecondWorkContextImplementation` (AST) and
+  `scripts/check-one-implementation.sh` (import paths, plus every published
+  ref). The AST gate walked the leaf module only until a reviewer compiled a
+  root-module parser whose base64url decoder was hand-written, so it imported
+  nothing a sweep can ban.
+  **`workcontext/AGENTS.md` is what each one refuses and why** — read it before
+  touching that module, the gate, or the sweep.
+- **An authority-bearing value is read once.** A principal, binding or audience
+  comes from `ReadAuthority` at boot. `WorkspaceValue` answers from that pin for
+  a pinned name, so a drift is an error rather than a reload — the process has
+  already minted a credential sealed to the old value.
 - **A receipt is written inside the transaction that commits its effect.** A
   receipt written after the commit leaves a window where the effect exists and
   the receipt does not, and a recovery landing there reads "no receipt" for an
   effect that already happened. That is why `receipts.Record` takes a `Tx`.
-- **`compat/**` branches are published artifacts.** Consumers pin them when
-  `main` holds an unreleased breaking change, so CI builds them like `main`.
+- **Every published ref is held to these rules, not exempted from them.** A
+  consumer can pin any branch, so the sweep covers every one rather than a
+  `compat/*` name glob: measured, 22 of 25 remote branches still carried the
+  deleted implementation, so retiring the three NAMED compat refs would have
+  turned the gate green with 19 copies published. A line that cannot meet a
+  rule is **retired** by the owner, never granted a period during which the
+  rule is false here. A bullet forbidding the back-port of a breaking deletion
+  used to live here; it is what kept the implementation alive on refs CI
+  builds, so it is deleted.
 
 ## Procedures
 
