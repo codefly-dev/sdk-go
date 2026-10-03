@@ -288,10 +288,18 @@ func TestTheSweepRefusesWhenItCouldNotLook(t *testing.T) {
 		clone := clonedRemote(t, sweep, checker, "kept")
 		remote := strings.TrimSpace(runOut(t, clone, "git", "remote", "get-url", "origin"))
 		// The remote moves on; this checkout does not refetch.
+		//
+		// Pushed from origin/main BY NAME, never from HEAD: a clone's HEAD is
+		// the remote's, and a bare repository's HEAD follows whoever ran
+		// `git init` — so `HEAD:refs/heads/…` resolved here and failed on a
+		// runner whose init.defaultBranch is master with "src refspec HEAD
+		// does not match any". Green locally, red in CI, which is the class
+		// this whole file is about.
 		seed := t.TempDir()
 		runIn(t, seed, "git", "clone", "--quiet", remote, ".")
 		runIn(t, seed, "git", "push", "--quiet", "origin", ":refs/heads/kept")
-		runIn(t, seed, "git", "push", "--quiet", "origin", "HEAD:refs/heads/appeared/later")
+		runIn(t, seed, "git", "push", "--quiet", "origin",
+			"refs/remotes/origin/main:refs/heads/appeared/later")
 
 		output, err := runSweep(clone)
 
@@ -398,15 +406,17 @@ func TestTheImportScannerReadsOneLineOnce(t *testing.T) {
 // clone of it carrying both scripts.
 func clonedRemote(t *testing.T, sweep string, checker string, branch string) string {
 	t.Helper()
+	// -b main on both: these repositories' branch names are part of what the
+	// sweep is asserted against, so they are stated here rather than inherited
+	// from whatever init.defaultBranch the machine happens to set.
 	remote := t.TempDir()
-	runIn(t, remote, "git", "init", "--quiet", "--bare")
+	runIn(t, remote, "git", "init", "--quiet", "--bare", "-b", "main")
 	seed := t.TempDir()
-	runIn(t, seed, "git", "init", "--quiet")
+	runIn(t, seed, "git", "init", "--quiet", "-b", "main")
 	require.NoError(t, os.WriteFile(filepath.Join(seed, "ordinary.go"),
 		[]byte("package x\n\nimport \"fmt\"\n\nvar _ = fmt.Sprint\n"), 0o600))
 	runIn(t, seed, "git", "add", ".")
 	runIn(t, seed, "git", "-c", "user.email=t@t", "-c", "user.name=t", "commit", "--quiet", "-m", "seed")
-	runIn(t, seed, "git", "branch", "-M", "main")
 	runIn(t, seed, "git", "remote", "add", "origin", remote)
 	runIn(t, seed, "git", "push", "--quiet", "origin", "main")
 	runIn(t, seed, "git", "push", "--quiet", "origin", "main:refs/heads/"+branch)
