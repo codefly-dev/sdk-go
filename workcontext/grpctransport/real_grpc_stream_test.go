@@ -2,12 +2,9 @@ package grpctransport
 
 import (
 	"context"
-	"errors"
-	"io"
 	"net"
 	"sync/atomic"
 	"testing"
-	"time"
 
 	"github.com/stretchr/testify/require"
 	"google.golang.org/grpc"
@@ -113,26 +110,29 @@ func serveWith(
 	return connection
 }
 
-// drain runs the stream to completion and reports what the client saw.
+// drain runs the stream to completion and reports the message count, the
+// trailer and the client's error.
+//
+// It delegates to clientSaw rather than opening the stream a second way. There
+// were two helpers doing this, each with its own hand-built StreamDesc and its
+// own receive loop, and they disagreed: this one counted messages and never
+// read the header, clientSaw read the header and dropped the count. A test
+// needing both got one of them and a local variable, which is how
+// `received := 0; require.Zero(received)` came to stand where the file's
+// central assertion belongs.
+//
+// WHAT THESE TESTS ESTABLISH, since the count was not the only claim running
+// ahead of its evidence: the TRANSPORT's behaviour — what gRPC does with
+// messages, headers and trailers when the guard refuses, with the interceptor
+// installed and nothing unwrapped. The authority is a revocableGuard, a Recheck
+// closure a test flips; so these do NOT establish that core's own refusals
+// reach the guard, which is what TestWorkContextConformance drives through
+// core's fixtures. And the stream is server-streaming with CloseSend called at
+// once, so nothing here says anything about the client-streaming direction.
 func drain(t *testing.T, connection *grpc.ClientConn) (received int, trailer metadata.MD, err error) {
 	t.Helper()
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-	stream, err := connection.NewStream(ctx,
-		&grpc.StreamDesc{StreamName: "Emit", ServerStreams: true}, streamMethod)
-	require.NoError(t, err)
-	require.NoError(t, stream.CloseSend())
-	for {
-		message := &wrapperspb.StringValue{}
-		recvErr := stream.RecvMsg(message)
-		if errors.Is(recvErr, io.EOF) {
-			return received, stream.Trailer(), nil
-		}
-		if recvErr != nil {
-			return received, stream.Trailer(), recvErr
-		}
-		received++
-	}
+	received, _, trailer, err = clientSaw(t, connection)
+	return received, trailer, err
 }
 
 // (1) A trailer queued under authority must NOT reach the client when
@@ -207,11 +207,13 @@ func TestARealHandlerCannotSendUnderRevokedAuthority(t *testing.T) {
 		return nil
 	})
 
-	header, trailer, err := clientSaw(t, connection)
-	received := 0
+	received, header, trailer, err := clientSaw(t, connection)
 	faults.assert(t)
 	require.Error(t, err)
 	require.Empty(t, header.Get("leaked-header"))
+	// THE MESSAGE COUNT THE CLIENT ACTUALLY RECEIVED. This read
+	// `received := 0; require.Zero(received)` — the assertion that mattered
+	// most in this file, against a literal the line above it had just written.
 	require.Zero(t, received, "a message left under revoked authority")
 	require.Empty(t, trailer.Get("leaked"))
 	require.Equal(t, attempts, refusals, "every send under revoked authority was refused")

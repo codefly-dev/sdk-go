@@ -96,10 +96,10 @@ type GuardedServerStream struct {
 // interceptor and not this.
 func Guard(stream grpc.ServerStream, guard *workcontext.StreamGuard) (*GuardedServerStream, error) {
 	if stream == nil {
-		return nil, fmt.Errorf("%w: no stream to guard", workcontext.ErrInvalid)
+		return nil, fmt.Errorf("%w: no stream to guard", errStreamMisuse)
 	}
 	if guard == nil {
-		return nil, fmt.Errorf("%w: no stream guard", workcontext.ErrInvalid)
+		return nil, fmt.Errorf("%w: no stream guard", errStreamMisuse)
 	}
 	guarded := &GuardedServerStream{
 		stream:   stream,
@@ -136,7 +136,7 @@ func (s *GuardedServerStream) Context() context.Context {
 // about what leaves.
 func (s *GuardedServerStream) RecvMsg(message any) error {
 	if s == nil || s.stream == nil {
-		return fmt.Errorf("%w: unguarded stream", workcontext.ErrInvalid)
+		return fmt.Errorf("%w: unguarded stream", errStreamMisuse)
 	}
 	return s.stream.RecvMsg(message)
 }
@@ -173,7 +173,7 @@ func (s *GuardedServerStream) SendHeader(headers metadata.MD) error {
 	s.mu.Lock()
 	if s.finished {
 		s.mu.Unlock()
-		return fmt.Errorf("%w: the stream is finished", workcontext.ErrInvalid)
+		return fmt.Errorf("%w: the stream is finished", errStreamMisuse)
 	}
 	pending := s.headers
 	s.headers = metadata.MD{}
@@ -198,7 +198,7 @@ func (s *GuardedServerStream) SetHeader(headers metadata.MD) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.finished {
-		return fmt.Errorf("%w: the stream is finished", workcontext.ErrInvalid)
+		return fmt.Errorf("%w: the stream is finished", errStreamMisuse)
 	}
 	if s.flushed {
 		// gRPC's own contract: headers are sent once. Forward so the caller
@@ -224,7 +224,7 @@ func (s *GuardedServerStream) SetTrailer(trailer metadata.MD) {
 // nowhere to put it.
 func (s *GuardedServerStream) setTrailer(trailer metadata.MD) error {
 	if s == nil {
-		return fmt.Errorf("%w: unguarded stream", workcontext.ErrInvalid)
+		return fmt.Errorf("%w: unguarded stream", errStreamMisuse)
 	}
 	if err := s.recheck(); err != nil {
 		return err
@@ -233,7 +233,7 @@ func (s *GuardedServerStream) setTrailer(trailer metadata.MD) error {
 	defer s.mu.Unlock()
 	if s.finished {
 		// Past the last check there is nothing left to authorize against.
-		return fmt.Errorf("%w: the stream is finished", workcontext.ErrInvalid)
+		return fmt.Errorf("%w: the stream is finished", errStreamMisuse)
 	}
 	for key, values := range trailer {
 		s.trailers[key] = append(s.trailers[key], values...)
@@ -287,7 +287,7 @@ func (s *GuardedServerStream) Terminated() error {
 
 func (s *GuardedServerStream) recheck() error {
 	if s == nil || s.guard == nil || s.stream == nil {
-		return fmt.Errorf("%w: unguarded stream", workcontext.ErrInvalid)
+		return fmt.Errorf("%w: unguarded stream", errStreamMisuse)
 	}
 	// THE RE-CHECK'S CONTEXT REFUSES WRITES, and that is what stops a
 	// deadlock rather than a convention asking people not to.
@@ -333,8 +333,29 @@ func (t refusingTransportStream) SetTrailer(metadata.MD) error { return errReche
 
 var errRecheckMustNotWrite = fmt.Errorf(
 	"%w: a Work Context liveness re-check must not write to the stream whose liveness it is deciding",
-	workcontext.ErrInvalid,
+	errStreamMisuse,
 )
+
+// errStreamMisuse is THIS PACKAGE'S OWN misuse, distinct from a capability that
+// does not authenticate, and it exists because the two were the same sentinel.
+//
+// core returns ErrInvalid for an EXPIRED capability (verify.go: "expired at
+// …") and for one that is not yet valid. statusFor mapped ErrInvalid to
+// codes.Internal on the argument that ErrInvalid also covers misuse — a nil
+// guard, a finished stream, an unguarded wrapper — and that telling a client
+// "mint again" about a server bug makes it loop. The argument is sound and the
+// conclusion was still wrong, because it applied to the WRONG SIDE: expiry is
+// not the rare malformed case, it is the ordinary mid-stream refusal on a
+// stream that outlives its credential, and it is precisely the one a client
+// answers by minting again. Measured: an expired capability arrived as
+// Internal.
+//
+// The distinction the old comment said was unavailable was available all along.
+// Every misuse error here is CONSTRUCTED here, so it can say so; what arrives
+// from core says nothing extra and is read as a capability refusal. It still
+// wraps ErrInvalid, so errors.Is(err, workcontext.ErrInvalid) is unchanged for
+// anything that was relying on it.
+var errStreamMisuse = fmt.Errorf("%w: guarded stream misuse", workcontext.ErrInvalid)
 
 // releaseHeaders hands held headers to the real stream. The caller has just
 // re-checked, and a SendMsg flushes whatever is queued there, so this is the
@@ -342,12 +363,27 @@ var errRecheckMustNotWrite = fmt.Errorf(
 func (s *GuardedServerStream) releaseHeaders() error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if s.flushed || len(s.headers) == 0 {
+	if s.flushed {
+		return nil
+	}
+	// FLUSHED IS ABOUT THE SEND, NOT ABOUT THE QUEUE. Returning early when
+	// nothing was queued left flushed false after a message had gone out —
+	// and gRPC sends the header frame with the first message whether the
+	// handler queued anything or not. So a SetHeader AFTER the first SendMsg
+	// was held in this wrapper, found !flushed, and was handed to
+	// stream.SetHeader by Finish, which gRPC ignores because the headers are
+	// already on the wire. Measured over bufconn: SetHeader returned nil, the
+	// header never reached the client, and the handler was told nothing.
+	//
+	// With flushed set here, that SetHeader forwards to gRPC instead and the
+	// handler gets gRPC's own answer, which is the behaviour SetHeader
+	// documents for a stream whose headers have been sent.
+	s.flushed = true
+	if len(s.headers) == 0 {
 		return nil
 	}
 	pending := s.headers
 	s.headers = metadata.MD{}
-	s.flushed = true
 	return s.stream.SetHeader(pending)
 }
 
@@ -406,19 +442,27 @@ func statusFor(err error) error {
 		// a client answers by presenting a new one, which is exactly the
 		// README's "mint again".
 		code = codes.Unauthenticated
-	case errors.Is(err, workcontext.ErrInvalid):
-		// NOT Unauthenticated. ErrInvalid is this package's sentinel for
-		// MISUSE as well as for a structurally broken capability — a nil
-		// guard, a finished stream, an unguarded wrapper — so mapping it to
-		// Unauthenticated told a client "mint again" about a server bug, and
-		// minting again cannot fix a server bug. Internal is the honest code:
-		// the client did nothing it can correct.
+	case errors.Is(err, errStreamMisuse):
+		// THIS SERVER'S OWN MISUSE: a nil guard, a finished stream, an
+		// unguarded wrapper, a re-check that tried to write. Internal, because
+		// the client did nothing it can correct and minting again cannot fix a
+		// server bug.
 		//
-		// The cost is that a genuinely malformed capability also arrives as
-		// Internal. That is the right side to err on: a client told to mint
-		// again when it should not loops, and a client told Internal when it
-		// could have minted retries once and sees the same answer.
+		// Checked BEFORE ErrInvalid, which it wraps, so the order of these two
+		// cases is the whole of the distinction.
 		code = codes.Internal
+	case errors.Is(err, workcontext.ErrInvalid):
+		// A CAPABILITY THAT DOES NOT AUTHENTICATE, which from core includes
+		// the ordinary one: expired. core answers an expired or not-yet-valid
+		// capability with ErrInvalid, and a stream that outlives its
+		// credential is the common case rather than a rare malformed one — so
+		// Unauthenticated, which is the README's "mint again".
+		//
+		// The previous revision mapped every ErrInvalid to Internal to avoid
+		// telling a client to mint again about a server bug. That cost was
+		// real and this keeps it: the server's own misuse is a separate
+		// sentinel above, constructed here, where the difference is known.
+		code = codes.Unauthenticated
 	case errors.Is(err, context.Canceled):
 		code = codes.Canceled
 	case errors.Is(err, context.DeadlineExceeded):

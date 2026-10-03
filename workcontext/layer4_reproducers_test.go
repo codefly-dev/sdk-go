@@ -108,7 +108,11 @@ func TestTheDefaultTransportIsNeverTheOneThatCarriesTheBearer(t *testing.T) {
 		Audience:           testAudienceName,
 		ProjectedToken:     ProjectedTokenFile(projectedFile(t, "fixture-bearer")),
 		ProjectionAudience: "projection-audience",
-		Now:                func() time.Time { return testClock },
+		// No socket is dialled in either of these, so the trust anchor is
+		// never exercised — but it is now a stated decision rather than a
+		// field left alone, and construction refuses silence.
+		TrustSystemRoots: true,
+		Now:              func() time.Time { return testClock },
 	})
 	require.NoError(t, err)
 
@@ -265,7 +269,11 @@ func TestRedirectContainmentWithoutASocket(t *testing.T) {
 		Audience:           testAudienceName,
 		ProjectedToken:     ProjectedTokenFile(projectedFile(t, "projected")),
 		ProjectionAudience: "projection-audience",
-		Now:                func() time.Time { return testClock },
+		// No socket is dialled in either of these, so the trust anchor is
+		// never exercised — but it is now a stated decision rather than a
+		// field left alone, and construction refuses silence.
+		TrustSystemRoots: true,
+		Now:              func() time.Time { return testClock },
 	})
 	require.NoError(t, err)
 

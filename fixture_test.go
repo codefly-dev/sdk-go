@@ -117,11 +117,13 @@ func TestFixturePrincipalNamesPinnedModulesItCannotRead(t *testing.T) {
 
 	require.ErrorIs(t, err, composition.ErrUnknownFixture)
 	// The MODULE NAME and the fact that it is pinned, not merely some
-	// substring of the error. When the product names were removed from this
-	// file the assertion went from "saas-starter" to "starter", which is also
-	// a substring of the module's own source "example-org/module-starter" — so
-	// it stopped pinning which name the error has to carry. Generic fixtures
-	// were the point; a weaker assertion was not.
+	// substring of the error. Making this file generic shortened the expected
+	// name to "starter", which is also a substring of the module's own source
+	// "example-org/module-starter" — so the assertion stopped pinning WHICH
+	// name the error has to carry, and would have passed on the source alone.
+	// Generic fixtures were the point; a weaker assertion was not. The name
+	// that was here before is deliberately not quoted: a cleanup that explains
+	// itself by repeating what it removed has not removed it.
 	assert.Contains(t, err.Error(), "starter",
 		"the error must name the module whose fixtures could not be read")
 	assert.Contains(t, err.Error(), "pinned",

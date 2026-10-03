@@ -515,14 +515,33 @@ func TestAMintedCredentialThatExpiresBeforeItIsValidIsRefused(t *testing.T) {
 // default ceiling IS core's constant: if core ever refused a lifetime of
 // exactly MaxTTLCeiling, this client's default would refuse every credential a
 // host minted at the maximum.
-func TestCoreRefusesAnOverCeilingLifetimeInTheClientsOwnReadPath(t *testing.T) {
-	// The structural read path the mint client uses, driven directly.
+// RENAMED to what it asserts. It was called
+// TestCoreRefusesAnOverCeilingLifetimeInTheClientsOwnReadPath and asserted no
+// refusal at all: a sound fixture inspects, and two constants are equal. A
+// review was right to call that out.
+//
+// The refusal it was named for CANNOT be driven from here, and the reason is
+// the one-implementation rule rather than an omission: core's Authority refuses
+// an over-ceiling lifetime at the MINT, so no over-ceiling capability can be
+// produced, and assembling one by hand to feed the read path is precisely the
+// second implementation both gates exist to refuse. Core asserts it on its own
+// side, in decodeClaims, with a committed test — that is the right place, and it
+// is the place this module asked for it to be.
+//
+// What is left is still worth asserting and is the part that can drift here:
+// the client's default ceiling IS core's constant, so if core ever refused a
+// lifetime of exactly MaxTTLCeiling this client's default would refuse every
+// credential a host minted at the maximum. The test below that one establishes
+// exactly-at-the-ceiling is accepted.
+func TestTheClientsDefaultCeilingIsCoresConstant(t *testing.T) {
+	// The structural read path the mint client uses, driven directly, so the
+	// entry point this depends on is exercised rather than assumed.
 	_, err := corework.Inspect(fixture(t, "session").Token)
 	require.NoError(t, err, "a sound capability still inspects")
 
-	// And the ceiling is the same constant the client defaults to, so the two
-	// cannot drift apart.
-	require.Equal(t, corework.MaxTTLCeiling, defaultMaxCredentialLifetime)
+	require.Equal(t, corework.MaxTTLCeiling, defaultMaxCredentialLifetime,
+		"the client's default ceiling and core's absolute ceiling are the same bound; "+
+			"two constants that can drift are two bounds")
 }
 
 // Exactly at the ceiling is ACCEPTED, so the client's default is never refused
@@ -673,6 +692,12 @@ func TestALatchedRefusalIsReportedEvenToACallerThatGaveUp(t *testing.T) {
 
 // The EIO READ CLASS: a projected-token read that fails partway is an outage,
 // distinct from a file that is absent. Both recover; neither latches.
+//
+// This one drives a caller's OWN ProjectedTokenSource, which is the branch at
+// mintLocked — an unlabelled error from somebody else's reader. The branch
+// inside ProjectedTokenFile, where io.ReadAll itself fails, is a different
+// three lines and is covered by the test below it; a review was right that this
+// test's name claimed both and reached one.
 func TestAProjectedTokenReadFailureIsAnOutageAndRecovers(t *testing.T) {
 	clock := &movableClock{at: testClock}
 	host := newMintHost(t, clock.now)
@@ -691,4 +716,27 @@ func TestAProjectedTokenReadFailureIsAnOutageAndRecovers(t *testing.T) {
 	credential, err := client.Credential(context.Background())
 	require.NoError(t, err, "a local read failure permanently stopped the client")
 	require.NotEmpty(t, credential.Token())
+}
+
+// AND THE FILE SOURCE'S OWN READ FAILURE, at the branch the test above does not
+// reach: ProjectedTokenFile opens the path successfully and io.ReadAll then
+// fails. A directory is the portable way to produce exactly that — os.Open
+// succeeds, the read returns EISDIR — and it is not a contrived shape: the
+// projection's mount point with nothing mounted on it is a directory where a
+// file is expected.
+//
+// What matters is the CLASS: ErrMintUnavailable, so it is held off and retried
+// rather than latched. An EIO on the mount, a projection replaced between
+// unlink and create, and an exhausted descriptor table all land here, and
+// latching any of them stopped a process that was holding a good credential.
+func TestTheFileSourcesOwnReadFailureIsAnOutage(t *testing.T) {
+	directory := t.TempDir()
+
+	_, err := ProjectedTokenFile(directory).ProjectedToken()
+
+	require.ErrorIs(t, err, ErrMintUnavailable,
+		"a read that fails after a successful open is an outage, not a refusal")
+	require.NotErrorIs(t, err, ErrMintRefused, "and it must never latch")
+	require.ErrorContains(t, err, "read projected token",
+		"the message must name the stage, so an operator knows the file was found and not read")
 }

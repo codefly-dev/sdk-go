@@ -928,6 +928,9 @@ func TestNewMintClientValidatesItsConfiguration(t *testing.T) {
 		Audience:           testAudienceName,
 		ProjectedToken:     ProjectedTokenFile("/var/run/secrets/token"),
 		ProjectionAudience: "projection-audience",
+		// Stated, because construction refuses an unstated trust anchor. A
+		// deployment that means the host's pool says so.
+		TrustSystemRoots: true,
 	}
 	_, err := NewMintClient(valid)
 	require.NoError(t, err)
@@ -953,6 +956,13 @@ func TestNewMintClientValidatesItsConfiguration(t *testing.T) {
 		"timeout too long":       func(o *MintOptions) { o.RequestTimeout = time.Hour },
 		"renewal lead at one":    func(o *MintOptions) { o.RenewalLead = 1 },
 		"negative renewal lead":  func(o *MintOptions) { o.RenewalLead = -0.5 },
+		// THE TRUST ANCHOR, both ways round. Unstated was the whole of the
+		// previous behaviour and it was silently the system pool: every other
+		// route to a weak transport here was closed and this one defaulted.
+		"no trust anchor": func(o *MintOptions) { o.TrustSystemRoots = false },
+		"two trust anchors": func(o *MintOptions) {
+			o.RootCAs = x509.NewCertPool()
+		},
 	} {
 		t.Run(name, func(t *testing.T) {
 			options := valid

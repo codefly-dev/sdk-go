@@ -82,6 +82,13 @@ var (
 		// sha* family is refused rather than waved through as "not a
 		// signature".
 		"crypto/hkdf", "crypto/pbkdf2",
+		// THE CIPHER FAMILY, which the shell sweep has banned since the GMAC
+		// probe and this list did not. A GMAC or a CMAC is a MAC assembled out
+		// of a block cipher and names no MAC, so the two gates disagreed in
+		// the WORSE direction: the shell caught it in the root module and this
+		// gate — the one that reads the module the capability actually lives
+		// in — did not. Nothing in either module encrypts anything.
+		"crypto/cipher", "crypto/aes", "crypto/des", "crypto/rc4",
 	}
 
 	// envelopeDecoders are banned EXCEPT where a file is allowlisted below. A
@@ -543,6 +550,20 @@ func inspectCapabilityFields(file sourceFile) []string {
 // a change to the wire contract.
 func assertFrozenStructShapes(t *testing.T, files []sourceFile) {
 	t.Helper()
+	require.Empty(t, frozenStructViolations(files),
+		"%s", strings.Join(frozenStructViolations(files), "\n\n"))
+}
+
+// frozenStructViolations is the check itself, returning findings rather than
+// calling require.
+//
+// Separated for one reason: a probe cannot drive a require-based assertion.
+// Passing a fresh testing.T to one makes FailNow call runtime.Goexit on the
+// probe's own goroutine, so "did the freeze catch this?" could only be answered
+// by eye — which is how the embedded-field hole went three rounds unnoticed. A
+// rule that cannot be probed is a rule nobody has tested.
+func frozenStructViolations(files []sourceFile) []string {
+	var findings []string
 	seen := map[string]map[string][]string{}
 	for _, file := range files {
 		frozen, ok := frozenStructFields[file.path]
@@ -564,6 +585,22 @@ func assertFrozenStructShapes(t *testing.T, files []sourceFile) {
 			}
 			var actual []string
 			for _, field := range structure.Fields.List {
+				if len(field.Names) == 0 {
+					// AN EMBEDDED FIELD IS A FIELD, and this loop over
+					// field.Names skipped every one of them — an embedded
+					// field has no Names at all. Measured: adding
+					//
+					//	type smuggled struct { Echo string }
+					//
+					// to mint.go and embedding it in mintRequest left the
+					// frozen set byte-identical, produced no finding anywhere
+					// in the gate, and put a new field on the wire, because
+					// encoding/json promotes an embedded struct's exported
+					// fields into the enclosing object. The freeze exists for
+					// exactly that, one level sideways.
+					actual = append(actual, "embedded "+typeName(file, field.Type))
+					continue
+				}
 				for _, name := range field.Names {
 					actual = append(actual, name.Name+" "+typeName(file, field.Type))
 				}
@@ -574,17 +611,23 @@ func assertFrozenStructShapes(t *testing.T, files []sourceFile) {
 	}
 	for path, frozen := range frozenStructFields {
 		for name, expected := range frozen {
-			require.Equal(t, expected, seen[path][name],
+			if slices.Equal(expected, seen[path][name]) {
+				continue
+			}
+			findings = append(findings, fmt.Sprintf(
 				"%s: %s is a codec-allowed struct and its field set is FROZEN.\n"+
 					"The codec rule names the TYPE, so a new field is a new thing encoded through a\n"+
 					"row that exists for the fields listed — adding `Echo *Claims` to mintRequest\n"+
 					"encoded a whole capability through a row for two strings, and was green. These\n"+
 					"two structs are an HTTP wire contract with the mint host: a change to them is a\n"+
 					"change to that contract, and belongs in a reviewed diff with\n"+
-					"frozenStructFields updated in it.",
-				path, name)
+					"frozenStructFields updated in it.\n"+
+					"  frozen: %v\n"+
+					"  found:  %v",
+				path, name, expected, seen[path][name]))
 		}
 	}
+	return findings
 }
 
 // inspectProtoMethodsRoute refuses a message's own marshal and unmarshal
@@ -709,11 +752,25 @@ func inspectCoreAliases(file sourceFile, coreImports map[string]bool) []string {
 	var findings []string
 	ast.Inspect(file.syntax, func(node ast.Node) bool {
 		spec, ok := node.(*ast.TypeSpec)
-		if !ok || !spec.Assign.IsValid() {
-			// Assign is set only for `type A = B`, which is the renaming case.
+		if !ok {
 			return true
 		}
-		selector, ok := spec.Type.(*ast.SelectorExpr)
+		// BOTH SPELLINGS. This required spec.Assign.IsValid(), so only
+		// `type A = corework.B` was a finding and `type A corework.B` was
+		// silent. The defined form cannot reach a codec — it inherits no
+		// methods, so it is not a proto.Message — but it is still a second
+		// declaration of core's shape under a local name, and a rule true for
+		// one spelling and silent for the other is a rule a reader has to test
+		// to know.
+		kind := "aliases"
+		if !spec.Assign.IsValid() {
+			kind = "declares a local type over"
+		}
+		// THROUGH A POINTER OR A SLICE. The check read spec.Type as a bare
+		// selector, so `type carrier = basev0.WorkContextV1` was a finding and
+		// `type carrier = *basev0.WorkContextV1` was not — and the pointer
+		// form is the one a codec takes.
+		selector, ok := unwrapTypeExpr(spec.Type).(*ast.SelectorExpr)
 		if !ok {
 			return true
 		}
@@ -722,14 +779,32 @@ func inspectCoreAliases(file sourceFile, coreImports map[string]bool) []string {
 			return true
 		}
 		findings = append(findings, fmt.Sprintf(
-			"%s aliases core's %s.%s as %q.\n"+
+			"%s %s core's %s.%s as %q.\n"+
 				"Aliases to core's types belong in %s, which is this module's re-export of core's\n"+
-				"surface. An alias elsewhere gives one of core's types a second local name, which is\n"+
-				"precisely what a codec allowlist keyed by type name cannot see through.",
-			file.path, qualifier.Name, selector.Sel.Name, spec.Name.Name, coreAliasFile))
+				"surface. A second local name elsewhere is precisely what a codec allowlist keyed by\n"+
+				"type name cannot see through.",
+			file.path, kind, qualifier.Name, selector.Sel.Name, spec.Name.Name, coreAliasFile))
 		return true
 	})
 	return findings
+}
+
+// unwrapTypeExpr strips the pointers, slices and parentheses a type expression
+// wears, so a rule written for a named type reaches it however it is dressed.
+func unwrapTypeExpr(expression ast.Expr) ast.Expr {
+	for hops := 0; hops < maxAliasHops; hops++ {
+		switch typed := expression.(type) {
+		case *ast.StarExpr:
+			expression = typed.X
+		case *ast.ArrayType:
+			expression = typed.Elt
+		case *ast.ParenExpr:
+			expression = typed.X
+		default:
+			return expression
+		}
+	}
+	return expression
 }
 
 // inspectImport refuses an import by what it can DO, not by whether its path is
@@ -2192,9 +2267,18 @@ func resolveTypeName(file sourceFile, expression ast.Expr, use token.Pos) string
 // type whose final name happened to be WorkScopeV1, including a local alias to
 // the capability itself.
 func typeName(file sourceFile, expression ast.Expr) string {
+	return typeNameThroughAliases(file, expression, 0)
+}
+
+// maxAliasHops bounds the alias chase. Go rejects a cycle, but this gate parses
+// source that has not been compiled — every probe here is uncompiled by
+// construction — so the bound is what stops a cycle in source nobody built.
+const maxAliasHops = 8
+
+func typeNameThroughAliases(file sourceFile, expression ast.Expr, hops int) string {
 	switch typed := expression.(type) {
 	case *ast.StarExpr:
-		return typeName(file, typed.X)
+		return typeNameThroughAliases(file, typed.X, hops)
 	case *ast.SelectorExpr:
 		qualifier, ok := typed.X.(*ast.Ident)
 		if !ok {
@@ -2210,9 +2294,28 @@ func typeName(file sourceFile, expression ast.Expr) string {
 		}
 		return path + "#" + typed.Sel.Name
 	case *ast.Ident:
+		// A LOCAL NAME IS CHASED TO WHAT IT NAMES, which is the hole the
+		// qualifier fix left behind. Returning the identifier as written meant
+		//
+		//	type carrier = *basev0.WorkContextV1
+		//	var c carrier = &basev0.WorkContextV1{}
+		//	proto.Unmarshal(raw, c)
+		//
+		// resolved to "carrier" — not a capability, not a codec interface, not
+		// unresolvable — so the root module's decisive rule returned true.
+		// Reproduced against this gate: green. The VALUE alias was caught, but
+		// only by inspectCoreAliases and only because its right-hand side was
+		// a bare selector; one `*` walked past both.
+		if hops < maxAliasHops {
+			if target := localTypeTarget(file, typed.Name); target != nil {
+				if named := typeNameThroughAliases(file, target, hops+1); named != "" && named != typed.Name {
+					return named
+				}
+			}
+		}
 		return typed.Name
 	case *ast.ArrayType:
-		return "[]" + typeName(file, typed.Elt)
+		return "[]" + typeNameThroughAliases(file, typed.Elt, hops)
 	case *ast.MapType:
 		// Deliberately not reduced to its value type: a map is never an
 		// allowlisted codec type, and naming it as one is how the json probe
@@ -2220,6 +2323,32 @@ func typeName(file sourceFile, expression ast.Expr) string {
 		return "map"
 	}
 	return ""
+}
+
+// localTypeTarget is the right-hand side of a file-level `type X = T` or
+// `type X T`, or nil.
+//
+// BOTH forms, and the defined form deliberately: `type X basev0.WorkContextV1`
+// is a second declaration of a capability's shape under a local name. It cannot
+// reach proto.Unmarshal, because a defined type inherits no methods and so is
+// not a proto.Message — but a rule that is true for one spelling and silent for
+// the other is a rule a reader has to test to know, and the gate's whole
+// subject is names chosen locally for core's types.
+func localTypeTarget(file sourceFile, name string) ast.Expr {
+	for _, declaration := range file.syntax.Decls {
+		generic, ok := declaration.(*ast.GenDecl)
+		if !ok || generic.Tok != token.TYPE {
+			continue
+		}
+		for _, spec := range generic.Specs {
+			typeSpec, ok := spec.(*ast.TypeSpec)
+			if !ok || typeSpec.Name.Name != name {
+				continue
+			}
+			return typeSpec.Type
+		}
+	}
+	return nil
 }
 
 // declaredTypeName looks an identifier up among the declarations that are

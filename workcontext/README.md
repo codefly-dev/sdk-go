@@ -262,7 +262,11 @@ client, err := workcontext.NewMintClient(workcontext.MintOptions{
     },
     ProjectedToken:     workcontext.ProjectedTokenFile("/var/run/secrets/codefly/token"),
     ProjectionAudience: projectionAudience,
-    RootCAs:            platformRoots, // nil means the system pool
+    // The trust anchor is STATED. Name the roots that may sign the mint
+    // endpoint's certificate, or say TrustSystemRoots; construction refuses
+    // silence, because there is no safe default for where this process sends
+    // its service-account token.
+    RootCAs: platformRoots,
 })
 ```
 
@@ -277,8 +281,17 @@ host SIGNED to be the audience the pin answered.
 projected service-account token travels on that request as a bearer credential,
 so plaintext is a disclosure the configuration must not be able to choose.
 
-**The transport is the client's, and you cannot supply one.** `RootCAs` is the
-only thing a caller says about it. An `*http.Client` option was a hole that
+**The transport is the client's, and you cannot supply one.** The trust anchor
+is the only thing a caller says about it — and it must say something: set
+`RootCAs` to the roots that may sign the endpoint's certificate, or
+`TrustSystemRoots` to use the host's pool. Exactly one, or `NewMintClient`
+returns `ErrInvalid`. A nil `RootCAs` used to mean the system pool silently,
+which left the one remaining hole in a transport built to have none: every other
+route to a weak channel was closed and the trust anchor was still whatever the
+image shipped, so a mis-issued certificate for the host name — or a corporate
+interception root — received the projected token. Which certificates are
+acceptable for platform infrastructure is a deployment decision, and a default
+is not a decision. An `*http.Client` option was a hole that
 inspecting the client could not close: a nil `Transport` means the global,
 mutable `http.DefaultTransport`; a wrapping `RoundTripper` is opaque; a
 `DialTLSContext` bypasses `TLSClientConfig` entirely; and a caller keeping the
@@ -683,11 +696,24 @@ on the wire no later revocation recalls it, which is what `SendHeader` means.
 **A refusal reaches the client as a gRPC status it can act on.** Returning the
 plain Go error made every refusal arrive as `codes.Unknown` with internal text,
 so a receiver could not tell "mint again" from "the server broke" — which is the
-only decision the table above asks a caller to make. `ErrRevoked`, `ErrReplayed`,
-`ErrInvalid` and `ErrNotACoreToken` become `codes.Unauthenticated`; a
-termination for a source that could not be reached becomes `codes.Unavailable`.
-The sentinel chain is kept alongside the code, so `errors.Is` still works inside
-the server that produced it.
+only decision the table above asks a caller to make. `ErrRevoked`,
+`ErrReplayed`, `ErrNotACoreToken` and `ErrInvalid` become
+`codes.Unauthenticated`; a termination for a source that could not be reached
+becomes `codes.Unavailable`; and this server's own misuse — a nil guard, a
+finished stream, a re-check that tried to write to the stream whose liveness it
+was deciding — becomes `codes.Internal`, because the client did nothing it can
+correct.
+
+That last split matters more than it looks. `ErrInvalid` was mapped to
+`codes.Internal` wholesale on the argument that it covers misuse as well as a
+broken capability, and telling a client "mint again" about a server bug makes it
+loop. The argument is right and it was applied to the wrong side: core answers
+an **expired** capability with `ErrInvalid`, and a stream that outlives its
+credential is the ordinary case, not a rare malformed one — it is exactly the
+refusal a client answers by minting again. The misuse errors are this package's
+own and are constructed here, so they carry their own sentinel and keep the
+`codes.Internal` the argument asked for. The sentinel chain is kept alongside
+the code, so `errors.Is` still works inside the server that produced it.
 
 What this costs is one live authorization check per message — against an
 RPC-backed `SealSource`, one round trip per emitted item. That is the price of

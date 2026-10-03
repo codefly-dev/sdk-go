@@ -60,11 +60,20 @@ one of core's.
   *named* `mintResponse`. Types resolve package-qualified (`basev0.WorkScopeV1`,
   not `WorkScopeV1` from anywhere), in the scope of the use, before the use, and
   an ambiguous identifier is refused rather than guessed.
-- **No function-local type, and no alias to core's types outside `core.go`.**
-  Either one hands a type-name allowlist whatever name it asks for: `type
-  WorkScopeV1 = basev0.WorkContextV1` makes a capability marshal as an allowed
-  scope, and a declaration inside a function body is invisible to every rule
-  that reads a file's declarations.
+- **No function-local type, and no second local name for core's types outside
+  `core.go`** — alias or defined type, through a pointer or a slice, and a local
+  name is CHASED to what it names. Either one hands a type-name allowlist
+  whatever name it asks for: `type WorkScopeV1 = basev0.WorkContextV1` makes a
+  capability marshal as an allowed scope, and a declaration inside a function
+  body is invisible to every rule reading a file's declarations. One `*` walked
+  past both halves for three rounds — `type carrier = *basev0.WorkContextV1`
+  resolved to `"carrier"`, neither a capability nor unresolvable, so the root
+  module's one rule permitted a `proto.Unmarshal` into it.
+- **A codec-allowed struct's field set is FROZEN, embedded fields included.**
+  The codec rule names the top-level type, so a new field is a new thing encoded
+  through a row written for the fields listed. An embedded field has no `Names`,
+  so a loop over `field.Names` skipped every one — and `encoding/json` promotes
+  an embedded struct's exported fields into the enclosing object.
 - **No `encoding/json` outside `mint.go` by exact path, and no json-tagged
   struct elsewhere.** The deleted implementation signed a hand-written JSON
   payload. The path is exact because matching the base name let any new
@@ -75,19 +84,34 @@ one of core's.
   line's shape. Its previous regex tried to recognise an import and was walked
   past by a non-ASCII alias (`ψ "crypto/ed25519"`) and a comment-prefixed line
   (`/* x */ "crypto/ed25519"`) — in the root module, where it is the only gate.
+  It reads the closing paren off the COMMENT-STRIPPED line — a `)` in a comment
+  closed the block early — and scans each line ONCE for either quoting, because
+  two sequential passes dropped a raw-string path preceding a quoted one.
+- **The two gates' ban lists are one list, asserted.** They disagreed both ways:
+  the legacy protobuf module, `protoiface`, `protoimpl` and a vendored path
+  ending `/ed25519` swept clean where the sweep is the only gate, and the cipher
+  family was banned by the sweep but not by the gate reading the module the
+  capability lives in. `TestTheShellSweepBansEverythingTheASTGateBans` parses the
+  script's own expressions and fails when they differ.
+- **A gate that could not look must not report success.** Four fail-opens, three
+  inside the assertion added the round before: a swallowed `git ls-remote`
+  failure skipped the comparison entirely, the comparison was between COUNTS
+  rather than ref sets, an entry `git cat-file` could not read swept clean, and
+  the fix for that `exit`ed a command substitution's subshell — printing `FAIL`
+  and then `ok`. Every enumeration's exit status is read.
 
-**What no import ban catches:** a hand-rolled HMAC over `crypto/sha256`, or a
-GMAC assembled from `crypto/cipher`, builds a MAC out of parts that are not
-MACs. `crypto/cipher` and the block ciphers are banned; the hash cannot be,
-because two digests here need it. So in this module the symbol rule bounds that
-residue to one file, and in the root module it is closed by review rather than
-by the script. "Any MAC is a finding" was a list of names; this is what the
-list reaches.
+**What no import ban catches:** a hand-rolled HMAC over `crypto/sha256` builds a
+MAC out of parts that are not MACs. `crypto/cipher` and the block ciphers are
+banned in both gates now; the hash cannot be, because two digests here need it.
+So in this module the symbol rule bounds that residue to one file, and in the
+root module it is closed by review. "Any MAC is a finding" was a list of names;
+this is what the list reaches.
 
-`TestTheGateCatchesItsOwnBypasses` and
-`TestTheRepositorySweepCatchesItsOwnBypasses` hold both gates to these claims:
-every case is a bypass that was reported against a previous revision and
-worked. `TestTheSDKParsePathsAgreeWithCore` drives every core conformance
+`TestTheGateCatchesItsOwnBypasses`,
+`TestTheRepositorySweepCatchesItsOwnBypasses`,
+`TestTheImportScannerReadsOneLineOnce` and
+`TestTheSweepRefusesWhenItCouldNotLook` hold both gates to these claims: every
+case is a bypass reported against a previous revision, and every one worked. `TestTheSDKParsePathsAgreeWithCore` drives every core conformance
 fixture through this module's own parse paths and requires core's sentinel —
 read a refusal's sentinel off the fixture, never off a constant here, because
 three fixtures changed sentinel under us and the tests that did that needed no
@@ -138,10 +162,15 @@ wrapping, the context and the `Finish`. Whether a method is guarded is a
 property of the METHOD and the first answer binds; a per-request `(nil, nil)` is
 the optional-carrier shape this module deleted.
 
-A refusal reaches the client as a gRPC status: the sentinels become
+A refusal reaches the client as a gRPC status: core's sentinels become
 `codes.Unauthenticated`, an unreachable re-check source becomes
 `codes.Unavailable`, and the Go error chain is kept alongside the code so
-`errors.Is` still works in the server that produced it.
+`errors.Is` still works in the server that produced it. **`ErrInvalid` is
+`Unauthenticated` and this package's own misuse is `Internal`** — two sentinels,
+because they were one: core answers an EXPIRED capability with `ErrInvalid`, so
+mapping every `ErrInvalid` to `Internal` told a client not to mint again about
+the most ordinary mid-stream refusal there is. `errStreamMisuse` wraps
+`ErrInvalid` and is checked first.
 
 ## The mint client holds a credential it cannot verify
 

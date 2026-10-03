@@ -38,6 +38,15 @@ base="${SWEEP_BASE:-${GITHUB_BASE_REF:-${GITHUB_REF_NAME:-main}}}"
 head_ref="${SWEEP_HEAD:-${GITHUB_HEAD_REF:-${GITHUB_REF_NAME:-}}}"
 
 # Every remote-tracking ref, by PREFIX so namespaced refs are not dropped.
+# Read into a file first: a process substitution's exit status is not the shell's,
+# so `done < <(git for-each-ref ...)` reports success for a git that failed.
+listing=""
+local_refs="$(mktemp)"
+trap 'rm -f "$local_refs" ${listing:+"$listing" "$listing.err"}' EXIT
+if ! git for-each-ref --format='%(refname:short)' refs/remotes/origin > "$local_refs"; then
+  echo "FAIL cannot list the remote-tracking refs in this checkout." >&2
+  exit 1
+fi
 listed=()
 while IFS= read -r ref; do
   [ -n "$ref" ] || continue
@@ -45,17 +54,64 @@ while IFS= read -r ref; do
     origin | origin/HEAD) continue ;;
   esac
   listed+=("$ref")
-done < <(git for-each-ref --format='%(refname:short)' refs/remotes/origin)
+done < "$local_refs"
 
 # THE DENOMINATOR, from the remote itself rather than from what happens to be
 # fetched locally. A stale or shallow fetch is the case a subset-sweep hides in.
+#
+# ASKING AND FAILING IS NOT ASKING AND GETTING NOTHING. The previous revision
+# ran this with `2>/dev/null` and then guarded the comparison with
+# `[ ${#published[@]} -gt 0 ]`, so an ls-remote that FAILED — no network, no
+# credential, a renamed remote — produced an empty denominator and skipped the
+# only check that makes the sweep's green mean anything. Measured: with the
+# remote unreachable and one ref fetched locally it printed "the remote
+# publishes 0 ref(s); sweeping 0 of them", "this repository publishes no ref
+# other than main", and exited 0 — the same false green the glob produced,
+# re-entering through the guard added to stop it. So the exit status is read,
+# and the stderr is shown rather than swallowed.
+listing="$(mktemp)"
+if ! git ls-remote --heads origin > "$listing" 2>"$listing.err"; then
+  echo "FAIL cannot list the refs this repository publishes, so there is nothing to" >&2
+  echo "     hold the sweep to. git ls-remote --heads origin said:" >&2
+  sed 's/^/       /' "$listing.err" >&2
+  echo "     A sweep with no denominator cannot know what it did not look at, and" >&2
+  echo "     reporting success from one is the defect this assertion exists for." >&2
+  rm -f "$listing.err"
+  exit 1
+fi
+rm -f "$listing.err"
 published=()
 while IFS= read -r name; do
   [ -n "$name" ] && published+=("$name")
-done < <(git ls-remote --heads origin 2>/dev/null | sed 's|.*refs/heads/||')
+done < <(sed 's|.*refs/heads/||' "$listing")
 
-if [ ${#published[@]} -gt 0 ] && [ ${#listed[@]} -ne ${#published[@]} ]; then
-  echo "FAIL the sweep can see ${#listed[@]} ref(s) and the remote publishes ${#published[@]}." >&2
+# AND THE COMPARISON IS BETWEEN SETS, NOT COUNTS. Counts agreeing is not the
+# same ref list agreeing: measured, a remote that deleted one branch and
+# published another left the local view holding a stale ref and missing the new
+# one — two refs each side, assertion green, and the branch that actually
+# carried the implementation was never opened. The sweep reported
+# "ok origin/carries/the/implementation" and exited 0.
+if [ ${#published[@]} -eq 0 ]; then
+  echo "FAIL the remote publishes no heads at all, which no repository this gate runs in does." >&2
+  echo "     That is an answer about the wrong remote, not an empty repository." >&2
+  exit 1
+fi
+
+# Only one direction is asserted: every PUBLISHED ref must be visible here. A
+# local ref the remote has since deleted is left in, because it is then SWEPT —
+# which can produce a false failure and never a false pass, and that is the side
+# to err on. The previous `-ne` compared cardinalities, which is the one
+# comparison that fails in both directions at once.
+missing=()
+for name in "${published[@]}"; do
+  found=""
+  for ref in "${listed[@]}"; do
+    [ "$ref" = "origin/$name" ] && found=1 && break
+  done
+  [ -n "$found" ] || missing+=("$name")
+done
+if [ ${#missing[@]} -gt 0 ]; then
+  echo "FAIL the remote publishes ${#missing[@]} ref(s) this sweep cannot see: ${missing[*]}" >&2
   echo "     Listed:    ${listed[*]}" >&2
   echo "     Published: ${published[*]}" >&2
   echo "     A sweep over a subset that reports success is worse than no sweep." >&2

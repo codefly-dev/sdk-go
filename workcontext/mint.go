@@ -223,7 +223,18 @@ type MintOptions struct {
 	ProjectionAudience string
 
 	// RootCAs is the only thing a caller may say about the transport: the roots
-	// that may sign the mint endpoint's certificate. Nil means the system pool.
+	// that may sign the mint endpoint's certificate.
+	//
+	// Set this, or set TrustSystemRoots. Nil used to mean the system pool
+	// SILENTLY, which left the one remaining hole in a transport built to have
+	// none: every other way of weakening it was closed — no caller-supplied
+	// client, no reachable Transport, a TLS 1.3 floor, no followed redirect —
+	// and the trust anchor was still whatever the image happened to ship. A
+	// mint endpoint is platform infrastructure, so a public CA has no business
+	// vouching for it; a mis-issued certificate for the host name, or a
+	// corporate interception root in the image, receives the projected
+	// service-account token. Construction refuses silence now, because the
+	// choice is a deployment decision and a default is not a decision.
 	//
 	// It replaces an *http.Client, and that is the point. A client is a hole:
 	// its Transport may be nil (so the global, mutable http.DefaultTransport),
@@ -237,6 +248,17 @@ type MintOptions struct {
 	// thing is how this one came to claim a TLS 1.2 floor for three revisions
 	// after the floor became 1.3.
 	RootCAs *x509.CertPool
+
+	// TrustSystemRoots says, in as many words, that the host's own root pool is
+	// the right trust anchor for this endpoint. It is the alternative to
+	// RootCAs and never a companion to it: exactly one of the two is set, or
+	// construction refuses.
+	//
+	// It exists so that using the system pool is a sentence somebody wrote
+	// rather than a field somebody left alone. There are deployments where it
+	// is correct — a mint endpoint behind a certificate from the same public
+	// CA the image already trusts — and this says so out loud.
+	TrustSystemRoots bool
 
 	// RequestTimeout bounds one mint request.
 	RequestTimeout time.Duration
@@ -460,6 +482,21 @@ func NewMintClient(options MintOptions) (*MintClient, error) {
 	if strings.TrimSpace(options.ProjectionAudience) == "" {
 		return nil, fmt.Errorf("%w: no projection audience", ErrInvalid)
 	}
+	switch {
+	case options.RootCAs != nil && options.TrustSystemRoots:
+		return nil, fmt.Errorf(
+			"%w: name the roots that may sign the mint endpoint's certificate, or say TrustSystemRoots; not both",
+			ErrInvalid,
+		)
+	case options.RootCAs == nil && !options.TrustSystemRoots:
+		return nil, fmt.Errorf(
+			"%w: no trust anchor for the mint endpoint; set RootCAs to the roots that may sign its certificate, "+
+				"or TrustSystemRoots to use the host's pool. The projected service-account token is sent to "+
+				"whatever answers at %s, so which certificates are acceptable there is a deployment decision "+
+				"and there is no safe default to fall back to",
+			ErrInvalid, endpoint,
+		)
+	}
 	timeout := options.RequestTimeout
 	if timeout == 0 {
 		timeout = defaultMintRequestTimeout
@@ -504,7 +541,7 @@ func NewMintClient(options MintOptions) (*MintClient, error) {
 	options.RenewalLead = lead
 	return &MintClient{
 		options:    options,
-		httpClient: mintHTTPClient(options.RootCAs),
+		httpClient: mintHTTPClient(options.RootCAs), // nil here means TrustSystemRoots, checked above
 		now:        now,
 		id:         mintClientIDs.Add(1),
 	}, nil
@@ -527,7 +564,10 @@ func mintHTTPClient(roots *x509.CertPool) *http.Client {
 		CheckRedirect: refuseMintRedirect,
 		Transport: &http.Transport{
 			TLSClientConfig: &tls.Config{
-				RootCAs: roots, // nil means the system pool
+				// Nil reaches here only when the caller said TrustSystemRoots:
+				// NewMintClient refuses an unstated anchor, so this nil is a
+				// decision rather than an omission.
+				RootCAs: roots,
 				// TLS 1.3 FLOOR. The projected service-account token is the
 				// one secret this process hands to anybody, and 1.2 permits
 				// cipher suites and a renegotiation surface that 1.3 removes.
@@ -1042,6 +1082,52 @@ func (c *MintClient) Counts() MintCounts {
 	return c.counts
 }
 
+// projectedRead is one answer from a token source, at file level because the
+// gate refuses a function-local type — a local declaration is invisible to every
+// rule that reads a file's declarations, and that is true of this one too.
+type projectedRead struct {
+	token string
+	err   error
+}
+
+// projectedToken reads the token source UNDER THE DEADLINE.
+//
+// ProjectedTokenSource is a caller's interface and takes no context, so nothing
+// about it can be interrupted: ProjectedTokenFile does os.Open and io.ReadAll,
+// neither of which a context reaches, and a caller's own implementation may do
+// anything at all. RequestTimeout bounded the HTTP request and the comment on
+// mintInto said it bounded "the one detached request" — measured with a source
+// that blocks and RequestTimeout at 150ms, Credential returned after 3.0s,
+// bounded only by the CALLER's deadline. With no caller deadline it does not
+// return: the detached goroutine never closes `done`, so every later caller
+// waits on an attempt that will not finish, and no hold-off is ever installed.
+//
+// The read runs on its own goroutine and the deadline is waited on instead. The
+// goroutine outlives the timeout — there is no way to interrupt a blocking read
+// behind an interface that takes no context — so the channel is buffered and
+// the value it eventually sends is dropped. That leak is bounded by one
+// goroutine per attempt and attempts are single-flighted and held off; a
+// permanently wedged client is not.
+func (c *MintClient) projectedToken(ctx context.Context) (string, error) {
+	// Buffered, so the goroutine is not held open by a receiver that left.
+	answers := make(chan projectedRead, 1)
+	go func() {
+		token, err := c.options.ProjectedToken.ProjectedToken()
+		answers <- projectedRead{token: token, err: err}
+	}()
+	select {
+	case answer := <-answers:
+		return answer.token, answer.err
+	case <-ctx.Done():
+		// AN OUTAGE, under the one latch rule: a projection that is slow is a
+		// mount under load or a source holding a lock, and both clear.
+		return "", fmt.Errorf(
+			"%w: reading the projected token did not finish within %s: %w",
+			ErrMintUnavailable, c.options.RequestTimeout, ctx.Err(),
+		)
+	}
+}
+
 // dueForRenewalLocked is true once the credential has entered its renewal lead.
 // An already-expired credential is also due, and is never returned to a caller:
 // handing one out would turn a renewal failure into an authorization failure at
@@ -1064,7 +1150,7 @@ func (c *MintClient) dueForRenewalLocked(credential Credential) bool {
 }
 
 func (c *MintClient) mintLocked(ctx context.Context, audience string) (Credential, error) {
-	projected, err := c.options.ProjectedToken.ProjectedToken()
+	projected, err := c.projectedToken(ctx)
 	if err != nil {
 		// A source is a caller's code. An error from one that carries neither
 		// sentinel was returned as it stood and then LATCHED as terminal, so

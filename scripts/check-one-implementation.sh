@@ -63,11 +63,18 @@ set -euo pipefail
 # included: crypto.Signer signs Ed25519 with no ed25519 import anywhere.
 # crypto/cipher and the block ciphers are here because a GMAC or a CMAC is a
 # MAC assembled from a cipher, which names no MAC.
-primitives='^crypto$|^crypto/hkdf$|^crypto/pbkdf2$|^crypto/sha512$|^crypto/sha1$|^crypto/sha3$|^crypto/md5$|^crypto/ed25519$|^crypto/ecdsa$|^crypto/rsa$|^crypto/dsa$|^crypto/hmac$|^crypto/ecdh$|^crypto/elliptic$|^crypto/subtle$|^crypto/cipher$|^crypto/aes$|^crypto/des$|^crypto/rc4$|^crypto/sha3$|x/crypto/|jose|jwt|jwx|paseto|macaroon|branca'
+primitives='^crypto$|^crypto/hkdf$|^crypto/pbkdf2$|^crypto/sha512$|^crypto/sha1$|^crypto/sha3$|^crypto/md5$|^crypto/ed25519$|^crypto/ecdsa$|^crypto/rsa$|^crypto/dsa$|^crypto/hmac$|^crypto/ecdh$|^crypto/elliptic$|^crypto/subtle$|^crypto/cipher$|^crypto/aes$|^crypto/des$|^crypto/rc4$|^crypto/sha3$|x/crypto/|jose|jwt|jwx|paseto|macaroon|branca|ed25519'
 # Second encodings of the message. protojson is a complete JSON encoding of a
 # protobuf message on its own, which is how the deleted implementation's payload
 # would come back without an encoding/json import.
-encoders='encoding/protojson|encoding/protowire|known/anypb|^encoding/gob$|^encoding/asn1$|^encoding/xml$'
+# The LOW-LEVEL protobuf runtime and the LEGACY protobuf module belong here as
+# well, and did not until the two gates were compared entry by entry: the AST
+# gate banned protoiface, protoimpl and github.com/golang/protobuf/proto while
+# this script passed all three — measured, `ok working tree (4 Go files)`,
+# exit 0 — in the module where this script is the only gate. A message's own
+# ProtoMethods().Unmarshal is a complete decode naming no codec package, and the
+# legacy module's proto.Unmarshal is the same capability at another path.
+encoders='encoding/protojson|encoding/protowire|known/anypb|^encoding/gob$|^encoding/asn1$|^encoding/xml$|runtime/protoiface|runtime/protoimpl|^github.com/golang/protobuf/proto$'
 # Opening a credential's envelope by hand. base64 plus proto.Unmarshal is the
 # whole of a second parser, and the AST gate reaches only the workcontext module
 # — a compiling root package with a base64/JSON credential decoder and its own
@@ -138,22 +145,35 @@ import_paths() {
     # the line IS `import (`.
     stripped ~ /(^|[^[:alnum:]_])import([^[:alnum:]_]|$)/ && stripped ~ /\(/ { inblock = 1 }
     stripped ~ /(^|[^[:alnum:]_])import([^[:alnum:]_]|$)/ && stripped !~ /\(/ { line = 1 }
-    inblock && /\)/ { closing = 1 }
+    # THE CLOSING PAREN IS READ OFF THE STRIPPED LINE, not off $0. Reading it
+    # off the raw line meant a `)` INSIDE A COMMENT closed the block early, so
+    #
+    #     import (
+    #             // )
+    #             "crypto/ed25519"
+    #     )
+    #
+    # compiled, passed `go vet`, and swept clean — measured, exit 0. One
+    # character of comment was the whole bypass, in the root module where this
+    # script is the only gate.
+    inblock && stripped ~ /\)/ { closing = 1 }
     (inblock || line) {
       rest = stripped
-      # EVERY quoted string on the line, not the first. The previous version
-      # read one, so `/* "fmt" */ "crypto/ed25519"` reported fmt and stopped —
-      # and `;`-joined specs on one line hid everything after the first.
-      while (match(rest, /"[^"]+"/)) {
-        print substr(rest, RSTART + 1, RLENGTH - 2)
-        rest = substr(rest, RSTART + RLENGTH)
-      }
-      # Raw-string paths too. gofmt rewrites them, and CI enforces no gofmt,
-      # so the sweep reads what is committed rather than what gofmt would have
-      # written.
-      while (match(rest, /`[^`]+`/)) {
-        print substr(rest, RSTART + 1, RLENGTH - 2)
-        rest = substr(rest, RSTART + RLENGTH)
+      # EVERY quoted path on the line, of EITHER quoting, in ONE left-to-right
+      # pass. Two sequential loops — all the "…" first, then the `…` in what
+      # was left — dropped a raw path that came BEFORE a quoted one on the same
+      # line: `import (`crypto/ed25519`; "fmt")` reported only fmt. Also
+      # measured, also compiling, also exit 0. A scanner that reads the same
+      # line twice in two orders is reading two different lines.
+      while (1) {
+        q = match(rest, /"[^"]+"/); qs = RSTART; ql = RLENGTH
+        if (!q) { qs = 0 }
+        r = match(rest, /`[^`]+`/); rs = RSTART; rl = RLENGTH
+        if (!r) { rs = 0 }
+        if (!qs && !rs) { break }
+        if (qs && (!rs || qs < rs)) { start = qs; len = ql } else { start = rs; len = rl }
+        print substr(rest, start + 1, len - 2)
+        rest = substr(rest, start + len)
       }
       line = 0
     }
@@ -201,7 +221,11 @@ offending_imports() {
 }
 
 carrying_in_tree() {
-  local found="" tmp
+  local found="" tmp tracked
+  if ! tracked=$(git ls-files -- '*.go'); then
+    echo "FAIL cannot enumerate the tracked Go files in this checkout." >&2
+    exit 1
+  fi
   tmp=$(mktemp)
   while IFS= read -r path; do
     case "$path" in
@@ -209,7 +233,12 @@ carrying_in_tree() {
       *.go) ;;
       *) continue ;;
     esac
-    import_paths "$path" > "$tmp" 2>/dev/null || : > "$tmp"
+    # A READ THAT FAILS IS NOT A FILE WITH NO IMPORTS. `|| : > "$tmp"` emptied
+    # the extraction on any error and then swept the empty result as clean.
+    if ! import_paths "$path" > "$tmp"; then
+      echo "FAIL cannot read the imports of $path; a file this sweep cannot parse is not a file it has cleared." >&2
+      exit 1
+    fi
     local bad
     bad=$(offending_imports "$path" "$tmp")
     if [ -n "$bad" ]; then
@@ -217,13 +246,20 @@ carrying_in_tree() {
         found="$found$path imports $imported"$'\n'
       done <<< "$bad"
     fi
-  done <<< "$(git ls-files -- '*.go')"
+    # `done <<< "$(git ls-files …)"` discards git's exit status: a failed
+    # enumeration becomes an empty one and the sweep reports a clean tree. The
+    # listing is taken first so the failure is a failure.
+  done <<< "$tracked"
   rm -f "$tmp"
   printf '%s' "$found"
 }
 
 carrying_in_ref() {
-  local ref="$1" found="" tmp
+  local ref="$1" found="" tmp entries
+  if ! entries=$(git ls-tree -r --name-only "$ref"); then
+    echo "FAIL cannot enumerate $ref, so it has not been swept." >&2
+    exit 1
+  fi
   tmp=$(mktemp)
   while IFS= read -r path; do
     case "$path" in
@@ -231,8 +267,22 @@ carrying_in_ref() {
       *.go) ;;
       *) continue ;;
     esac
-    git cat-file blob "$ref:$path" > "$tmp.src" 2>/dev/null || : > "$tmp.src"
-    import_paths "$tmp.src" > "$tmp" 2>/dev/null || : > "$tmp"
+    # THE SAME FAIL-OPEN, and this one was reachable without any error at all.
+    # `git ls-tree -r` names gitlinks as well as blobs, so a submodule whose
+    # path ends in `.go` is listed and `git cat-file blob` cannot read it:
+    # measured on a throwaway ref, `fatal: bad file` was swallowed by
+    # `2>/dev/null`, the source was emptied, and the ref was reported `ok` with
+    # exit 0. Anything this sweep cannot open is a failure to look at, not a
+    # finding of nothing.
+    if ! git cat-file blob "$ref:$path" > "$tmp.src" 2>"$tmp.err"; then
+      echo "FAIL cannot read $ref:$path, so this ref has not been swept. git said:" >&2
+      sed 's/^/       /' "$tmp.err" >&2
+      exit 1
+    fi
+    if ! import_paths "$tmp.src" > "$tmp"; then
+      echo "FAIL cannot read the imports of $ref:$path; a file this sweep cannot parse is not a file it has cleared." >&2
+      exit 1
+    fi
     local bad
     bad=$(offending_imports "$path" "$tmp")
     if [ -n "$bad" ]; then
@@ -240,8 +290,8 @@ carrying_in_ref() {
         found="$found$path imports $imported"$'\n'
       done <<< "$bad"
     fi
-  done <<< "$(git ls-tree -r --name-only "$ref")"
-  rm -f "$tmp" "$tmp.src"
+  done <<< "$entries"
+  rm -f "$tmp" "$tmp.src" "$tmp.err"
   printf '%s' "$found"
 }
 
@@ -266,14 +316,26 @@ if [ "$#" -eq 0 ]; then
     echo "no Go files tracked here: the sweep would pass for an empty repository" >&2
     exit 1
   fi
-  report "working tree ($files Go files)" "$(carrying_in_tree)"
+  # THE SUBSTITUTION'S EXIT STATUS IS READ. `report … "$(carrying_in_tree)"` threw
+  # it away: a fatal `exit 1` inside the function ran in the command
+  # substitution's SUBSHELL, so the script carried on, report saw no findings,
+  # and the ref was announced `ok` with exit 0 — measured, with the FAIL text
+  # printed directly above the `ok`. A fix that reports its own failure and then
+  # passes is the defect it was fixing.
+  if ! carrying=$(carrying_in_tree); then
+    exit 1
+  fi
+  report "working tree ($files Go files)" "$carrying"
 else
   for ref in "$@"; do
     git rev-parse --verify --quiet "$ref" >/dev/null || {
       echo "no such ref: $ref" >&2
       exit 1
     }
-    report "$ref" "$(carrying_in_ref "$ref")"
+    if ! carrying=$(carrying_in_ref "$ref"); then
+      exit 1
+    fi
+    report "$ref" "$carrying"
   done
 fi
 

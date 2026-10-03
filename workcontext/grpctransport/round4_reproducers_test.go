@@ -39,7 +39,7 @@ import (
 // clientSaw runs the stream to completion and reports the headers AND the
 // trailers the client received, which is the thing the previous round's tests
 // never read.
-func clientSaw(t *testing.T, connection *grpc.ClientConn) (header metadata.MD, trailer metadata.MD, err error) {
+func clientSaw(t *testing.T, connection *grpc.ClientConn) (received int, header metadata.MD, trailer metadata.MD, err error) {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
@@ -53,6 +53,12 @@ func clientSaw(t *testing.T, connection *grpc.ClientConn) (header metadata.MD, t
 		if recvErr != nil {
 			break
 		}
+		// COUNTED, and that is the whole of a review finding: this helper
+		// dropped every message it received, so the one test that cared wrote
+		// `received := 0` beside it and asserted require.Zero on its own
+		// literal. A tautology in the place where "no message left under
+		// revoked authority" was supposed to be established.
+		received++
 	}
 	if errors.Is(recvErr, io.EOF) {
 		recvErr = nil
@@ -60,7 +66,7 @@ func clientSaw(t *testing.T, connection *grpc.ClientConn) (header metadata.MD, t
 	// Header() blocks until headers arrive or the stream ends, so it is read
 	// after the receive loop has finished.
 	header, _ = stream.Header()
-	return header, stream.Trailer(), recvErr
+	return received, header, stream.Trailer(), recvErr
 }
 
 // handlerFaults collects what a handler observed, so nothing calls require on
@@ -106,7 +112,7 @@ func TestARealClientNeverReceivesAHeaderAuthorityWasWithdrawnFrom(t *testing.T) 
 		return nil
 	})
 
-	header, trailer, err := clientSaw(t, connection)
+	_, header, trailer, err := clientSaw(t, connection)
 	faults.assert(t)
 	require.Error(t, err, "a handler that completed under withdrawn authority must fail the RPC")
 	require.Empty(t, header.Get("queued-header"),
@@ -122,7 +128,7 @@ func TestARealClientReceivesTheQueuedHeaderWhenAuthorityHolds(t *testing.T) {
 		return stream.SetHeader(metadata.Pairs("queued-header", "fine"))
 	})
 
-	header, _, err := clientSaw(t, connection)
+	_, header, _, err := clientSaw(t, connection)
 	require.NoError(t, err)
 	require.Equal(t, []string{"fine"}, header.Get("queued-header"))
 }
@@ -155,7 +161,7 @@ func TestTheContextRouteCannotWriteUnderRevokedAuthority(t *testing.T) {
 		return nil
 	})
 
-	header, trailer, err := clientSaw(t, connection)
+	_, header, trailer, err := clientSaw(t, connection)
 	faults.assert(t)
 	require.Error(t, err)
 	require.Empty(t, trailer.Get("ctx-trailer"), "a context-route trailer reached the client")
@@ -181,7 +187,7 @@ func TestTheContextRouteDeliversUnderAuthority(t *testing.T) {
 		return stream.SendMsg(wrapperspb.String("one"))
 	})
 
-	header, trailer, err := clientSaw(t, connection)
+	_, header, trailer, err := clientSaw(t, connection)
 	faults.assert(t)
 	require.NoError(t, err)
 	require.Equal(t, []string{"ok"}, header.Get("ctx-header"))
@@ -199,7 +205,7 @@ func TestTheGuardedContextStillAnswersTheMethod(t *testing.T) {
 		return nil
 	})
 
-	_, _, err := clientSaw(t, connection)
+	_, _, _, err := clientSaw(t, connection)
 	require.NoError(t, err)
 	require.Equal(t, streamMethod, <-observed)
 }
@@ -214,7 +220,7 @@ func TestRevocationReachesTheClientAsUnauthenticated(t *testing.T) {
 		return stream.SendMsg(wrapperspb.String("never"))
 	})
 
-	_, _, err := clientSaw(t, connection)
+	_, _, _, err := clientSaw(t, connection)
 	require.Error(t, err)
 	require.Equal(t, codes.Unauthenticated, status.Code(err),
 		"a client cannot tell 'mint again' from 'the server broke' out of codes.Unknown")
@@ -260,7 +266,7 @@ func TestAFirstRequestWithoutACapabilityNeitherBypassesNorDisablesTheMethod(t *t
 	})
 
 	// The first request is REFUSED rather than handed the raw stream.
-	_, _, first := clientSaw(t, connection)
+	_, _, _, first := clientSaw(t, connection)
 	require.Error(t, first, "a capability-bearing method ran with no guard")
 	require.Equal(t, codes.Unauthenticated, status.Code(first))
 	mu.Lock()
@@ -269,7 +275,7 @@ func TestAFirstRequestWithoutACapabilityNeitherBypassesNorDisablesTheMethod(t *t
 
 	// And the method still WORKS afterwards: nothing was learned, so nothing
 	// is stuck. This is the half that used to be codes.Internal until restart.
-	_, _, second := clientSaw(t, connection)
+	_, _, _, second := clientSaw(t, connection)
 	require.NoError(t, second, "one early request without a capability disabled the method")
 }
 
@@ -291,7 +297,7 @@ func TestSendHeaderIsRefusedUnderRevokedAuthority(t *testing.T) {
 		return nil
 	})
 
-	header, _, err := clientSaw(t, connection)
+	_, header, _, err := clientSaw(t, connection)
 	faults.assert(t)
 	require.Error(t, err)
 	require.Empty(t, header.Get("sent-header"))
@@ -436,7 +442,7 @@ func TestARecheckSourceFailureReachesTheClientAsUnavailable(t *testing.T) {
 		return stream.SendMsg(wrapperspb.String("never"))
 	})
 
-	_, _, err = clientSaw(t, connection)
+	_, _, _, err = clientSaw(t, connection)
 	require.Error(t, err)
 	require.Equal(t, codes.Unavailable, status.Code(err),
 		"a re-check source that could not be reached is the one retryable termination")
@@ -462,7 +468,7 @@ func TestSendHeaderCarriesWhatSetHeaderQueued(t *testing.T) {
 		return nil
 	})
 
-	header, _, err := clientSaw(t, connection)
+	_, header, _, err := clientSaw(t, connection)
 	faults.assert(t)
 	require.NoError(t, err)
 	require.Equal(t, []string{"one"}, header.Get("queued"),

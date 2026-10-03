@@ -250,3 +250,189 @@ func copyFile(t *testing.T, from string, to string) {
 	require.NoError(t, err)
 	require.NoError(t, os.WriteFile(to, content, 0o755))
 }
+
+// Round six, layer 2: THE AUDIT FAILED OPEN, in four separate places, and three
+// of them were inside the assertion added for round five's blocker.
+//
+// A gate that reports success when it could not look is worse than no gate, and
+// each of these reported success: the ref-listing guard skipped itself when
+// git failed, the comparison was between COUNTS, an unreadable blob was swept
+// as a clean one, and the fix for that last one exited a subshell.
+func TestTheSweepRefusesWhenItCouldNotLook(t *testing.T) {
+	sweep, err := filepath.Abs("scripts/sweep-published-refs.sh")
+	require.NoError(t, err)
+	checker, err := filepath.Abs("scripts/check-one-implementation.sh")
+	require.NoError(t, err)
+
+	// AN UNREACHABLE REMOTE. `git ls-remote … 2>/dev/null` swallowed the
+	// failure and `[ ${#published[@]} -gt 0 ]` skipped the comparison, so a
+	// checkout with one ref fetched printed "the remote publishes 0 ref(s);
+	// sweeping 0 of them", "this repository publishes no ref other than main",
+	// and exited 0 — the same false green the glob produced, through the guard
+	// added to stop it.
+	t.Run("an unreachable remote", func(t *testing.T) {
+		clone := clonedRemote(t, sweep, checker, "kept")
+		runIn(t, clone, "git", "remote", "set-url", "origin", filepath.Join(t.TempDir(), "gone.git"))
+
+		output, err := runSweep(clone)
+
+		require.Error(t, err, "a sweep with no denominator must not report success:\n%s", output)
+		require.Contains(t, output, "cannot list the refs this repository publishes")
+	})
+
+	// COUNTS AGREEING IS NOT THE SAME REFS. A remote that deleted one branch
+	// and published another left the local view holding a stale ref and
+	// missing the new one: two each side, assertion green, and the branch that
+	// carried the implementation was never opened.
+	t.Run("the same number of different refs", func(t *testing.T) {
+		clone := clonedRemote(t, sweep, checker, "kept")
+		remote := strings.TrimSpace(runOut(t, clone, "git", "remote", "get-url", "origin"))
+		// The remote moves on; this checkout does not refetch.
+		seed := t.TempDir()
+		runIn(t, seed, "git", "clone", "--quiet", remote, ".")
+		runIn(t, seed, "git", "push", "--quiet", "origin", ":refs/heads/kept")
+		runIn(t, seed, "git", "push", "--quiet", "origin", "HEAD:refs/heads/appeared/later")
+
+		output, err := runSweep(clone)
+
+		require.Error(t, err, "the same count of different refs must not pass:\n%s", output)
+		require.Contains(t, output, "appeared/later",
+			"and the refusal must name the ref that was never swept")
+	})
+
+	// AN UNREADABLE ENTRY AT A REF. `git ls-tree -r` names gitlinks as well as
+	// blobs, so a submodule whose path ends in .go is listed and `git cat-file
+	// blob` cannot read it. The error was swallowed, the source emptied, and
+	// the ref announced `ok` with exit 0.
+	//
+	// The first fix for this failed open too: the `exit 1` ran inside the
+	// command substitution `"$(carrying_in_ref "$ref")"`, so the script printed
+	// FAIL, carried on, found no findings, and printed `ok` directly underneath
+	// — measured. Both halves are asserted here, the exit status as well as the
+	// message.
+	t.Run("an entry the sweep cannot read", func(t *testing.T) {
+		repository := t.TempDir()
+		runIn(t, repository, "git", "init", "--quiet", ".")
+		require.NoError(t, os.WriteFile(filepath.Join(repository, "ordinary.go"),
+			[]byte("package x\n\nimport \"fmt\"\n\nvar _ = fmt.Sprint\n"), 0o600))
+		runIn(t, repository, "git", "add", ".")
+		runIn(t, repository, "git", "-c", "user.email=t@t", "-c", "user.name=t",
+			"commit", "--quiet", "-m", "seed")
+		commit := strings.TrimSpace(runOut(t, repository, "git", "rev-parse", "HEAD"))
+		// A gitlink whose path ends in .go.
+		runIn(t, repository, "git", "update-index", "--add", "--cacheinfo",
+			"160000,"+commit+",vendored.go")
+		runIn(t, repository, "git", "-c", "user.email=t@t", "-c", "user.name=t",
+			"commit", "--quiet", "-m", "a gitlink named like a Go file")
+		runIn(t, repository, "git", "branch", "gitlinked")
+		require.NoError(t, os.MkdirAll(filepath.Join(repository, "scripts"), 0o755))
+		copyFile(t, checker, filepath.Join(repository, "scripts", "check-one-implementation.sh"))
+
+		run := exec.Command("bash", "scripts/check-one-implementation.sh", "gitlinked")
+		run.Dir = repository
+		raw, err := run.CombinedOutput()
+		output := string(raw)
+
+		require.Error(t, err, "a ref this sweep could not open must not be reported ok:\n%s", output)
+		require.Contains(t, output, "has not been swept")
+		require.NotContains(t, output, "ok   gitlinked",
+			"the first fix printed FAIL and then ok, because exit 1 inside a command "+
+				"substitution exits the subshell")
+	})
+}
+
+// And the two SCANNER bypasses, both of which compile and pass `go vet`.
+//
+// The import extractor was rewritten in round four for exactly this class and
+// these two shapes walked past the rewrite: it read the closing paren off the
+// RAW line, so a `)` inside a comment closed the block early; and it scanned
+// for double-quoted paths and backquoted paths in two sequential passes, so a
+// raw path BEFORE a quoted one on the same line was dropped. Both measured at
+// exit 0 against the previous revision.
+func TestTheImportScannerReadsOneLineOnce(t *testing.T) {
+	script, err := filepath.Abs("scripts/check-one-implementation.sh")
+	require.NoError(t, err)
+
+	for name, probe := range map[string]string{
+		"a closing paren inside a comment": "package x\n\nimport (\n\t// )\n\t\"crypto/ed25519\"\n)\n\nvar _ = ed25519.Sign\n",
+		"a block comment holding a paren":  "package x\n\nimport (\n\t/* ) */\n\t\"crypto/ed25519\"\n)\n\nvar _ = ed25519.Sign\n",
+		"a raw path before a quoted one":   "package x\n\nimport (`crypto/ed25519`; \"fmt\")\n\nvar _ = ed25519.Sign\nvar _ = fmt.Sprint\n",
+	} {
+		t.Run(name, func(t *testing.T) {
+			out, err := sweepOf(t, script, "second.go", probe)
+			require.Error(t, err, "the sweep passed this file:\n%s", out)
+			require.Contains(t, out, "crypto/ed25519")
+		})
+	}
+
+	// THE BANS THE AST GATE HAS AND THIS ONE DID NOT. Four import paths the
+	// AST gate refuses passed here with `ok working tree (4 Go files)`, exit 0
+	// — in the root module, where this script is the only gate.
+	for name, probe := range map[string]struct{ source, says string }{
+		"the legacy protobuf module": {
+			source: "package x\n\nimport _ \"github.com/golang/protobuf/proto\"\n",
+			says:   "github.com/golang/protobuf/proto",
+		},
+		"the low-level protobuf runtime": {
+			source: "package x\n\nimport _ \"google.golang.org/protobuf/runtime/protoiface\"\n",
+			says:   "runtime/protoiface",
+		},
+		"protoimpl": {
+			source: "package x\n\nimport _ \"google.golang.org/protobuf/runtime/protoimpl\"\n",
+			says:   "runtime/protoimpl",
+		},
+		"a vendored ed25519": {
+			source: "package x\n\nimport _ \"github.com/some/vendor/ed25519\"\n",
+			says:   "ed25519",
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			out, err := sweepOf(t, script, "second.go", probe.source)
+			require.Error(t, err, "the sweep passed this file:\n%s", out)
+			require.Contains(t, out, probe.says)
+		})
+	}
+}
+
+// clonedRemote builds a throwaway remote with one extra branch and returns a
+// clone of it carrying both scripts.
+func clonedRemote(t *testing.T, sweep string, checker string, branch string) string {
+	t.Helper()
+	remote := t.TempDir()
+	runIn(t, remote, "git", "init", "--quiet", "--bare")
+	seed := t.TempDir()
+	runIn(t, seed, "git", "init", "--quiet")
+	require.NoError(t, os.WriteFile(filepath.Join(seed, "ordinary.go"),
+		[]byte("package x\n\nimport \"fmt\"\n\nvar _ = fmt.Sprint\n"), 0o600))
+	runIn(t, seed, "git", "add", ".")
+	runIn(t, seed, "git", "-c", "user.email=t@t", "-c", "user.name=t", "commit", "--quiet", "-m", "seed")
+	runIn(t, seed, "git", "branch", "-M", "main")
+	runIn(t, seed, "git", "remote", "add", "origin", remote)
+	runIn(t, seed, "git", "push", "--quiet", "origin", "main")
+	runIn(t, seed, "git", "push", "--quiet", "origin", "main:refs/heads/"+branch)
+
+	clone := t.TempDir()
+	runIn(t, clone, "git", "clone", "--quiet", remote, ".")
+	runIn(t, clone, "git", "fetch", "--prune", "--quiet", "origin", "+refs/heads/*:refs/remotes/origin/*")
+	require.NoError(t, os.MkdirAll(filepath.Join(clone, "scripts"), 0o755))
+	copyFile(t, sweep, filepath.Join(clone, "scripts", "sweep-published-refs.sh"))
+	copyFile(t, checker, filepath.Join(clone, "scripts", "check-one-implementation.sh"))
+	return clone
+}
+
+func runSweep(dir string) (string, error) {
+	run := exec.Command("bash", "scripts/sweep-published-refs.sh")
+	run.Dir = dir
+	run.Env = append(os.Environ(), "SWEEP_BASE=main", "SWEEP_HEAD=")
+	output, err := run.CombinedOutput()
+	return string(output), err
+}
+
+func runOut(t *testing.T, dir string, command string, args ...string) string {
+	t.Helper()
+	run := exec.Command(command, args...)
+	run.Dir = dir
+	output, err := run.Output()
+	require.NoError(t, err, "%s %v", command, args)
+	return string(output)
+}
