@@ -41,14 +41,6 @@ const (
 	// leaves room for one request and one retry.
 	minRenewalLeadTime = 5 * time.Second
 
-	// defaultMaxCredentialLifetime is the longest credential this client will
-	// hold. Core checks only that a TTL is positive, so without a ceiling a
-	// misconfigured host minting a month-long credential is accepted in
-	// silence. It is generous enough for the lifetimes the mint-once model
-	// wants — an hour's run needs about 75 minutes at the default lead — and
-	// short enough that a month is not one of them.
-	defaultMaxCredentialLifetime = 24 * time.Hour
-
 	// Backoff after a mint that failed. A failed renewal used to return an
 	// error to every caller while the held credential still had minutes left,
 	// and each caller then retried serially under the client's lock: one mint
@@ -196,16 +188,6 @@ type MintOptions struct {
 	// renewal is attempted. Zero takes the default.
 	RenewalLead float64
 
-	// MaxCredentialLifetime refuses a credential the host minted for longer
-	// than this. Zero takes defaultMaxCredentialLifetime.
-	//
-	// The ceiling is here because there is none at the minter: core checks only
-	// that the TTL is positive, so a misconfigured host can mint a credential
-	// valid for a month and every verifier will accept it. A ceiling in the
-	// client is the weaker half of that fix — it bounds what THIS process will
-	// hold, not what the host will issue — and the cap belongs at the minter.
-	MaxCredentialLifetime time.Duration
-
 	// Now is the clock, for tests.
 	Now func() time.Time
 }
@@ -352,13 +334,6 @@ func NewMintClient(options MintOptions) (*MintClient, error) {
 	if lead <= 0 || lead >= 1 {
 		return nil, fmt.Errorf("%w: renewal lead must be between zero and one", ErrMintRefused)
 	}
-	ceiling := options.MaxCredentialLifetime
-	if ceiling == 0 {
-		ceiling = defaultMaxCredentialLifetime
-	}
-	if ceiling <= 0 {
-		return nil, fmt.Errorf("%w: maximum credential lifetime must be positive", ErrMintRefused)
-	}
 	now := options.Now
 	if now == nil {
 		now = time.Now
@@ -367,7 +342,6 @@ func NewMintClient(options MintOptions) (*MintClient, error) {
 	options.Audience = audience
 	options.RequestTimeout = timeout
 	options.RenewalLead = lead
-	options.MaxCredentialLifetime = ceiling
 	return &MintClient{
 		options:    options,
 		httpClient: mintHTTPClient(options.RootCAs),
@@ -829,12 +803,6 @@ func (c *MintClient) checkWindow(credential Credential) error {
 		return fmt.Errorf(
 			"%w: the minted credential expires at or before it becomes valid (%s to %s)",
 			ErrMintRefused, credential.notBefore, credential.expiresAt,
-		)
-	}
-	if lifetime := credential.expiresAt.Sub(credential.notBefore); lifetime > c.options.MaxCredentialLifetime {
-		return fmt.Errorf(
-			"%w: the minted credential is valid for %s, and this process holds a credential for at most %s",
-			ErrMintRefused, lifetime, c.options.MaxCredentialLifetime,
 		)
 	}
 	now := c.now().UTC()

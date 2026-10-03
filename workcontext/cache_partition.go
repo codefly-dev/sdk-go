@@ -109,7 +109,13 @@ func DeriveCachePartition(
 	claims := verified.Context()
 	seal := claims.GetSeal()
 	if seal.GetInstallationId() == "" || seal.GetInstallationRevision() == 0 {
-		return CachePartition{}, fmt.Errorf("%w: a cache partition requires the sealed installation", ErrUnsealed)
+		// Belt and braces, and ErrInvalid because ErrUnsealed no longer exists:
+		// the seal and its fields are schema-required now, so a *Verified
+		// cannot carry a partial one — core refused it before anyone could
+		// verify it. This stays as a guard against a hand-built Verified
+		// arriving from a future core, and it is ONE sentinel because there is
+		// now one branch for every structural seal defect.
+		return CachePartition{}, fmt.Errorf("%w: a cache partition requires the sealed installation", ErrInvalid)
 	}
 	var settings cachePartitionOptions
 	for _, option := range options {

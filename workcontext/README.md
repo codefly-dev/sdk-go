@@ -124,8 +124,20 @@ three are now core's answer rather than a local one:
 | fixture | core | this module, before |
 | --- | --- | --- |
 | `seal-without-installation` | `ErrInvalid` (the schema reaches it first) | `ErrUnsealed`, with a test pinning the divergence |
-| `actor-without-epoch` | `ErrUnsealed` | **accepted** — the actor chain was never read, so a principal nobody can revoke went on the wire |
+| `actor-without-epoch` | `ErrInvalid` | **accepted** — the actor chain was never read, so a principal nobody can revoke went on the wire |
 | zero epoch / revision / incarnation, partial binding | `ErrInvalid` | `ErrUnsealed` |
+
+**`ErrUnsealed` no longer exists, and that is the end of this class of defect.**
+`WorkContextV1.seal` and `WorkActorV1.principal_epoch` are schema-**required**
+now, so `protovalidate` refuses a missing seal or a missing actor epoch inside
+core's decode before any branch that could have produced `ErrUnsealed` runs. A
+sentinel no branch can produce is worse than none — you write a handler and the
+handler never runs — so it is deleted, and **every structural seal defect is
+`ErrInvalid`**. One sentinel, one branch.
+
+This module needed no edit for that change, which is the argument for reading
+sentinels off core's kit rather than writing them down: three fixtures changed
+sentinel and the tests that assert `declared.Err` did not move.
 
 The fix was not to sync the rule. **`corework.Inspect` now owns every
 structural decision** — shape, encoding, schema, attenuation, grant shape, a
@@ -264,9 +276,9 @@ which is why a process that resolved its audience through `ReadAuthority` should
 pass it.
 
 A credential is also checked against **its own window** before it is installed:
-an expired or not-yet-valid response, one whose whole lifetime sits inside the
-renewal lead, or one valid for longer than `MaxCredentialLifetime`, is refused
-rather than held and counted as a mint that worked. The window tested is
+an expired or not-yet-valid response, or one whose whole lifetime sits inside
+the renewal lead, is refused rather than held and counted as a mint that
+worked. The window tested is
 **`not_before`** — the claim core's verifier tests; testing `issued_at` was
 testing a different window from the one the credential would be judged against
 — and the tolerance is `core/workcontext.DefaultSkew`, so the client is not
@@ -290,11 +302,25 @@ hold-off bounds `Refresh` too, which the generation check alone does not: a
 receiver whose live state lags refuses each FRESH credential, and every refusal
 is a new generation.
 
-`MaxCredentialLifetime` (default 24h) refuses a credential minted for longer
-than this process will hold one. **It is a stopgap and labelled as one**: core
-has built `Authority.MaxTTL` with a one-hour default, which is the right side of
-the wire, and this ceiling goes when that is in a pinned release. A client-side
-cap bounds only the clients that implement it.
+**The lifetime ceiling is the host's, and there is no client-side one.** A
+review asked for a client-side cap because core checked only that a TTL was
+positive; this carried one, labelled a stopgap whose condition was "it goes
+when core has a cap". Core has one — `Authority.MaxTTL`, defaulting to
+`DefaultMaxTTL` of **one hour** — so the cap is at the minter, where it binds
+every client rather than the ones that opted in, and a host raising it does so
+in configuration a reviewer sees. A second ceiling here at a different number
+would be the two-places-one-rule failure this whole change is about.
+
+**That ceiling changes #47's acceptance arithmetic, so read it before sizing.**
+One mint across an hour of calls needs a lifetime of at least
+`run / (1 - lead)` — 75 minutes at the default 0.2 lead — so **at core's
+default one-hour cap, "exactly one mint for an hour's run" is not reachable**:
+an hour of calls costs one mint and one renewal. That is the ceiling working.
+The heartbeat this replaced made 240 requests an hour per surface; two is not
+one, and it is also not 240. Both shapes are asserted
+(`TestAnHourOfCallsCostsOneMintAndOneRenewalAtCoresDefaultCeiling` and
+`…WhenTheHostMintsLongerThanTheRun`), because a consumer sizing this needs to
+know which one its host has chosen.
 
 ### When the host refuses the credential you hold
 
@@ -410,9 +436,8 @@ either import path.
 
 | Sentinel | Means | What the caller does |
 | --- | --- | --- |
-| `ErrInvalid` | wrong and cannot become right — bad signature, another issuer, another audience, a schema violation, a seal naming no installation, a zero epoch/revision/incarnation, a partial binding, a malformed capability, an expired or not-yet-valid window | refuse; 401 |
+| `ErrInvalid` | wrong and cannot become right — bad signature, another issuer, another audience, a schema violation, **no seal at all**, a seal naming no installation, a zero epoch/revision/incarnation, a partial binding, **an actor hop with no epoch**, a malformed capability, an expired or not-yet-valid window | refuse; 401 |
 | `ErrRevoked` | sound when minted, overtaken since — the principal's epoch, an actor hop's epoch, the installation revision, the build incarnation, a binding revision or incarnation, a revoked binding, **a binding granted to another principal or in another installation**, an installation the principal no longer holds, or the authorization revision moved | mint again, retry once |
-| `ErrUnsealed` | the capability carries no seal, or an actor hop carries no epoch — a principal nobody can revoke | refuse; it is not a credential |
 | `ErrNotACoreToken` | the payload is not this encoding at all — most usefully, a JSON one | refuse, and do **not** report a signature problem |
 | `ErrReplayed` | a single-use capability was presented twice | refuse; this is the resume contract, not a forgery |
 

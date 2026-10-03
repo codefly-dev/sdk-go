@@ -21,24 +21,39 @@ import (
 // hole survived — sealOf never read the actor chain, so a capability core
 // refuses as unsealed went on the wire.
 var structurallyRefused = map[string]bool{
-	"missing-seal":              true, // ErrUnsealed: carries no seal at all
-	"actor-without-epoch":       true, // ErrUnsealed: a hop nobody can revoke
-	"seal-without-installation": true, // ErrInvalid: the schema refuses it first
-	"foreign-encoding":          true, // ErrNotACoreToken: another format entirely
-	"empty-token":               true, // ErrInvalid: no envelope
-	"no-separator":              true, // ErrInvalid: no envelope
-	"separator-only":            true, // ErrInvalid: empty segments
-	"payload-not-b64":           true, // ErrInvalid: the envelope does not decode
+	// The envelope.
+	"empty-token":      true, // ErrInvalid: nothing at all
+	"no-separator":     true, // ErrInvalid: not <payload>.<signature>
+	"separator-only":   true, // ErrInvalid: empty segments
+	"payload-not-b64":  true, // ErrInvalid: the envelope does not decode
+	"foreign-encoding": true, // ErrNotACoreToken: another format entirely
+
+	// The seal, every part of which the schema requires now.
+	"missing-seal":               true, // ErrInvalid: no seal
+	"seal-without-installation":  true, // ErrInvalid: a seal bound to nothing
+	"zero-principal-epoch":       true, // ErrInvalid: zero is not an epoch
+	"zero-installation-revision": true, // ErrInvalid: zero is not a revision
+	"zero-build-incarnation":     true, // ErrInvalid: zero is not an incarnation
+	"partial-operation-binding":  true, // ErrInvalid: an id at no revision
+	"actor-without-epoch":        true, // ErrInvalid: a principal nobody can revoke
 }
 
 // TestTheSDKParsePathsAgreeWithCore drives every fixture in core's kit through
 // THIS MODULE's parse paths and requires core's declared sentinel for each one.
 //
-// The eight above are the ones a capability's own bytes earn, so this module
-// must reach them with no network and no key. The other seventeen are
-// signature, audience or live-state refusals, which an unverified inspection
-// cannot see and must therefore PASS: a structural check that refused them
-// would be claiming to have verified something it cannot.
+// The twelve above are the ones a capability's own bytes earn, so this module
+// must reach them with no network and no key. Every other fixture — signature,
+// issuer, audience, WINDOW and live-state refusals — must PASS: a structural
+// check that refused them would be claiming to have verified something it
+// cannot see. Expired and not-yet-valid are in that second group, which is
+// worth stating because it surprises: Inspect checks no window at all, and the
+// mint client's own checkWindow is what refuses a credential that arrives
+// unusable.
+//
+// The list is not derived from Inspect's behaviour, deliberately — that would
+// be a tautology. It is written down, and the test requires every name on it to
+// be a fixture that exists, so a fixture core renames or retires fails here
+// rather than quietly dropping out of coverage.
 //
 // This is the test the conformance test is not. Driving fixtures through
 // `&Verifier{}` exercises core, because Verifier is an alias of core's type —
@@ -50,10 +65,17 @@ var structurallyRefused = map[string]bool{
 //   - seal-without-installation: core answers ErrInvalid, because protovalidate
 //     reaches it before the structural check. This module answered ErrUnsealed,
 //     and its own test pinned that divergence as if it were correct.
-//   - actor-without-epoch: core answers ErrUnsealed. This module never read the
-//     actor chain and accepted it.
+//   - actor-without-epoch: this module never read the actor chain and accepted
+//     the capability outright, so a principal nobody can revoke went on the
+//     wire.
 //   - a zero epoch, revision or incarnation: core answers ErrInvalid from the
 //     schema. This module answered ErrUnsealed.
+//
+// Every one of those is ErrInvalid at core today — the seal and each actor
+// epoch are schema-required, so protovalidate reaches all of them and
+// ErrUnsealed is deleted. This test needed no edit for that, which is the
+// argument for reading sentinels off the kit rather than writing them down:
+// three of core's fixtures changed sentinel and nothing here had to move.
 //
 // Each of those is "one condition, two messages" — the fragmentation the
 // one-implementation rule exists to end — relocated from the signature to the
@@ -107,6 +129,21 @@ func TestTheSDKParsePathsAgreeWithCore(t *testing.T) {
 			"the list names %q, which is not a fixture in core's kit any more — "+
 				"a stale entry is a case nobody is covering", name)
 	}
+
+	// The list is EXACT, not a lower bound. A fixture this module refuses
+	// structurally but nobody listed would otherwise drift into coverage
+	// silently, and one it stops refusing would drift out — and the second is
+	// the direction that matters, because it is how the actor-epoch hole
+	// existed in the first place. Core adding a structural fixture should land
+	// here as a failing test asking to be acknowledged.
+	refused := map[string]bool{}
+	for _, fixture := range fixtures {
+		if _, _, _, err := sealOf(fixture.Token); err != nil {
+			refused[fixture.Name] = true
+		}
+	}
+	require.Equal(t, structurallyRefused, refused,
+		"the fixtures this module refuses on their own bytes are not the ones the list names")
 }
 
 // And the agreement holds on every carrier, not only in sealOf: the carriers

@@ -50,10 +50,13 @@ func TestAttachCarriesTheCapabilityAndTheSealedInstallation(t *testing.T) {
 // mismatch for a capability that named no installation at all.
 //
 // The sentinel is CORE'S, taken from core's own fixture rather than written
-// here. This test used to assert ErrUnsealed for both, which was wrong for
-// seal-without-installation — core answers ErrInvalid there, because the schema
-// reaches it before the structural check — and pinning the wrong sentinel is
-// how the divergence stayed invisible.
+// here. This test used to assert ErrUnsealed for all of them, which was wrong
+// for seal-without-installation even then — core answered ErrInvalid there,
+// because the schema reaches it before the structural check — and pinning a
+// sentinel of one's own is how the divergence stayed invisible. It is now
+// ErrInvalid for every one of them, because the seal and the actor epoch are
+// schema-required and ErrUnsealed is deleted; reading the sentinel off the
+// fixture is what made this change a no-op here instead of a rewrite.
 func TestAttachRefusesAnUnsealedCapability(t *testing.T) {
 	for _, name := range []string{"missing-seal", "seal-without-installation", "actor-without-epoch"} {
 		t.Run(name, func(t *testing.T) {
@@ -166,9 +169,12 @@ func TestFromHeadersRequiresExactlyOneCapability(t *testing.T) {
 // nobody approved, and the field that is missing is the one an attacker would
 // choose to leave out.
 //
-// The earlier version of this test supplied only complete and absent bindings,
-// so deleting the partial-binding rejection would not have failed it. The
-// partial cases are what it is for.
+// The partial case is CORE'S fixture now. This test used to build it by
+// re-signing a minted capability with core's fixture key, because core's kit
+// had no such fixture and core's minter correctly refuses to mint one. Core
+// added `partial-operation-binding` when asked, so the local signer is gone —
+// and an `ed25519.Sign` in a test file was the gate's weakest edge, since the
+// gate exempts test files.
 func TestSealedOperationBindingIsWholeOrAbsent(t *testing.T) {
 	a := newAuthority(t)
 	_, _, binding, err := sealOf(a.start(t, mintInput{binding: testBinding}))
@@ -182,28 +188,17 @@ func TestSealedOperationBindingIsWholeOrAbsent(t *testing.T) {
 	require.NoError(t, err)
 	require.Nil(t, none, "a session that exercises no binding seals none")
 
-	// A binding missing one of its three fields is refused, and so is the whole
-	// capability: a credential is sealed or it is not a credential.
-	for _, field := range []string{"Binding.ID", "Binding.Revision", "Binding.Incarnation"} {
-		t.Run(field, func(t *testing.T) {
-			token := resealWithout(t, a.start(t, mintInput{binding: testBinding}), field)
+	// A binding carrying an id and nothing else is refused, with core's own
+	// sentinel, and never reaches a request on any carrier.
+	declared := fixture(t, "partial-operation-binding")
+	_, _, _, err = sealOf(declared.Token)
+	require.ErrorIs(t, err, declared.Err)
 
-			// ErrInvalid, not ErrUnsealed: the schema refuses a zero revision
-			// or a blank id before the structural check sees it, and the
-			// sentinel a pre-check reports has to be the one the verifier
-			// would report. The structural check below it is what catches the
-			// shapes the schema permits.
-			_, _, _, err := sealOf(token)
-			require.ErrorIs(t, err, ErrInvalid)
-
-			// And it never reaches a request, on either transport.
-			request := httptest.NewRequest(http.MethodGet, "/records", nil)
-			require.ErrorIs(t, Attach(request, token), ErrInvalid)
-			require.Empty(t, request.Header.Get(HeaderName))
-			_, _, err = SealedInstallation(token)
-			require.ErrorIs(t, err, ErrInvalid)
-		})
-	}
+	request := httptest.NewRequest(http.MethodGet, "/records", nil)
+	require.ErrorIs(t, Attach(request, declared.Token), declared.Err)
+	require.Empty(t, request.Header.Get(HeaderName))
+	_, _, err = SealedInstallation(declared.Token)
+	require.ErrorIs(t, err, declared.Err)
 }
 
 // Every field of the seal is required, and the check is the SAME check for
@@ -212,81 +207,46 @@ func TestSealedOperationBindingIsWholeOrAbsent(t *testing.T) {
 // fields out of four: a capability with no principal epoch or no build
 // incarnation was attached and travelled.
 //
-// The sentinel for each is ErrInvalid, and that is not a detail. A zero epoch,
-// revision or incarnation is refused by the SCHEMA, which core's verifier runs
-// before its structural seal check — so ErrInvalid is what a verifier at the
-// far end reports, and a pre-check reporting ErrUnsealed for the same bytes was
-// one condition with two messages. TestTheSDKParsePathsAgreeWithCore holds that
-// to core's own fixtures rather than to this comment.
+// Each case is one of CORE'S fixtures and each sentinel is read off the
+// fixture rather than written here. That is what made the schema change a
+// no-op for this test: the seal became required, three fixtures changed from
+// ErrUnsealed to ErrInvalid, and nothing below had to move.
 func TestEverySealedFieldIsRequiredOnEveryCarrier(t *testing.T) {
-	a := newAuthority(t)
-	for field, says := range map[string]string{
-		"PrincipalEpoch":       "seal.principal_epoch",
-		"InstallationID":       "seal.installation_id",
-		"InstallationRevision": "seal.installation_revision",
-		"BuildIncarnation":     "seal.build_incarnation",
+	for _, name := range []string{
+		"missing-seal",
+		"seal-without-installation",
+		"zero-principal-epoch",
+		"zero-installation-revision",
+		"zero-build-incarnation",
 	} {
-		t.Run(field, func(t *testing.T) {
-			token := resealWithout(t, a.start(t, mintInput{}), field)
+		t.Run(name, func(t *testing.T) {
+			declared := fixture(t, name)
+			require.ErrorIs(t, declared.Err, ErrInvalid,
+				"every structural seal defect is one sentinel now: %s", declared.Reason)
 
-			_, _, _, err := sealOf(token)
-			require.ErrorIs(t, err, ErrInvalid)
-			require.ErrorContains(t, err, says)
+			_, _, _, err := sealOf(declared.Token)
+			require.ErrorIs(t, err, declared.Err)
 
 			// The outbound HTTP carrier.
 			request := httptest.NewRequest(http.MethodGet, "/records", nil)
-			err = Attach(request, token)
-			require.ErrorIs(t, err, ErrInvalid)
+			require.ErrorIs(t, Attach(request, declared.Token), declared.Err)
 			require.Empty(t, request.Header.Get(HeaderName),
 				"a refused capability must not be left on the request")
 
 			// The inbound HTTP carrier. Both carriers are stated, because both
-			// are now required — and the seal check runs whether or not they
-			// are, which is what finding 7 was about.
+			// are required — and the seal check runs whether or not they are.
 			headers := http.Header{}
-			headers.Set(HeaderName, token)
-			headers.Set(InstallationIDHeaderName, testInstallation)
-			headers.Set(InstallationRevisionHeaderName, "3")
+			headers.Set(HeaderName, declared.Token)
+			headers.Set(InstallationIDHeaderName, corework.FixtureInstallation)
+			headers.Set(InstallationRevisionHeaderName, "1")
 			_, err = FromHeaders(headers)
-			require.ErrorIs(t, err, ErrInvalid)
+			require.ErrorIs(t, err, declared.Err)
 
 			// And the one function both gRPC directions go through.
-			_, _, err = SealedInstallation(token)
-			require.ErrorIs(t, err, ErrInvalid)
-			require.ErrorContains(t, err, says)
+			_, _, err = SealedInstallation(declared.Token)
+			require.ErrorIs(t, err, declared.Err)
 		})
 	}
-}
-
-// An actor hop with no epoch is a principal nobody can revoke, and it never
-// reaches the wire.
-//
-// sealOf did not read the actor chain at all, so core's own
-// actor-without-epoch fixture — which core refuses as ErrUnsealed — was
-// attached, read back and carried by both gRPC directions, while AGENTS.md said
-// "Attach refuses to put an unsealed capability on a request". The field is a
-// POINTER on the wire: the getter collapses "no epoch" into "epoch 0", so only
-// the nil check sees the difference.
-func TestAnActorHopWithNoEpochNeverReachesTheWire(t *testing.T) {
-	declared := fixture(t, "actor-without-epoch")
-	require.ErrorIs(t, declared.Err, ErrUnsealed, "core's own declaration")
-
-	_, _, _, err := sealOf(declared.Token)
-	require.ErrorIs(t, err, ErrUnsealed)
-	require.ErrorContains(t, err, "carries no epoch")
-
-	request := httptest.NewRequest(http.MethodGet, "/records", nil)
-	require.ErrorIs(t, Attach(request, declared.Token), ErrUnsealed)
-	require.Empty(t, request.Header.Get(HeaderName))
-
-	_, _, err = SealedInstallation(declared.Token)
-	require.ErrorIs(t, err, ErrUnsealed)
-
-	// A delegated capability whose hops DO carry epochs is unaffected: the
-	// check is the missing field, not the presence of a chain.
-	delegated := fixture(t, "delegated")
-	_, _, _, err = sealOf(delegated.Token)
-	require.NoError(t, err)
 }
 
 // An installation carrier stated twice is ambiguous, and ambiguous is refused.

@@ -96,11 +96,6 @@ var (
 	// format is never diagnosed as a bad key.
 	ErrNotACoreToken = corework.ErrNotACoreToken
 
-	// ErrUnsealed is a capability carrying no seal, or one naming no
-	// installation. It does not verify, and this package refuses to put one on
-	// a request.
-	ErrUnsealed = corework.ErrUnsealed
-
 	// ErrRevoked is every sealed mismatch: principal epoch, installation
 	// revision, build incarnation, binding revision or incarnation, a revoked
 	// binding, or an installation the principal no longer holds — and an
@@ -117,6 +112,18 @@ var (
 
 	// ErrReplayed is a single-use capability presented twice.
 	ErrReplayed = corework.ErrReplayed
+
+	// ErrUnsealed is GONE, and its absence is the point. It was aliased here
+	// for a while, which is worse than not having it: WorkContextV1.seal and
+	// WorkActorV1.principal_epoch are now schema-REQUIRED, so protovalidate
+	// refuses a missing seal or a missing actor epoch inside core's decode
+	// before any branch that could have produced ErrUnsealed runs. A sentinel
+	// no branch can produce invites a handler that never executes, and an
+	// unreachable handler reads as cover.
+	//
+	// Every structural seal defect is therefore ErrInvalid: no seal, a seal
+	// naming no installation, a zero epoch, revision or incarnation, a partial
+	// binding, an actor hop with no epoch. One sentinel, one branch.
 
 	// Core exports three more sentinels that are deliberately NOT aliased here,
 	// on core's own instruction when asked:

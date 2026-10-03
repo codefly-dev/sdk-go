@@ -557,10 +557,6 @@ func TestMintRefusesACredentialThatIsUnusableOnArrival(t *testing.T) {
 			mintedAt: testClock, mintedFor: 4 * time.Second,
 			sentinel: ErrMintUnavailable, says: "inside the renewal lead",
 		},
-		"longer than this process will hold a credential": {
-			mintedAt: testClock, mintedFor: 30 * 24 * time.Hour,
-			sentinel: ErrMintRefused, says: "holds a credential for at most",
-		},
 	} {
 		t.Run(name, func(t *testing.T) {
 			host := newMintHost(t, now)
@@ -587,21 +583,21 @@ func TestMintRefusesACredentialThatIsUnusableOnArrival(t *testing.T) {
 	_, err := client.Credential(t.Context())
 	require.NoError(t, err, "a credential minted inside core's skew is usable")
 
-	// And the ceiling is configurable, because what a process should hold is
-	// the deployment's call — the point is that there IS one, since core checks
-	// only that a TTL is positive.
-	host = newMintHost(t, now)
-	week := 7 * 24 * time.Hour
-	host.mintedAt, host.mintedFor = &testClockCopy, &week
-	client = newTestMintClient(t, host, projectedFile(t, "projected"), now,
-		func(options *MintOptions) { options.MaxCredentialLifetime = 14 * 24 * time.Hour })
-	credential, err := client.Credential(t.Context())
-	require.NoError(t, err)
-	require.Equal(t, testClock.Add(week), credential.ExpiresAt())
+	// There is no client-side lifetime ceiling any more, and that is core's
+	// cap arriving rather than a check being dropped. A review asked for one
+	// because core checked only that a TTL was positive; this carried one,
+	// labelled a stopgap with its own condition — it goes when core has a cap.
+	// Core has one now (Authority.MaxTTL, DefaultMaxTTL of an hour), so a
+	// credential longer than the host permits is refused where it is MINTED,
+	// which is the side of the wire that binds every client rather than the
+	// ones that opted in.
+	//
+	// What this test asserts about it is therefore core's constant, not a
+	// number of ours: a host cannot configure its way past it without a
+	// reviewer seeing the configuration.
+	require.Equal(t, time.Hour, corework.DefaultMaxTTL,
+		"the lifetime ceiling lives at the minter; if core's default moves, the README moves with it")
 }
-
-// testClockCopy is an addressable testClock, for the host overrides above.
-var testClockCopy = testClock
 
 // A refusal the host will give again is not retryable, and an outage is. A
 // client that confused them would either spin against a permanent refusal or
@@ -813,7 +809,6 @@ func TestNewMintClientValidatesItsConfiguration(t *testing.T) {
 		"audience name only":     func(o *MintOptions) { o.Audience = AuthorityValue{Name: "platform"} },
 		"audience key only":      func(o *MintOptions) { o.Audience = AuthorityValue{Key: "audience"} },
 		"no projection":          func(o *MintOptions) { o.ProjectedToken = nil },
-		"negative lifetime cap":  func(o *MintOptions) { o.MaxCredentialLifetime = -time.Hour },
 		"no projection audience": func(o *MintOptions) { o.ProjectionAudience = "" },
 		"timeout too long":       func(o *MintOptions) { o.RequestTimeout = time.Hour },
 		"renewal lead at one":    func(o *MintOptions) { o.RenewalLead = 1 },

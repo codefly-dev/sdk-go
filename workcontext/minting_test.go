@@ -3,14 +3,12 @@ package workcontext
 import (
 	"context"
 	"crypto/ed25519"
-	"encoding/base64"
 	"testing"
 	"time"
 
 	basev0 "github.com/codefly-dev/core/generated/go/codefly/base/v0"
 	corework "github.com/codefly-dev/core/workcontext"
 	"github.com/stretchr/testify/require"
-	"google.golang.org/protobuf/proto"
 )
 
 // Every capability in this package's tests is minted by core's Authority,
@@ -116,58 +114,6 @@ type noGrants struct{}
 
 func (noGrants) Grant(context.Context, string) (*corework.Grant, error) {
 	return nil, corework.ErrInvalid
-}
-
-// resealWithout rewrites a capability core has just minted, blanking exactly
-// one field of its seal, and re-signs it with core's fixture key.
-//
-// It has to be done this way, and it is not a second implementation. Core's
-// minter REFUSES to seal a capability to a zero epoch, revision or incarnation
-// — protovalidate rejects the message — which is correct of an issuer and means
-// a partial seal cannot be obtained by configuring one. Core's own conformance
-// kit builds its `missing-seal` fixture by exactly this move, for exactly this
-// reason. Nothing here invents a format: the message is core's, the
-// deterministic marshal is core's, the key is core's fixture key, so the
-// signature is genuine and the rule under test is the one that refuses the
-// token.
-//
-// The durable home for these is core's conformance kit, since "every field of
-// the seal is required" is core's rule and not this module's — see the PR
-// discussion.
-func resealWithout(t *testing.T, token string, field string) string {
-	t.Helper()
-	claims, err := readClaims(token)
-	require.NoError(t, err)
-	require.NotNil(t, claims.GetSeal())
-	switch field {
-	case "PrincipalEpoch":
-		claims.Seal.PrincipalEpoch = 0
-	case "ActorEpoch":
-		require.NotEmpty(t, claims.GetActorChain(), "no hop to blank")
-		claims.ActorChain[len(claims.ActorChain)-1].PrincipalEpoch = nil
-	case "InstallationID":
-		claims.Seal.InstallationId = ""
-	case "InstallationRevision":
-		claims.Seal.InstallationRevision = 0
-	case "BuildIncarnation":
-		claims.Seal.BuildIncarnation = 0
-	case "Binding.ID":
-		require.NotNil(t, claims.GetOperationBinding())
-		claims.OperationBinding.BindingId = ""
-	case "Binding.Revision":
-		require.NotNil(t, claims.GetOperationBinding())
-		claims.OperationBinding.Revision = 0
-	case "Binding.Incarnation":
-		require.NotNil(t, claims.GetOperationBinding())
-		claims.OperationBinding.Incarnation = 0
-	default:
-		t.Fatalf("resealWithout has no case for %q, so the field is not being covered", field)
-	}
-	payload, err := proto.MarshalOptions{Deterministic: true}.Marshal(claims)
-	require.NoError(t, err)
-	_, private := corework.FixtureKeyPair()
-	return base64.RawURLEncoding.EncodeToString(payload) + "." +
-		base64.RawURLEncoding.EncodeToString(ed25519.Sign(private, payload))
 }
 
 type mintInput struct {

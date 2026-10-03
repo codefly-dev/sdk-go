@@ -275,13 +275,50 @@ type roundTripFunc func(*http.Request) (*http.Response, error)
 
 func (f roundTripFunc) RoundTrip(request *http.Request) (*http.Response, error) { return f(request) }
 
-// The hour-long acceptance run the review supplied and this suite did not have.
-// It passed there (1,952 calls, one mint request) and is kept so the arithmetic
-// is a gate rather than a reviewer's one-off.
+// The hour-long acceptance run the dynamic review supplied and this suite did
+// not have. It passed there (1,952 calls, one mint request) and is kept so the
+// arithmetic is a gate rather than a reviewer's one-off.
 //
 // It establishes ENDPOINT ISSUANCE COUNT and not durable host audit events,
 // which is the review's own caveat and remains true.
-func TestAnHourOfCallsIncludingConcurrentOnesProducesOneMint(t *testing.T) {
+//
+// # The arithmetic moved, and #47's acceptance criterion moved with it
+//
+// Core now caps what an authority will mint: Authority.MaxTTL, defaulting to
+// DefaultMaxTTL of one hour. One mint across an hour of calls needs a lifetime
+// of at least run/(1-lead) — 75 minutes at the default 0.2 lead — so **at
+// core's default cap, "exactly one mint for an hour's run" is NOT reachable**.
+// An hour of calls costs one mint and one renewal.
+//
+// That is the host's ceiling working, not a defect, and the acceptance
+// criterion has to be read against it: what the mint-once model guarantees is
+// a credential's own clock, not a fixed number. The heartbeat this replaced
+// made 240 requests an hour per surface. Two is not one, and it is also not
+// 240.
+//
+// Both shapes are asserted, because a consumer sizing this needs to know which
+// one its host has chosen.
+func TestAnHourOfCallsCostsOneMintAndOneRenewalAtCoresDefaultCeiling(t *testing.T) {
+	// A credential as long as the host will mint by default.
+	requests, counts := hourOfCalls(t, time.Hour, 0)
+	require.EqualValues(t, 2, requests,
+		"at a one-hour ceiling and a 0.2 lead, an hour of calls is one mint and one renewal")
+	require.Equal(t, MintCounts{Mints: 1, Renewals: 1}, counts)
+}
+
+// And the one-mint shape, when a host raises its own ceiling deliberately —
+// which is where that decision belongs, and where a reviewer sees it.
+func TestAnHourOfCallsCostsOneMintWhenTheHostMintsLongerThanTheRun(t *testing.T) {
+	requests, counts := hourOfCalls(t, 90*time.Minute, 2*time.Hour)
+	require.EqualValues(t, 1, requests,
+		"an hour of calls on a credential that outlives the run plus its lead is ONE endpoint request")
+	require.Equal(t, MintCounts{Mints: 1}, counts)
+}
+
+// hourOfCalls runs 32 concurrent first calls and then 32 calls in each of 60
+// simulated minutes, and reports what the endpoint was asked for.
+func hourOfCalls(t *testing.T, lifetime time.Duration, maxTTL time.Duration) (uint64, MintCounts) {
+	t.Helper()
 	clock := testClock
 	var clockMu sync.RWMutex
 	now := func() time.Time {
@@ -290,10 +327,10 @@ func TestAnHourOfCallsIncludingConcurrentOnesProducesOneMint(t *testing.T) {
 		return clock
 	}
 	host := newMintHost(t, now)
-	host.lifetime = 75 * time.Minute // longer than the run, allowing for the lead
+	host.lifetime = lifetime
+	host.authority.core.MaxTTL = maxTTL // zero takes core's DefaultMaxTTL
 	client := newTestMintClient(t, host, projectedFile(t, "projected"), now)
 
-	// A concurrent first burst.
 	var waiting sync.WaitGroup
 	for range 32 {
 		waiting.Add(1)
@@ -305,7 +342,6 @@ func TestAnHourOfCallsIncludingConcurrentOnesProducesOneMint(t *testing.T) {
 	}
 	waiting.Wait()
 
-	// Then an hour of calls, four per simulated second of a minute.
 	for minute := range 60 {
 		clockMu.Lock()
 		clock = testClock.Add(time.Duration(minute) * time.Minute)
@@ -315,8 +351,5 @@ func TestAnHourOfCallsIncludingConcurrentOnesProducesOneMint(t *testing.T) {
 			require.NoError(t, err)
 		}
 	}
-
-	require.EqualValues(t, 1, host.requests.Load(),
-		"an hour of calls on a credential that outlives the run is ONE endpoint request")
-	require.Equal(t, MintCounts{Mints: 1}, client.Counts())
+	return host.requests.Load(), client.Counts()
 }

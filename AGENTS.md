@@ -139,13 +139,16 @@ see the skill below.
   There is no compatibility period: a release line that cannot meet the rule is
   **retired by the owner**, not exempted.
 - **A credential is sealed or it is not a credential, and core says what that
-  means.** Every field of the seal is required at mint and at verify, an
-  operation binding carries its id, revision and incarnation or none of them,
-  and **every actor hop carries an epoch** — a hop without one is a principal
-  nobody can revoke. `Attach` refuses to put an unsealed capability on a
-  request, and it refuses it with `corework.Inspect`'s answer: this claim was
-  false for a while precisely because we were answering it ourselves and never
-  read the actor chain.
+  means.** The seal and every actor hop's epoch are **schema-required**, so a
+  missing one is a `protovalidate` refusal inside core's decode; an operation
+  binding carries its id, revision and incarnation or none of them. `Attach`
+  refuses an unsealed capability with `corework.Inspect`'s answer — this claim
+  was false for a while precisely because we answered it ourselves and never
+  read the actor chain. **There is one sentinel for every structural seal
+  defect, `ErrInvalid`.** `ErrUnsealed` is deleted: once the schema requires
+  the seal, no branch can produce it, and a sentinel no branch produces invites
+  a handler that never runs. Read a refusal's sentinel off core's fixture, never
+  from a constant here.
 - **An authority-bearing value is read once.** A principal, binding or audience
   comes from `ReadAuthority` at boot. `WorkspaceValue` answers from that pin for
   a pinned name, so a drift is an error rather than a reload — the process has

@@ -1,7 +1,6 @@
 package workcontext
 
 import (
-	"encoding/base64"
 	"fmt"
 	"net/http"
 	"strconv"
@@ -29,8 +28,11 @@ const (
 	InstallationIDHeaderName       = "x-codefly-installation-id"
 	InstallationRevisionHeaderName = "x-codefly-installation-revision"
 
-	// MaxTokenBytes bounds a capability this module will carry or read.
-	MaxTokenBytes = 32 * 1024
+	// MaxTokenBytes bounds a capability this module will carry or read. It IS
+	// core's bound, not a number of ours that happens to agree: this module
+	// invented one because core declared none, which is one more rule kept in
+	// sync by hand. Core declares it now, so this is a re-export.
+	MaxTokenBytes = corework.MaxTokenSize
 )
 
 // Attach installs a capability on an outbound request: the signed capability
@@ -151,48 +153,40 @@ func SealedInstallation(encoded string) (id string, revision string, err error) 
 	return seal.InstallationID, strconv.FormatUint(seal.InstallationRevision, 10), nil
 }
 
-// readClaims decodes a capability's claims AFTER core has judged its structure,
-// and applies no rule of its own.
+// readClaims asks core what a capability is, and reads the claims core has
+// already decoded. There is no second decode and no rule of this module's.
 //
 // This is all that is left of a parser that had become a second
-// implementation. It used to hand-parse the envelope and then apply its own
+// implementation. It hand-parsed the envelope and then applied its own
 // structural seal rule, and that rule DISAGREED with core's own fixtures:
-// seal-without-installation was ErrUnsealed here and ErrInvalid there (core's
-// schema reaches it first), a zero epoch, revision or incarnation was
-// ErrUnsealed here and ErrInvalid there, and the actor chain was never read at
-// all — so core's actor-without-epoch fixture, a principal nobody can revoke,
-// was attached and carried. One condition with two messages is the exact
-// fragmentation the one-implementation rule exists to end, and it had been
-// relocated from the signature to the seal.
+// seal-without-installation was ErrUnsealed here and ErrInvalid there, a zero
+// epoch, revision or incarnation was ErrUnsealed here and ErrInvalid there, and
+// the actor chain was never read at all — so core's actor-without-epoch
+// fixture, a principal nobody can revoke, was attached and carried. One
+// condition with two messages is the fragmentation the one-implementation rule
+// exists to end, and it had been relocated from the signature to the seal.
 //
-// So every structural DECISION is corework.Inspect's, and what remains here is
-// reading two values out of a capability core has already said is shaped like a
-// sealed capability: the installation, for the pre-check carriers, and the
-// window, for the mint client reading the lifetime of a credential the host
-// just issued it. Nothing here decides anything, and nothing trusts the result:
-// Inspect itself checks no signature — core's own test asserts that a token
-// re-signed with a key nobody holds passes it — so nil means "shaped right" and
-// never "permitted".
+// Core's Inspect is the one answer now. It runs the size bound, the envelope,
+// CheckEncoding, proto.Unmarshal, protovalidate — which is where the seal and
+// every actor epoch are REQUIRED by the schema — and the structural seal
+// check, and Verify runs the same decode, so an early refusal here and core's
+// verification cannot disagree about what a token is.
 //
-// The residue shrinks to nothing when core's Inspect returns the claims it has
-// already decoded; that is agreed and not yet in a pinned commit. Until then
-// this decode runs SECOND, after Inspect, so it can never be the thing that
-// answers a question.
+// Nothing here trusts the result. Inspect checks NO signature, and core has a
+// test asserting that a token re-signed with a key nobody holds passes it, so
+// nil means "shaped like a sealed capability" and never "permitted". The
+// carriers this fills are a pre-check; the receiver verifies.
+//
+// The claims are CLONED. Inspected.Context hands back core's own pointer, so a
+// caller that mutated what it was given would be mutating core's value.
 func readClaims(encoded string) (*Claims, error) {
-	if err := corework.Inspect(encoded); err != nil {
+	inspected, err := corework.Inspect(encoded)
+	if err != nil {
 		return nil, err
 	}
-	payload, _, _ := strings.Cut(encoded, ".")
-	raw, err := base64.RawURLEncoding.DecodeString(payload)
-	if err != nil {
-		// Unreachable: Inspect decoded the same bytes. Returning core's
-		// sentinel rather than panicking keeps the failure legible if core's
-		// envelope ever stops being <base64url>.<base64url>.
-		return nil, fmt.Errorf("%w: payload is not base64url: %v", ErrInvalid, err)
-	}
-	claims := &Claims{}
-	if err := proto.Unmarshal(raw, claims); err != nil {
-		return nil, fmt.Errorf("%w: payload is not a WorkContextV1: %v", ErrInvalid, err)
+	claims, ok := proto.Clone(inspected.Context()).(*Claims)
+	if !ok {
+		return nil, fmt.Errorf("%w: inspected claims are not a WorkContextV1", ErrInvalid)
 	}
 	return claims, nil
 }
