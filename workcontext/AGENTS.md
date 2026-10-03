@@ -136,14 +136,17 @@ A refusal reaches the client as a gRPC status: the sentinels become
 ## The mint client holds a credential it cannot verify
 
 It is the party the credential is minted FOR, not a receiver, so it reads the
-window through `corework.Inspect` — structural, no signature. Three
-consequences that are easy to get backwards:
+window through `corework.Inspect` and checks no signature. Three consequences
+that are easy to get backwards:
 
-- **`MaxCredentialLifetime` defaults to `corework.MaxTTLCeiling`**, core's own
-  constant, so there is one number rather than two to keep in step. Core's
-  `Start` bounds an honest minter and core's `Verify` bounds a receiver on a
-  current core; what this process holds in memory and presents for its whole
-  life is bounded here or nowhere.
+- **The lifetime bound is CORE'S**, in `decodeClaims`, so `Inspect` carries it
+  — and `Inspect` is this client's read path. Core's first two attempts bounded
+  `Authority.Start` and then `Verify` alone, neither of which a holder can see,
+  so a thirty-day capability every `Verify` refuses was reported to its holder
+  as thirty days of validity. `MaxCredentialLifetime` survives as a DEPLOYMENT
+  POLICY below core's ceiling, defaulting to `corework.MaxTTLCeiling` so there
+  is no second number; exactly-at-ceiling is accepted and this module pins that
+  with its own test, because the default IS that constant.
 - **The sentinel says what RECOVERY is possible.** `ErrMintRefused` is latched
   and terminal — a process seeing one must stop serving — so anything transient
   classified that way permanently stops a process holding a good credential: an

@@ -1222,9 +1222,9 @@ func (c *MintClient) credentialFrom(payload []byte, audience string) (Credential
 // **not_before**, which is the claim core's verifier tests; testing issued_at
 // was testing a different window from the one the credential would be judged
 // against, and a host that sets them apart would have had a credential accepted
-// here and refused everywhere. And it bounds the lifetime: core checks only
-// that a TTL is positive, so a misconfigured host minting a month-long
-// credential was installed in silence.
+// here and refused everywhere. And it bounds the lifetime to what this
+// DEPLOYMENT chose to hold — below core's absolute ceiling, which core refuses
+// inside Inspect, the call sealOf already makes.
 //
 // The tolerance is core's own skew, so this client is never stricter than the
 // verifier that will accept the credential.

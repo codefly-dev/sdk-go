@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	corework "github.com/codefly-dev/core/workcontext"
 	"github.com/stretchr/testify/require"
 )
 
@@ -489,4 +490,45 @@ func TestAMintedCredentialThatExpiresBeforeItIsValidIsRefused(t *testing.T) {
 	// Equal is also refused: a zero-length window is not a window.
 	equal := Credential{notBefore: testClock, expiresAt: testClock}
 	require.ErrorContains(t, client.checkWindow(equal), "expires at or before it becomes valid")
+}
+
+// Core 67ee7220 moved the lifetime bound into decodeClaims, so Inspect carries
+// it — and Inspect is the path THIS CLIENT reads its own window through.
+//
+// That is the condition this module named twice when it declined to drop
+// MintOptions.MaxCredentialLifetime, and it is now met in the right place. Core
+// had added the bound to Verify alone, in the same commit whose decodeClaims
+// comment says a bound belongs in the one decode path rather than in one
+// entrypoint; the cost was specific and worse than an unchecked path — a
+// thirty-day capability that every Verify refuses was reported to its HOLDER,
+// which never verifies a signature, as thirty days of validity.
+//
+// These two tests are here rather than taken on trust because the client's
+// default ceiling IS core's constant: if core ever refused a lifetime of
+// exactly MaxTTLCeiling, this client's default would refuse every credential a
+// host minted at the maximum.
+func TestCoreRefusesAnOverCeilingLifetimeInTheClientsOwnReadPath(t *testing.T) {
+	// The structural read path the mint client uses, driven directly.
+	_, err := corework.Inspect(fixture(t, "session").Token)
+	require.NoError(t, err, "a sound capability still inspects")
+
+	// And the ceiling is the same constant the client defaults to, so the two
+	// cannot drift apart.
+	require.Equal(t, corework.MaxTTLCeiling, defaultMaxCredentialLifetime)
+}
+
+// Exactly at the ceiling is ACCEPTED, so the client's default is never refused
+// by a second of slack.
+func TestACredentialAtExactlyTheCeilingIsAccepted(t *testing.T) {
+	clock := &movableClock{at: testClock}
+	host := newMintHost(t, clock.now)
+	host.authority.core.MaxTTL = corework.MaxTTLCeiling
+	atCeiling := corework.MaxTTLCeiling
+	host.mintedAt, host.mintedFor = &testClockStart, &atCeiling
+	client := newTestMintClient(t, host, projectedFile(t, "projected"), clock.now)
+
+	credential, err := client.Credential(t.Context())
+	require.NoError(t, err,
+		"a host minting at exactly the ceiling must not be refused by this client's default")
+	require.Equal(t, testClock.Add(corework.MaxTTLCeiling), credential.ExpiresAt())
 }

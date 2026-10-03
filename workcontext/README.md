@@ -368,27 +368,33 @@ few legitimate refreshes the bound was a minute *permanently*, so a refresh days
 later still waited for a receiver that had lagged that morning. That is a tax,
 not a rate limit.
 
-**There are two lifetime ceilings, deliberately, and they are ONE NUMBER.**
-Core's `MaxTTLCeiling` (24h) is absolute: `Authority.maxTTL` clamps to it,
-`Start` refuses a TTL beyond it, and `Verify` refuses a credential whose
-lifetime exceeds it. `MintOptions.MaxCredentialLifetime` defaults to **that same
-constant**, read from core, so there is no second number to keep in step — a
-deployment may lower it, and configuring it above core's ceiling is refused at
-construction.
+**The lifetime bound is CORE'S, in the one decode path, and this client's
+option is a deployment policy.** Core's `MaxTTLCeiling` (24h) is absolute:
+`Authority.maxTTL` clamps to it, `Start` refuses a TTL beyond it, and — since
+core `67ee7220` — `decodeClaims` refuses a capability whose window is wider,
+so `Verify`, `Authenticate` **and `Inspect`** all refuse it with one message.
 
-This check has now been deleted once on advice and restored once on review, so
-what it is for is worth stating plainly. The earlier argument was that
-`Authority.MaxTTL` took any positive value and `Verify` bounded no lifetime;
-core `72d72eb2` closed both, which is exactly the falsifiable condition this
-module named when it declined to drop the ceiling. The reason changes and the
-check stays, for something neither of core's bounds covers:
+That last one is what matters here, and it is the third place core put this
+bound. The argument this module made twice for keeping a client-side ceiling was
+that **a mint client never verifies a signature** — it is the party the
+credential is minted *for*, not a receiver — so it reads its own window through
+`corework.Inspect`, which was structural and checked no lifetime. Core's first
+two attempts bounded `Authority.Start` and then `Verify` alone, neither of which
+this client can see. A thirty-day capability that every `Verify` refuses was
+reported to its **holder** as thirty days of validity: an absent bound tells a
+caller nothing, and that one told it something false about the only field it
+calls `Inspect` to read.
 
-**this client never verifies a signature.** It cannot — it is the party the
-credential is minted *for*, not a receiver — so it reads the window through
-`corework.Inspect`, which is structural and checks no signature at all. Core's
-`Start` bounds an honest *minter*; core's `Verify` bounds a *receiver* running a
-current core. What this process holds in memory and presents for the rest of its
-life is bounded here or nowhere.
+With the bound in `decodeClaims`, an over-ceiling lifetime is refused in this
+client's own read path before `checkWindow` runs. So the net is core's.
+`MintOptions.MaxCredentialLifetime` survives as a **deployment policy** — a
+process that will hold a credential for at most five minutes says so — and it
+defaults to `corework.MaxTTLCeiling`, read from core, so there is no second
+number to drift. A value above core's ceiling is refused at construction, and a
+credential at *exactly* the ceiling is accepted, which this module pins with its
+own test rather than taking on trust: the default is core's constant, so a
+second of slack either way would refuse every credential a host mints at the
+maximum.
 
 **The ceiling's effect on #47's arithmetic:** at `Authority.MaxTTL`'s default
 of **one hour**, a process that runs for an hour costs one mint and one renewal
@@ -769,11 +775,54 @@ root:
 ./scripts/check-one-implementation.sh
 ```
 
-Until core#691 is released, this module is pinned to a **pseudo-version of
-core's branch** (`go get github.com/codefly-dev/core@<sha>`), not a local
-`replace`: a pseudo-version is reproducible for anyone who checks the branch
-out, and a `replace` to a worktree is not mergeable. Move it to the release when
-there is one.
+### This module merges on a pseudo-version, deliberately
+
+`workcontext/go.mod` pins **`v0.7.2-0.20261003145432-67ee72204f68`** — core at
+`67ee7220` — and not a release tag, because there is no tag to move to and will
+not be one before this merges. Core's `version/info.codefly.yaml` already says
+`0.8.0`, but its `version-tag.yml` cuts the tag from the **merge commit** of
+core#692 and core never tags by hand; core#692 is still open on two owner
+decisions. The latest published core tag is `v0.7.1`, dated 2026-09-30.
+
+**What `v0.7.1` does and does not carry**, because the imprecise version of this
+("no released core has the Work Context") is both wrong and misleading — it
+invites the answer "then nothing is worse off by waiting". Measured against the
+tag, not inferred:
+
+| At `v0.7.1` | |
+| --- | --- |
+| present | `Authority.Start`, `Verifier.Verify`, `Verified`, `Grant`, `replay.go`, `scope.go` — an **unsealed** mint and verify |
+| absent | `Seal` and `SealSource`, so no installation, epoch or build binding and no revocation through the seal |
+| absent | `Inspect` — the structural entrypoint this module reads every capability through |
+| absent | `Verifier.Recheck` — the non-consuming re-check the stream guard is built on |
+| absent | `Authenticator` — the verify-only entrypoint |
+| absent | `MaxTTLCeiling` — `v0.7.1` has the unbounded-lifetime behaviour this module measured and refused to trust |
+| absent | **the whole `workcontext/conformance` directory** — the kit this module's suite runs, and the import gate that proves it did not reimplement core |
+
+So the accurate statement is: **there is no released core carrying the sealed
+capability, the conformance kit, or either verification entrypoint as they now
+stand.** A consumer that needs only unsealed mint-and-verify has `v0.7.1` and is
+not blocked. A consumer that owes an import gate — which is every consumer of
+this contract — has nothing tagged to run it against.
+
+A pseudo-version is a *pin*, not a workaround: it is reproducible for anyone who
+checks the branch out, and `go.sum` records the hashes. What it is not is a
+release line, which matters for a consumer in two ways:
+
+- **`go get -u` will not move you off it**, and nothing will warn you. The pin
+  is the version.
+- **Do not cut a consumer release whose only Work Context dependency is this
+  pseudo-version** unless you accept the same unreleased dependency. Pinning
+  this module from a branch is fine for integration; publishing it as stable is
+  the thing to hold.
+
+Core will say when `v0.8.0` lands. The follow-up is a one-line `go get` and a
+`go mod tidy` in this module, and it is **not** a merge precondition for this
+pull request: holding a finished change behind somebody else's release is how a
+branch rots, and the pin names an exact commit either way.
+
+What the tag will add is nothing functional — `67ee7220` is the content — so
+re-pinning is bookkeeping, not an upgrade.
 
 ## The wire
 
