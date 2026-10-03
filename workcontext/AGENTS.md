@@ -12,17 +12,43 @@ budget. The root file carries the rule; this carries what the gates refuse.
 
 ## What the two gates refuse, and why each rule exists
 
-**Both gates read BOTH modules.** `TestNoSecondWorkContextImplementation` walks
-the repository's AST; `scripts/check-one-implementation.sh` sweeps every tracked
-Go file by import path, and over every published ref besides.
+**There are four gates and they read BOTH modules.** Two are type-checked with
+`x/tools/go/packages`: `TestEveryImportIsOnItsModulesAllowlist` is a
+**deny-by-default import allowlist per module**, and
+`TestNoCodecTouchesACapabilityByType` decides the codec rule with `go/types`.
+`TestNoSecondWorkContextImplementation` is the syntactic gate that remains.
+`scripts/check-one-implementation.sh` sweeps every published ref, reading
+imports with `go/parser`.
 
-The AST gate used to walk this module only, which was a hole with nothing behind
-it: the deleted implementation lived at the repository root, in package
-`codefly`, and the sweep bans *imports* rather than reading code. A reviewer
-built the consequence and ran it — a root file with a **hand-written base64url
-decoder**, so no banned import at all, and `proto.Unmarshal` into
-`basev0.WorkContextV1` — and it compiled, linted at 0 issues and passed the
-sweep as `ok working tree (58 Go files)`.
+**Deny by default is the spine, and it replaces an argument that lost ten
+times.** Every revision banned a LIST OF NAMES and every review found the next
+name — `hkdf`, then `sha512`, then `protoiface`, and finally `crypto/mldsa`
+signing a `WorkContextV1` that `encoding/json/v2` had encoded as snake_case
+JSON, which is the exact format this repository deleted, with both gates green
+and lint clean. The list was not behind by one entry; it was behind by a design.
+Each module now declares the imports it HAS, measured from the tree, and
+anything else is a finding — so `protodelim`, the gRPC codec registry,
+`prototext`, `jsontext` and `hpke` are refused by one rule, and so is the one
+nobody has thought of. `import "C"` is refused by name, because a MAC built
+through CommonCrypto names no Go package at all.
+
+**go/types is necessary and not sufficient**, which is why both halves exist. A
+syntactic resolver answers with a SPELLING where the question is a KIND: six
+compiled probes decoded a real capability through `func into[M proto.Message]`,
+an embedded interface, an alias of `proto.Message`, a `reflect.Call`, a closure
+taking `proto.Unmarshal`, and a descriptor-built message. `types.IsInterface`
+and object identity answer all of them, and the indirection allowlist is keyed
+on `*types.Func` — so a second method named `Handle` on a new type is a
+different object. **The irreducible residue** is a hand-written implementation
+that imports nothing: a base64url decoder is twenty lines and a wire walk is
+fifty. That is closed by review, and saying so is part of the rule.
+
+The syntactic gate used to walk this module only, which was a hole with nothing
+behind it: the deleted implementation lived at the repository root, and the
+sweep bans *imports* rather than reading code. A reviewer built the consequence
+— a root file with a **hand-written base64url decoder**, so no banned import at
+all, and `proto.Unmarshal` into `basev0.WorkContextV1` — and it compiled, linted
+clean and swept green.
 
 The two modules are held to different rules, deliberately. **In here the
 capability is the subject**, so every codec use is allowlisted by name. **Outside
@@ -33,9 +59,7 @@ message**, recognised as a type under core's module whose name begins with
 `Work`. A prefix, so a message core adds later is covered the day it exists.
 
 Type names resolve to the imported **package PATH**, never to the local
-qualifier, because the qualifier is the author's choice: `basev0
-"some/other/pkg"` would otherwise let a foreign type answer to a row written for
-one of core's.
+qualifier, because the qualifier is the author's choice.
 
 - **By capability, never by name.** A signature, MAC or JOSE/JWT primitive,
   anything under `x/crypto`, `protojson`/`protowire`/`anypb`. The bare `crypto`
@@ -43,12 +67,11 @@ one of core's.
   The predicate used to be "imports a primitive AND mentions WorkContext",
   which a second implementation defeats by putting the signer in one file and
   the wrapper in another.
-- **Allowed imports are held to FILES and SYMBOLS.** `crypto/tls`,
+- **An allowlisted import is held to FILES and SYMBOLS.** `crypto/tls`,
   `crypto/x509`, `mime`, `crypto/sha256` and `encoding/base64` each have an
-  honest use in exactly one file. An import allowed whole-file is allowed for
-  everything in that package — which is how `x509.ParsePKCS8PrivateKey`, a
-  signer getting a key without naming `ed25519`, would be a permitted use of an
-  allowed import rather than a finding.
+  honest use in exactly one file. Whole-file is allowed-for-everything — which
+  is how `x509.ParsePKCS8PrivateKey`, a signer getting a key without naming
+  `ed25519`, would be a permitted use of an allowed import.
 - **base64 may ENCODE and never DECODE.** `cache_partition.go` builds a cache
   key. base64 decoding plus `proto.Unmarshal` is the entire second parser this
   module deleted, and the symbol rule alone cannot see it: `base64.StdEncoding`

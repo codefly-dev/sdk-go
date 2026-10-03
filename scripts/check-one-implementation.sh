@@ -3,18 +3,22 @@
 # repository: it is codefly-dev/core/workcontext. This sweeps the WHOLE
 # repository — both modules, every tracked Go file — for a second one.
 #
-# It runs as a job in go.yml, which is the workflow that builds every ref this
-# repository publishes (main and compat/**), so the gate holds wherever the
-# build holds. It is required on main by an active ruleset, under the check name
+# It runs as a job in go.yml, whose triggers are `branches: [ '**' ]` — every
+# ref this repository publishes, with no naming convention in it, because a
+# consumer pins a COMMIT and go.mod records a pseudo-version with no idea what
+# the branch was called. The triggers said `compat/**` for three revisions
+# after the comment above them stopped saying it. It is required on main by an active ruleset, under the check name
 # "no second Work Context implementation". There is no compatibility period: a
 # second implementation on a ref this repository builds is a failure to fix, and
 # a release line that cannot meet the rule is retired by the owner rather than
 # exempted.
 #
-# It is not the same check as TestNoSecondWorkContextImplementation, which walks
-# from the workcontext module root and therefore cannot see the rest of the
-# repository. The implementation this repository deleted lived at the ROOT, in
-# package codefly, which is exactly the place that test's walk does not reach.
+# It is not the same check as the Go gates, and it is no longer the only gate
+# that reads the root module: TestEveryImportIsOnItsModulesAllowlist and
+# TestNoCodecTouchesACapabilityByType type-check BOTH modules with
+# x/tools/go/packages. This script is what runs over every PUBLISHED REF, where
+# there is no checkout to type-check — which is why it reads imports with
+# go/parser (scripts/importsof) rather than with a regex.
 #
 # THE PREDICATE IS AN ABSOLUTE BAN ON SIGNING, with a named allowlist — not a
 # conjunction. It used to be "imports a signing primitive AND mentions
@@ -55,6 +59,9 @@
 # it lives outside this repository: this repository holds the rule, not a
 # consumer inventory.
 set -euo pipefail
+
+# Where this script lives, so the import reader beside it can be built.
+here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 # Any of these in an import path is a signature, a MAC, or a library that mints
 # bearer tokens. The bare "crypto" package is included: crypto.Signer signs
@@ -120,178 +127,160 @@ allowed() {
     'workcontext/cache_partition.go|crypto/sha256') return 0 ;;
     'receipts/digest.go|crypto/sha256') return 0 ;;
     'receipts/postgres.go|crypto/sha256') return 0 ;;
-    # Effect receipts, whose rows are JSON and are not capabilities.
-    'receipts/'*'|encoding/json') return 0 ;;
+    # The receipts DIGEST, which canonicalises a receipt REQUEST. By exact
+    # path: this was `receipts/*`, permitting encoding/json anywhere under
+    # receipts, while the AST gate named one file — so the two gates disagreed
+    # about the same directory and the looser one was this script, which is the
+    # only gate the ref sweep runs. Measured from the tree: receipts/digest.go
+    # is the only non-test file there that imports it.
+    'receipts/digest.go|encoding/json') return 0 ;;
   esac
   return 1
 }
 
-# import_paths <file> -> every imported path, one per line.
+# IMPORTS ARE READ BY GO'S OWN PARSER, not by a regex over lines.
 #
-# It takes what is INSIDE the quotes and never tries to recognise the alias in
-# front of it. The previous version matched the whole line against a regex for
-# an import's shape, which a non-ASCII alias and a `/* comment */` prefix both
-# defeated — and in the root module this sweep is the only gate, so each was a
-# complete bypass.
-import_paths() {
-  awk '
-    # Comments are STRIPPED FIRST, so a comment before or inside the keyword
-    # cannot hide it: `/* x */ import "crypto/ed25519"` anchored nothing when
-    # the match required `import` at the start of the line.
-    { stripped = $0
-      gsub(/\/\*[^*]*\*\//, " ", stripped)
-      sub(/\/\/.*$/, "", stripped) }
-    # An import block opens wherever `import` is followed by `(`, not only when
-    # the line IS `import (`.
-    stripped ~ /(^|[^[:alnum:]_])import([^[:alnum:]_]|$)/ && stripped ~ /\(/ { inblock = 1 }
-    stripped ~ /(^|[^[:alnum:]_])import([^[:alnum:]_]|$)/ && stripped !~ /\(/ { line = 1 }
-    # THE CLOSING PAREN IS READ OFF THE STRIPPED LINE, not off $0. Reading it
-    # off the raw line meant a `)` INSIDE A COMMENT closed the block early, so
-    #
-    #     import (
-    #             // )
-    #             "crypto/ed25519"
-    #     )
-    #
-    # compiled, passed `go vet`, and swept clean — measured, exit 0. One
-    # character of comment was the whole bypass, in the root module where this
-    # script is the only gate.
-    inblock && stripped ~ /\)/ { closing = 1 }
-    (inblock || line) {
-      rest = stripped
-      # EVERY quoted path on the line, of EITHER quoting, in ONE left-to-right
-      # pass. Two sequential loops — all the "…" first, then the `…` in what
-      # was left — dropped a raw path that came BEFORE a quoted one on the same
-      # line: `import (`crypto/ed25519`; "fmt")` reported only fmt. Also
-      # measured, also compiling, also exit 0. A scanner that reads the same
-      # line twice in two orders is reading two different lines.
-      while (1) {
-        q = match(rest, /"[^"]+"/); qs = RSTART; ql = RLENGTH
-        if (!q) { qs = 0 }
-        r = match(rest, /`[^`]+`/); rs = RSTART; rl = RLENGTH
-        if (!r) { rs = 0 }
-        if (!qs && !rs) { break }
-        if (qs && (!rs || qs < rs)) { start = qs; len = ql } else { start = rs; len = rl }
-        print substr(rest, start + 1, len - 2)
-        rest = substr(rest, start + len)
-      }
-      line = 0
-    }
-    closing { inblock = 0; closing = 0 }
-  ' "$1"
+# The awk extractor this replaces was rewritten three times for exactly this
+# class, and each rewrite was walked past by source that compiles: a ")" inside
+# a comment closing the import block, a raw-string path before a quoted one on
+# the same line, the keyword followed by a newline, a comment spanning lines,
+# and
+#
+#     import "\x63rypto/ed25519"
+#
+# which IS crypto/ed25519 to the compiler and is not that string to anything
+# matching text. The escape cannot be closed by any amount of regex, and the
+# language's own parser closes all five at once — the question was always "what
+# does Go think this file imports".
+#
+# It matters most HERE. The AST gate reads the working tree; this script is what
+# the ref sweep runs over every published ref, ALONE, so each shape above was a
+# complete bypass of the required check for any branch a consumer can pin.
+# IMPORTSOF_BIN names a prebuilt reader. The script builds one otherwise; the
+# variable exists because the sweep's own tests run it in throwaway
+# repositories, and building the reader once for all of them is the difference
+# between a second and a minute.
+helper="${IMPORTSOF_BIN:-}"
+build_helper() {
+  [ -n "$helper" ] && return 0
+  helper="$(mktemp -d)/importsof"
+  if ! go build -o "$helper" "$here/importsof"; then
+    echo "FAIL cannot build the import reader at $here/importsof." >&2
+    echo "     Imports are read with go/parser now, because a regex over lines cannot" >&2
+    echo "     read Go: an escaped path is one string to the compiler and another to grep." >&2
+    exit 1
+  fi
 }
 
-# offending_imports <path> <file> -> prints each offending import PATH
-offending_imports() {
-  local path="$1" file="$2" imported
-  while IFS= read -r imported; do
-    [ -n "$imported" ] || continue
-    case "$imported" in
-      'crypto/tls'|'crypto/x509')
-        # TLS plumbing, still held to the allowlist.
-        allowed "$path" "$imported" || printf '%s\n' "$imported"
-        continue
-        ;;
-      'crypto/rand')
-        # Randomness is not a key.
-        continue
-        ;;
-      'crypto/sha256')
-        # The ONE hash with uses here — two digests — and held to them by the
-        # AST gate's file and symbol rule. The others are not waved through:
-        # hkdf.Extract(sha512.New, …) and pbkdf2.Key(sha512.New, …) are HMAC,
-        # and both passed this script while `crypto/sha512` sat in the "a hash
-        # is not a signature" list beside it.
-        allowed "$path" "$imported" || printf '%s\n' "$imported"
-        continue
-        ;;
-    esac
-    if printf '%s' "$imported" | grep -Eq "($primitives)"; then
-      allowed "$path" "$imported" || printf '%s\n' "$imported"
-      continue
-    fi
-    if printf '%s' "$imported" | grep -Eq "($encoders)"; then
-      allowed "$path" "$imported" || printf '%s\n' "$imported"
-      continue
-    fi
-    if printf '%s' "$imported" | grep -Eq "($envelope)" || [ "$imported" = "encoding/json" ]; then
-      allowed "$path" "$imported" || printf '%s\n' "$imported"
-    fi
-  done < "$file"
+# imports_of_files <listfile> -> "path<TAB>importpath" per import.
+#
+# A file that does not parse is a FAILURE and never a file with no imports.
+imports_of_files() {
+  build_helper
+  if ! "$helper" < "$1"; then
+    echo "FAIL cannot read the imports of the files listed above." >&2
+    echo "     A file this sweep cannot parse is not a file it has cleared." >&2
+    exit 1
+  fi
+}
+
+# offending_import <path> <importpath> -> true when this import is a finding.
+offending_import() {
+  local path="$1" imported="$2"
+  case "$imported" in
+    'crypto/tls'|'crypto/x509')
+      # TLS plumbing, still held to the allowlist.
+      allowed "$path" "$imported" && return 1
+      return 0
+      ;;
+    'crypto/rand')
+      # Randomness is not a key.
+      return 1
+      ;;
+    'crypto/sha256')
+      # The ONE hash with uses here — three digests — held to them by the AST
+      # gate's file and symbol rule. The others are not waved through:
+      # hkdf.Extract(sha512.New, …) and pbkdf2.Key(sha512.New, …) are HMAC, and
+      # both passed this script while `crypto/sha512` sat in the "a hash is not
+      # a signature" list beside it.
+      allowed "$path" "$imported" && return 1
+      return 0
+      ;;
+  esac
+  if printf '%s' "$imported" | grep -Eq "($primitives)|($encoders)|($envelope)" ||
+    [ "$imported" = "encoding/json" ]; then
+    allowed "$path" "$imported" && return 1
+    return 0
+  fi
+  return 1
 }
 
 carrying_in_tree() {
-  local found="" tmp tracked
+  local found="" tracked list imports path imported
   if ! tracked=$(git ls-files -- '*.go'); then
     echo "FAIL cannot enumerate the tracked Go files in this checkout." >&2
     exit 1
   fi
-  tmp=$(mktemp)
+  list=$(mktemp); imports=$(mktemp)
   while IFS= read -r path; do
     case "$path" in
       *_test.go) continue ;;
-      *.go) ;;
-      *) continue ;;
+      *.go) printf '%s\n' "$path" >> "$list" ;;
     esac
-    # A READ THAT FAILS IS NOT A FILE WITH NO IMPORTS. `|| : > "$tmp"` emptied
-    # the extraction on any error and then swept the empty result as clean.
-    if ! import_paths "$path" > "$tmp"; then
-      echo "FAIL cannot read the imports of $path; a file this sweep cannot parse is not a file it has cleared." >&2
-      exit 1
-    fi
-    local bad
-    bad=$(offending_imports "$path" "$tmp")
-    if [ -n "$bad" ]; then
-      while IFS= read -r imported; do
-        found="$found$path imports $imported"$'\n'
-      done <<< "$bad"
-    fi
-    # `done <<< "$(git ls-files …)"` discards git's exit status: a failed
-    # enumeration becomes an empty one and the sweep reports a clean tree. The
-    # listing is taken first so the failure is a failure.
   done <<< "$tracked"
-  rm -f "$tmp"
+  imports_of_files "$list" > "$imports"
+  while IFS=$'\t' read -r path imported; do
+    [ -n "$imported" ] || continue
+    if offending_import "$path" "$imported"; then
+      found="$found$path imports $imported"$'\n'
+    fi
+  done < "$imports"
+  rm -f "$list" "$imports"
   printf '%s' "$found"
 }
 
 carrying_in_ref() {
-  local ref="$1" found="" tmp entries
+  local ref="$1" found="" entries list imports work path imported index=0
   if ! entries=$(git ls-tree -r --name-only "$ref"); then
     echo "FAIL cannot enumerate $ref, so it has not been swept." >&2
     exit 1
   fi
-  tmp=$(mktemp)
+  work=$(mktemp -d); list=$(mktemp); imports=$(mktemp)
+  # Each blob's path in the REF is recorded beside its temporary copy, so a
+  # finding names that path and not something under /tmp.
+  local -a origin=()
   while IFS= read -r path; do
     case "$path" in
       *_test.go) continue ;;
       *.go) ;;
       *) continue ;;
     esac
-    # THE SAME FAIL-OPEN, and this one was reachable without any error at all.
+    # THE SAME FAIL-OPEN AS THE TREE'S, and this one needed no error at all:
     # `git ls-tree -r` names gitlinks as well as blobs, so a submodule whose
-    # path ends in `.go` is listed and `git cat-file blob` cannot read it:
-    # measured on a throwaway ref, `fatal: bad file` was swallowed by
-    # `2>/dev/null`, the source was emptied, and the ref was reported `ok` with
-    # exit 0. Anything this sweep cannot open is a failure to look at, not a
-    # finding of nothing.
-    if ! git cat-file blob "$ref:$path" > "$tmp.src" 2>"$tmp.err"; then
+    # path ends in `.go` is listed and `git cat-file blob` cannot read it.
+    # Measured: `fatal: bad file` swallowed by 2>/dev/null, the source emptied,
+    # and the ref reported `ok` with exit 0.
+    if ! git cat-file blob "$ref:$path" > "$work/$index.go" 2>"$work/err"; then
       echo "FAIL cannot read $ref:$path, so this ref has not been swept. git said:" >&2
-      sed 's/^/       /' "$tmp.err" >&2
+      sed 's/^/       /' "$work/err" >&2
       exit 1
     fi
-    if ! import_paths "$tmp.src" > "$tmp"; then
-      echo "FAIL cannot read the imports of $ref:$path; a file this sweep cannot parse is not a file it has cleared." >&2
-      exit 1
-    fi
-    local bad
-    bad=$(offending_imports "$path" "$tmp")
-    if [ -n "$bad" ]; then
-      while IFS= read -r imported; do
-        found="$found$path imports $imported"$'\n'
-      done <<< "$bad"
-    fi
+    origin[index]="$path"
+    printf '%s\n' "$work/$index.go" >> "$list"
+    index=$((index + 1))
   done <<< "$entries"
-  rm -f "$tmp" "$tmp.src" "$tmp.err"
+  if [ "$index" -gt 0 ]; then
+    imports_of_files "$list" > "$imports"
+    while IFS=$'\t' read -r path imported; do
+      [ -n "$imported" ] || continue
+      local base="${path##*/}"
+      path="${origin[${base%.go}]}"
+      if offending_import "$path" "$imported"; then
+        found="$found$path imports $imported"$'\n'
+      fi
+    done < "$imports"
+  fi
+  rm -rf "$work"; rm -f "$list" "$imports"
   printf '%s' "$found"
 }
 

@@ -1,10 +1,12 @@
 package codefly_test
 
 import (
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -12,11 +14,14 @@ import (
 
 // The repository-wide sweep, held to its own claim.
 //
-// scripts/check-one-implementation.sh is the ONLY one-implementation gate the
-// root module has: TestNoSecondWorkContextImplementation walks from the
-// workcontext module root, and the implementation this repository deleted lived
-// at the root, in package codefly. So a bypass here is a bypass with nothing
-// behind it — which is why these cases exist. Each one was reported as a
+// scripts/check-one-implementation.sh is the only one-implementation gate that
+// reads a PUBLISHED REF. The Go gates type-check both modules from a checkout;
+// a ref has no checkout, so the sweep reads blobs out of `git cat-file` and
+// this script is all there is behind it. (It was the only gate reading the root
+// module at all until the import allowlist and the type-checked codec rule
+// landed; that half of the claim is no longer true.) A bypass here is still a
+// bypass of the required check for any branch a consumer can pin, which is why
+// these cases exist. Each one was reported as a
 // bypass of the previous revision and each one worked:
 //
 //   - a non-ASCII import alias and a comment-prefixed import line both walked
@@ -102,6 +107,44 @@ func TestTheRepositorySweepCatchesItsOwnBypasses(t *testing.T) {
 	require.Error(t, err, "an empty sweep must not be a green sweep")
 }
 
+// importReader builds scripts/importsof once per run and returns its path.
+//
+// Every harness here runs the sweep in a throwaway repository, where the script
+// cannot find the reader beside itself — so it is built once and passed in
+// through IMPORTSOF_BIN. Thirty `go build` invocations was the alternative.
+func importReader(t *testing.T) string {
+	t.Helper()
+	readerOnce.Do(func() {
+		source, err := filepath.Abs(filepath.Join("scripts", "importsof"))
+		if err != nil {
+			readerErr = err
+			return
+		}
+		binary := filepath.Join(os.TempDir(), fmt.Sprintf("importsof-%d", os.Getpid()))
+		build := exec.Command("go", "build", "-o", binary, source)
+		if output, err := build.CombinedOutput(); err != nil {
+			readerErr = fmt.Errorf("build the import reader: %v: %s", err, output)
+			return
+		}
+		readerPath = binary
+	})
+	require.NoError(t, readerErr)
+	require.NotEmpty(t, readerPath)
+	return readerPath
+}
+
+var (
+	readerOnce sync.Once
+	readerPath string
+	readerErr  error
+)
+
+// sweepEnv is the environment every sweep invocation runs with.
+func sweepEnv(t *testing.T) []string {
+	t.Helper()
+	return append(os.Environ(), "IMPORTSOF_BIN="+importReader(t))
+}
+
 // sweepOf runs the sweep over a throwaway repository containing one file.
 func sweepOf(t *testing.T, script string, name string, source string) (string, error) {
 	t.Helper()
@@ -118,6 +161,7 @@ func sweepOf(t *testing.T, script string, name string, source string) (string, e
 	}
 	sweep := exec.Command("bash", script)
 	sweep.Dir = repository
+	sweep.Env = sweepEnv(t)
 	output, err := sweep.CombinedOutput()
 	return string(output), err
 }
@@ -214,7 +258,7 @@ func TestTheRefSweepRefusesWhenItCanSeeFewerRefsThanExist(t *testing.T) {
 
 	run := exec.Command("bash", "scripts/sweep-published-refs.sh")
 	run.Dir = clone
-	run.Env = append(os.Environ(), "SWEEP_BASE=main", "SWEEP_HEAD=")
+	run.Env = append(sweepEnv(t), "SWEEP_BASE=main", "SWEEP_HEAD=")
 	output, err := run.CombinedOutput()
 	require.Error(t, err, "a sweep that can see fewer refs than exist must fail:\n%s", output)
 	require.Contains(t, string(output), "worse than no sweep")
@@ -224,7 +268,7 @@ func listRefs(t *testing.T, dir string, base string, head string) []string {
 	t.Helper()
 	run := exec.Command("bash", "scripts/sweep-published-refs.sh")
 	run.Dir = dir
-	run.Env = append(os.Environ(), "SWEEP_LIST_ONLY=1", "SWEEP_BASE="+base, "SWEEP_HEAD="+head)
+	run.Env = append(sweepEnv(t), "SWEEP_LIST_ONLY=1", "SWEEP_BASE="+base, "SWEEP_HEAD="+head)
 	output, err := run.CombinedOutput()
 	require.NoError(t, err, "%s", output)
 	var refs []string
@@ -274,7 +318,7 @@ func TestTheSweepRefusesWhenItCouldNotLook(t *testing.T) {
 		clone := clonedRemote(t, sweep, checker, "kept")
 		runIn(t, clone, "git", "remote", "set-url", "origin", filepath.Join(t.TempDir(), "gone.git"))
 
-		output, err := runSweep(clone)
+		output, err := runSweep(t, clone)
 
 		require.Error(t, err, "a sweep with no denominator must not report success:\n%s", output)
 		require.Contains(t, output, "cannot list the refs this repository publishes")
@@ -301,7 +345,7 @@ func TestTheSweepRefusesWhenItCouldNotLook(t *testing.T) {
 		runIn(t, seed, "git", "push", "--quiet", "origin",
 			"refs/remotes/origin/main:refs/heads/appeared/later")
 
-		output, err := runSweep(clone)
+		output, err := runSweep(t, clone)
 
 		require.Error(t, err, "the same count of different refs must not pass:\n%s", output)
 		require.Contains(t, output, "appeared/later",
@@ -338,6 +382,7 @@ func TestTheSweepRefusesWhenItCouldNotLook(t *testing.T) {
 
 		run := exec.Command("bash", "scripts/check-one-implementation.sh", "gitlinked")
 		run.Dir = repository
+		run.Env = sweepEnv(t)
 		raw, err := run.CombinedOutput()
 		output := string(raw)
 
@@ -365,6 +410,15 @@ func TestTheImportScannerReadsOneLineOnce(t *testing.T) {
 		"a closing paren inside a comment": "package x\n\nimport (\n\t// )\n\t\"crypto/ed25519\"\n)\n\nvar _ = ed25519.Sign\n",
 		"a block comment holding a paren":  "package x\n\nimport (\n\t/* ) */\n\t\"crypto/ed25519\"\n)\n\nvar _ = ed25519.Sign\n",
 		"a raw path before a quoted one":   "package x\n\nimport (`crypto/ed25519`; \"fmt\")\n\nvar _ = ed25519.Sign\nvar _ = fmt.Sprint\n",
+		// The shapes the awk extractor still passed after three rewrites, each
+		// compiled by the reviewer who found them. The last one is the whole
+		// argument for deleting the extractor: `"\x63rypto/ed25519"` IS
+		// crypto/ed25519 to the compiler, and is not that string to anything
+		// matching text. No regex closes it; go/parser closes all of them.
+		"the keyword, then a newline, then the path": "package x\n\nimport\n\t\"crypto/ed25519\"\n\nvar _ = ed25519.Sign\n",
+		"a comment spanning lines before the path":   "package x\n\nimport /*\n*/ \"crypto/ed25519\"\n\nvar _ = ed25519.Sign\n",
+		"an escaped import path":                     "package x\n\nimport \"\\x63rypto/ed25519\"\n",
+		"a grouped escaped path":                     "package x\n\nimport (\n\t\"\\x63rypto/ed25519\"\n)\n",
 	} {
 		t.Run(name, func(t *testing.T) {
 			out, err := sweepOf(t, script, "second.go", probe)
@@ -430,10 +484,11 @@ func clonedRemote(t *testing.T, sweep string, checker string, branch string) str
 	return clone
 }
 
-func runSweep(dir string) (string, error) {
+func runSweep(t *testing.T, dir string) (string, error) {
+	t.Helper()
 	run := exec.Command("bash", "scripts/sweep-published-refs.sh")
 	run.Dir = dir
-	run.Env = append(os.Environ(), "SWEEP_BASE=main", "SWEEP_HEAD=")
+	run.Env = append(sweepEnv(t), "SWEEP_BASE=main", "SWEEP_HEAD=")
 	output, err := run.CombinedOutput()
 	return string(output), err
 }
@@ -445,4 +500,46 @@ func runOut(t *testing.T, dir string, command string, args ...string) string {
 	output, err := run.Output()
 	require.NoError(t, err, "%s %v", command, args)
 	return string(output)
+}
+
+// AND A FILE THAT DOES NOT PARSE IS A FAILURE, not a file with no imports.
+//
+// This is the fail-open class one more time, in the new reader: `awk` produced
+// an empty list for anything it could not make sense of, and an empty list is
+// indistinguishable from "imports nothing". The reader returns a non-zero exit
+// instead, and the script stops.
+func TestAFileTheSweepCannotParseIsNotAFileItHasCleared(t *testing.T) {
+	script, err := filepath.Abs("scripts/check-one-implementation.sh")
+	require.NoError(t, err)
+
+	out, err := sweepOf(t, script, "broken.go", "package x\n\nimport (\n\t\"crypto/ed25519\"\n// never closed\n")
+	require.Error(t, err, "a file that does not parse must not be swept as clean:\n%s", out)
+	require.Contains(t, out, "cannot read the imports")
+}
+
+// The import reader is Go, so it is held to the same question directly: what
+// does Go think this file imports?
+func TestTheImportReaderAnswersWithWhatGoSees(t *testing.T) {
+	reader := importReader(t)
+	directory := t.TempDir()
+	path := filepath.Join(directory, "probe.go")
+	require.NoError(t, os.WriteFile(path, []byte(
+		"package x\n\nimport (\n\t// )\n\t\"\\x63rypto/ed25519\"\n\t`encoding/base64`\n)\n"), 0o600))
+
+	run := exec.Command(reader)
+	run.Dir = directory
+	run.Stdin = strings.NewReader(path + "\n")
+	output, err := run.Output()
+	require.NoError(t, err, "%s", output)
+
+	lines := strings.Split(strings.TrimSpace(string(output)), "\n")
+	var paths []string
+	for _, line := range lines {
+		_, imported, found := strings.Cut(line, "\t")
+		require.True(t, found, "each line is path<TAB>import: %q", line)
+		paths = append(paths, imported)
+	}
+	require.ElementsMatch(t, []string{"crypto/ed25519", "encoding/base64"}, paths,
+		"the escape is unquoted to the path the compiler sees, the raw string is read, "+
+			"and the \")\" in the comment does not end the block")
 }

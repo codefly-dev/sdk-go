@@ -121,12 +121,18 @@ see the skill below.
   through `Inspect`. Nothing here may sign, check a signature, encode a
   capability **or decide what a capability is** — a local seal rule is a second
   implementation even when it signs nothing, and ours disagreed with core's own
-  fixtures about which sentinel three refusals earn. Two gates hold that, and
-  **both read both modules**: `TestNoSecondWorkContextImplementation` (AST) and
-  `scripts/check-one-implementation.sh` (import paths, plus every published
-  ref). The AST gate walked the leaf module only until a reviewer compiled a
-  root-module parser whose base64url decoder was hand-written, so it imported
-  nothing a sweep can ban.
+  fixtures about which sentinel three refusals earn. **Four gates hold that, and
+  all four read both modules**: a **deny-by-default import allowlist per
+  module** and a **`go/types`-decided codec rule** (both via
+  `x/tools/go/packages`), the syntactic AST gate, and
+  `scripts/check-one-implementation.sh` over every published ref, which reads
+  imports with `go/parser` because a regex cannot — `import "\x63rypto/ed25519"`
+  compiles. The allowlist replaced a denylist of names that was behind by one
+  entry every round for ten rounds, the last being `crypto/mldsa` signing a
+  `WorkContextV1` that `encoding/json/v2` had encoded in the deleted format,
+  with both gates green. `testdata` is walked and `import "C"` is refused.
+  **Published TAGS cannot be fixed, only retracted**: nineteen of them carry the
+  deleted implementation and `go.mod` retracts them.
   **`workcontext/AGENTS.md` is what each one refuses and why** — read it before
   touching that module, the gate, or the sweep.
 - **An authority-bearing value is read once.** A principal, binding or audience

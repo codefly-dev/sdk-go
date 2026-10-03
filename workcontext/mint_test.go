@@ -64,6 +64,11 @@ type mintHost struct {
 	// before runs at the top of every request, so a test can hold one open.
 	before func()
 
+	// answer, when set, replaces the whole response with a canned one — the
+	// shapes something that is NOT the host sends: an ingress error page, a
+	// mesh's default body, a cache's empty object, a rollout's redirect.
+	answer *cannedAnswer
+
 	// noApprovedBuild mints for a principal the issuer holds no approved build
 	// for, which is the human-session shape: the capability seals no execution.
 	noApprovedBuild bool
@@ -80,6 +85,32 @@ type mintHost struct {
 
 	faultsMu sync.Mutex
 	faults   []string
+}
+
+// cannedAnswer is a response written verbatim, headers included, so a test can
+// present what an ingress or a service mesh presents.
+type cannedAnswer struct {
+	status  int
+	headers map[string]string
+	body    string
+}
+
+func (a *cannedAnswer) write(writer http.ResponseWriter) {
+	declared := false
+	for key, value := range a.headers {
+		if key == "Content-Type" {
+			declared = true
+			if value == "" {
+				continue
+			}
+		}
+		writer.Header().Set(key, value)
+	}
+	if !declared && a.headers["Content-Type"] == "" && len(a.headers) == 0 {
+		writer.Header().Set("Content-Type", "application/json")
+	}
+	writer.WriteHeader(a.status)
+	_, _ = writer.Write([]byte(a.body))
 }
 
 func newMintHost(t *testing.T, now func() time.Time) *mintHost {
@@ -105,6 +136,10 @@ func (h *mintHost) handle(writer http.ResponseWriter, request *http.Request) {
 		h.before()
 	}
 	h.presented.Store(request.Header.Get("Authorization"))
+	if h.answer != nil {
+		h.answer.write(writer)
+		return
+	}
 	if h.refuseWith != 0 {
 		writer.WriteHeader(h.refuseWith)
 		return
@@ -868,9 +903,16 @@ func TestARedirectedMintSendsNothingToTheDestination(t *testing.T) {
 
 	require.EqualValues(t, 0, elsewhereRequests.Load(),
 		"the redirect destination must receive no request: the first one carried the projection")
-	require.ErrorIs(t, err, ErrMintRefused)
-	require.NotErrorIs(t, err, ErrMintUnavailable,
-		"a redirected credential request is not something to retry")
+	// RETRYABLE, which reverses what this asserted, and the reason it asserted
+	// it does not hold: "a redirected credential request is not something to
+	// retry" was argued from the projection being re-sent, and the projection
+	// goes to the CONFIGURED endpoint on every attempt either way, while the
+	// redirect's destination receives nothing on any of them — the assertion
+	// above this one is what says so. Measured: a 307 during a rollout and a
+	// 308 adding a trailing slash each latched and stayed refused forever.
+	require.ErrorIs(t, err, ErrMintUnavailable)
+	require.NotErrorIs(t, err, ErrMintRefused, "a redirect must not latch")
+	require.NoError(t, client.Refused())
 	require.ErrorContains(t, err, "redirected")
 	require.Equal(t, MintCounts{}, client.Counts())
 }
@@ -918,7 +960,10 @@ func TestTheMintTransportIsOwnedByTheClient(t *testing.T) {
 	// http.ErrUseLastResponse, so net/http never sends the second request.
 	request, err := http.NewRequest(http.MethodGet, "https://example.invalid/_mint", nil)
 	require.NoError(t, err)
-	require.ErrorIs(t, client.CheckRedirect(request, nil), ErrMintRefused)
+	// AN OUTAGE, not a refusal. The destination receives nothing either way —
+	// this function is what stops it — so latching bought no confidentiality
+	// and did permanently stop a process on a 307 during a rollout.
+	require.ErrorIs(t, client.CheckRedirect(request, nil), ErrMintUnavailable)
 }
 
 func TestNewMintClientValidatesItsConfiguration(t *testing.T) {
@@ -928,9 +973,8 @@ func TestNewMintClientValidatesItsConfiguration(t *testing.T) {
 		Audience:           testAudienceName,
 		ProjectedToken:     ProjectedTokenFile("/var/run/secrets/token"),
 		ProjectionAudience: "projection-audience",
-		// Stated, because construction refuses an unstated trust anchor. A
-		// deployment that means the host's pool says so.
-		TrustSystemRoots: true,
+		// Required: construction refuses a client with no trust anchor.
+		RootCAs: x509.NewCertPool(),
 	}
 	_, err := NewMintClient(valid)
 	require.NoError(t, err)
@@ -956,13 +1000,10 @@ func TestNewMintClientValidatesItsConfiguration(t *testing.T) {
 		"timeout too long":       func(o *MintOptions) { o.RequestTimeout = time.Hour },
 		"renewal lead at one":    func(o *MintOptions) { o.RenewalLead = 1 },
 		"negative renewal lead":  func(o *MintOptions) { o.RenewalLead = -0.5 },
-		// THE TRUST ANCHOR, both ways round. Unstated was the whole of the
-		// previous behaviour and it was silently the system pool: every other
-		// route to a weak transport here was closed and this one defaulted.
-		"no trust anchor": func(o *MintOptions) { o.TrustSystemRoots = false },
-		"two trust anchors": func(o *MintOptions) {
-			o.RootCAs = x509.NewCertPool()
-		},
+		// THE TRUST ANCHOR. Unstated was the whole of the previous behaviour
+		// and it was silently the system pool: every other route to a weak
+		// transport here was closed and this one defaulted.
+		"no trust anchor": func(o *MintOptions) { o.RootCAs = nil },
 	} {
 		t.Run(name, func(t *testing.T) {
 			options := valid

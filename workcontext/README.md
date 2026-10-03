@@ -262,10 +262,9 @@ client, err := workcontext.NewMintClient(workcontext.MintOptions{
     },
     ProjectedToken:     workcontext.ProjectedTokenFile("/var/run/secrets/codefly/token"),
     ProjectionAudience: projectionAudience,
-    // The trust anchor is STATED. Name the roots that may sign the mint
-    // endpoint's certificate, or say TrustSystemRoots; construction refuses
-    // silence, because there is no safe default for where this process sends
-    // its service-account token.
+    // REQUIRED: the roots that may sign the mint endpoint's certificate.
+    // There is no safe default for where this process sends its
+    // service-account token, so there is no default.
     RootCAs: platformRoots,
 })
 ```
@@ -281,17 +280,15 @@ host SIGNED to be the audience the pin answered.
 projected service-account token travels on that request as a bearer credential,
 so plaintext is a disclosure the configuration must not be able to choose.
 
-**The transport is the client's, and you cannot supply one.** The trust anchor
-is the only thing a caller says about it — and it must say something: set
-`RootCAs` to the roots that may sign the endpoint's certificate, or
-`TrustSystemRoots` to use the host's pool. Exactly one, or `NewMintClient`
-returns `ErrInvalid`. A nil `RootCAs` used to mean the system pool silently,
-which left the one remaining hole in a transport built to have none: every other
-route to a weak channel was closed and the trust anchor was still whatever the
-image shipped, so a mis-issued certificate for the host name — or a corporate
-interception root — received the projected token. Which certificates are
-acceptable for platform infrastructure is a deployment decision, and a default
-is not a decision. An `*http.Client` option was a hole that
+**The transport is the client's, and you cannot supply one.** `RootCAs` is the
+only thing a caller says about it, and it is **required**: `NewMintClient`
+returns `ErrInvalid` without it. A nil `RootCAs` used to mean the system pool
+silently, which left the one remaining hole in a transport built to have none —
+every other route to a weak channel was closed and the trust anchor was still
+whatever the image shipped, so a mis-issued certificate for the host name, or a
+corporate interception root, received the projected token. A deployment that
+really means the host's pool writes `x509.SystemCertPool()`, which is two lines
+and is visible at the call site. An `*http.Client` option was a hole that
 inspecting the client could not close: a nil `Transport` means the global,
 mutable `http.DefaultTransport`; a wrapping `RoundTripper` is opaque; a
 `DialTLSContext` bypasses `TLSClientConfig` entirely; and a caller keeping the

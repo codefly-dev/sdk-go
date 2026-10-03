@@ -554,10 +554,32 @@ func StreamServerInterceptor(
 		handler grpc.StreamHandler,
 	) error {
 		if guardFor == nil {
-			return fmt.Errorf(
+			return statusFor(fmt.Errorf(
 				"%w: a stream interceptor needs a guard for each stream",
-				workcontext.ErrInvalid,
-			)
+				errStreamMisuse,
+			))
+		}
+		if len(guarded) == 0 {
+			// AN EMPTY SET GUARDS NOTHING, so it refuses everything instead.
+			//
+			// StreamServerInterceptor(nil, guardFor) read as "no method carries
+			// a capability" and passed every stream through unguarded —
+			// measured, a message delivered under revoked authority with zero
+			// re-checks. An interceptor installed to enforce something, that
+			// enforces nothing, is the worst available outcome: the wiring is
+			// there, so nobody looks again.
+			//
+			// "Guard no method" is not a thing to say by omission. A server
+			// with no capability-bearing streams installs no interceptor.
+			// Through statusFor, like every other refusal here: returned bare,
+			// a misconfiguration arrived as codes.Unknown with internal text,
+			// which is the thing statusFor exists to stop.
+			return statusFor(fmt.Errorf(
+				"%w: a stream interceptor was installed with an empty capability-bearing "+
+					"method set, which would guard nothing; name the methods, or install no "+
+					"interceptor",
+				errStreamMisuse,
+			))
 		}
 		method := ""
 		if info != nil {
@@ -567,6 +589,12 @@ func StreamServerInterceptor(
 			// Declared as carrying no capability. The decision was made at
 			// construction, where a reviewer can read it, rather than inferred
 			// from whichever request happened to arrive first.
+			//
+			// A METHOD MISSING FROM THE SET IS STILL UNGUARDED HERE, and that
+			// is what the set means — but a NAME that matches nothing the
+			// server serves is a typo, not a decision, and this cannot tell
+			// the difference from inside one request. ValidateMethodSet is how
+			// a server catches it at startup, and the README says to call it.
 			return handler(server, stream)
 		}
 		guard, err := guardFor(stream.Context(), info)
@@ -588,4 +616,58 @@ func StreamServerInterceptor(
 		}
 		return guarded.Finish(handler(server, guarded))
 	}
+}
+
+// ValidateMethodSet refuses a declared method name the server does not serve.
+//
+// It exists because a TYPO SILENTLY UNGUARDS A METHOD. The capability-bearing
+// set is matched against grpc's full method name, so
+// "/codefly.Streamer/Emmit" guards nothing at all and looks exactly like a
+// method that was considered and declared — measured, a message delivered
+// under revoked authority with zero re-checks, and nothing anywhere said so.
+//
+// The interceptor cannot catch this from inside a request: "this method is not
+// in the set" and "this method is in the set under another spelling" are the
+// same observation there. The server knows, so the server is asked, once, at
+// startup:
+//
+//	interceptor := grpctransport.StreamServerInterceptor(bearing, guardFor)
+//	server := grpc.NewServer(grpc.StreamInterceptor(interceptor))
+//	pb.RegisterStreamerServer(server, impl)
+//	if err := grpctransport.ValidateMethodSet(server.GetServiceInfo(), bearing); err != nil {
+//	    return err
+//	}
+//
+// Call it AFTER registering services and BEFORE Serve. It is a function rather
+// than something the interceptor does because grpc hands the interceptor no
+// server, and inventing a registration hook to reach one would be a bigger
+// surface than a call a server makes.
+func ValidateMethodSet(served map[string]grpc.ServiceInfo, capabilityBearing []string) error {
+	known := map[string]bool{}
+	for service, info := range served {
+		for _, method := range info.Methods {
+			known["/"+service+"/"+method.Name] = true
+		}
+	}
+	var unknown []string
+	for _, method := range capabilityBearing {
+		if !known[method] {
+			unknown = append(unknown, method)
+		}
+	}
+	if len(unknown) > 0 {
+		return fmt.Errorf(
+			"%w: these methods are declared capability-bearing and this server does not "+
+				"serve them: %v. A name that matches nothing guards nothing, and reads exactly "+
+				"like a method that was considered",
+			errStreamMisuse, unknown,
+		)
+	}
+	if len(capabilityBearing) == 0 {
+		return fmt.Errorf(
+			"%w: no method is declared capability-bearing, so the interceptor would guard "+
+				"nothing", errStreamMisuse,
+		)
+	}
+	return nil
 }

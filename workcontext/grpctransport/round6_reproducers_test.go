@@ -1,7 +1,9 @@
 package grpctransport
 
 import (
+	"context"
 	"fmt"
+	"sync/atomic"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -90,4 +92,93 @@ func TestAHeaderSetAfterTheFirstMessageIsNotSilentlyDropped(t *testing.T) {
 			"and a handler that is told nothing cannot act on it")
 	require.Empty(t, header.Get("late-header"),
 		"and it must not arrive either: an error plus delivery would be worse than silence")
+}
+
+// F-9. THE INTERCEPTOR FAILED OPEN, two ways, both executed.
+//
+// A method missing from the declared set, and an EMPTY set, each delivered a
+// message under revoked authority with ZERO re-checks. The second is the worse
+// one: StreamServerInterceptor(nil, guardFor) read as "no method carries a
+// capability", so the wiring was present and enforced nothing — and wiring
+// that is present is wiring nobody looks at again.
+func TestAnEmptyMethodSetGuardsNothingAndSoRefusesEverything(t *testing.T) {
+	authority := &revocableGuard{}
+	authority.revoked.Store(true)
+
+	connection := serveWith(t, StreamServerInterceptor(nil,
+		func(context.Context, *grpc.StreamServerInfo) (*workcontext.StreamGuard, error) {
+			return authority.guard(t), nil
+		}), func(stream grpc.ServerStream) error {
+		return stream.SendMsg(wrapperspb.String("delivered under revoked authority"))
+	})
+
+	received, _, _, err := clientSaw(t, connection)
+
+	require.Error(t, err, "an interceptor that guards nothing must refuse, not pass through")
+	require.Zero(t, received, "a message left under revoked authority with no guard installed")
+	require.Equal(t, codes.Internal, status.Code(err),
+		"guarding nothing is this server's own misconfiguration, which the client cannot correct")
+	require.Contains(t, status.Convert(err).Message(), "would guard nothing")
+}
+
+// And the typo, which no interceptor can catch from inside one request: "not in
+// the set" and "in the set under another spelling" are the same observation
+// there. The server knows, so ValidateMethodSet asks it.
+func TestADeclaredMethodTheServerDoesNotServeIsRefusedAtStartup(t *testing.T) {
+	served := map[string]grpc.ServiceInfo{
+		streamService: {Methods: []grpc.MethodInfo{{Name: "Emit", IsServerStream: true}}},
+	}
+
+	require.NoError(t, ValidateMethodSet(served, []string{streamMethod}),
+		"the method this server really serves is declared correctly")
+
+	err := ValidateMethodSet(served, []string{"/" + streamService + "/Emmit"})
+	require.Error(t, err, "a name that matches nothing guards nothing")
+	require.ErrorIs(t, err, workcontext.ErrInvalid)
+	require.Contains(t, err.Error(), "Emmit",
+		"the refusal must name the method, because the whole defect is that it looks right")
+
+	require.Error(t, ValidateMethodSet(served, nil),
+		"an empty set would guard nothing, and saying so by omission is not saying it")
+}
+
+// F-2, AS EXECUTED: a real core Verifier, a moving clock, and a capability that
+// expires mid-stream. The unit mapping is asserted in
+// TestAnExpiredCapabilityTellsTheClientToMintAgain; this is the path the review
+// drove over bufconn, where it observed codes.Internal.
+func TestACapabilityThatExpiresMidStreamTellsTheClientToMintAgain(t *testing.T) {
+	expired := fmt.Errorf("stream terminated: %w: expired at 2026-10-02T12:15:00Z",
+		workcontext.ErrInvalid)
+
+	connection := serveWith(t, StreamServerInterceptor([]string{streamMethod},
+		func(context.Context, *grpc.StreamServerInfo) (*workcontext.StreamGuard, error) {
+			// A guard whose re-check answers exactly what core's Verifier
+			// answers for a capability whose window has passed: ErrInvalid,
+			// with core's own wording.
+			var checks atomic.Uint64
+			return workcontext.NewStreamGuard(workcontext.StreamGuardOptions{
+				Recheck: func(context.Context) error {
+					if checks.Add(1) > 1 {
+						return expired
+					}
+					return nil
+				},
+			})
+		}), func(stream grpc.ServerStream) error {
+		for range 3 {
+			if err := stream.SendMsg(wrapperspb.String("payload")); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+
+	received, _, _, err := clientSaw(t, connection)
+
+	require.Error(t, err)
+	require.Equal(t, 1, received, "the first message goes out, the rest do not")
+	require.Equal(t, codes.Unauthenticated, status.Code(err),
+		"a stream that outlives its credential is answered by minting a new one; this "+
+			"arrived as codes.Internal, which tells a client the server is broken")
+	require.Contains(t, status.Convert(err).Message(), "expired")
 }

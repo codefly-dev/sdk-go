@@ -8,10 +8,14 @@ on:
   # The one-implementation sweep covers every published ref for the same
   # reason, and a dependabot branch carrying the deleted implementation is what
   # showed the convention was doing no work.
+  # So the triggers name no convention either. They said `compat/**` for three
+  # revisions after the comment above stopped saying it, which meant a branch a
+  # consumer can pin — a dependabot branch, say — was never built and never
+  # swept by its own push, while the comment claimed every published ref was
+  # held to the rule.
   push:
-    branches: [ main, 'compat/**' ]
+    branches: [ '**' ]
   pull_request:
-    branches: [ main, 'compat/**' ]
 
 concurrency:
   group: sdk-go-${{ github.workflow }}-${{ github.ref }}
@@ -30,7 +34,15 @@ jobs:
         module: [ ".", "workcontext" ]
     steps:
       - name: Checkout
+        # fetch-depth 0 so the TAGS are present.
+        # TestEveryPublishedTagCarryingTheImplementationIsRetracted sweeps every
+        # published tag and refuses to pass having seen none — nineteen of them
+        # publish the deleted implementation and a tag can only be retracted,
+        # never fixed. A shallow checkout would have made that gate green by
+        # looking at nothing.
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          fetch-depth: 0
       - name: Set up Go
         uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
         with:
@@ -66,6 +78,21 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           fetch-depth: 0
+      - name: Set up Go
+        # The sweep reads imports with go/parser now (scripts/importsof),
+        # because a regex over lines cannot read Go — `import
+        # "\x63rypto/ed25519"` compiles and is crypto/ed25519 to the compiler.
+        # So this job needs a toolchain, which it did not before.
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
+        with:
+          go-version-file: go.mod
+          cache-dependency-path: go.sum
+      - name: Build the import reader once
+        # Built once and passed to every invocation, rather than rebuilt for
+        # each of ~25 refs.
+        run: |
+          go build -o "$RUNNER_TEMP/importsof" ./scripts/importsof
+          echo "IMPORTSOF_BIN=$RUNNER_TEMP/importsof" >> "$GITHUB_ENV"
       - name: Sweep every tracked Go file for a second implementation
         run: ./scripts/check-one-implementation.sh
       - name: Sweep every OTHER ref this repository publishes
@@ -95,7 +122,15 @@ jobs:
         module: [ ".", "workcontext" ]
     steps:
       - name: Checkout
+        # fetch-depth 0 so the TAGS are present.
+        # TestEveryPublishedTagCarryingTheImplementationIsRetracted sweeps every
+        # published tag and refuses to pass having seen none — nineteen of them
+        # publish the deleted implementation and a tag can only be retracted,
+        # never fixed. A shallow checkout would have made that gate green by
+        # looking at nothing.
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          fetch-depth: 0
       - name: Set up Go
         uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
         with:
@@ -139,7 +174,15 @@ jobs:
       CODEFLY_TEST_POSTGRES_DSN: postgres://codefly:codefly@localhost:5432/receipts?sslmode=disable
     steps:
       - name: Checkout
+        # fetch-depth 0 so the TAGS are present.
+        # TestEveryPublishedTagCarryingTheImplementationIsRetracted sweeps every
+        # published tag and refuses to pass having seen none — nineteen of them
+        # publish the deleted implementation and a tag can only be retracted,
+        # never fixed. A shallow checkout would have made that gate green by
+        # looking at nothing.
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          fetch-depth: 0
       - name: Set up Go
         uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
         with:
@@ -193,7 +236,15 @@ jobs:
       CODEFLY_TEST_POSTGRES_DSN: postgres://codefly:codefly@localhost:5432/receipts?sslmode=disable
     steps:
       - name: Checkout
+        # fetch-depth 0 so the TAGS are present.
+        # TestEveryPublishedTagCarryingTheImplementationIsRetracted sweeps every
+        # published tag and refuses to pass having seen none — nineteen of them
+        # publish the deleted implementation and a tag can only be retracted,
+        # never fixed. A shallow checkout would have made that gate green by
+        # looking at nothing.
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          fetch-depth: 0
       - name: Set up Go
         uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
         with:

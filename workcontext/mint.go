@@ -225,16 +225,26 @@ type MintOptions struct {
 	// RootCAs is the only thing a caller may say about the transport: the roots
 	// that may sign the mint endpoint's certificate.
 	//
-	// Set this, or set TrustSystemRoots. Nil used to mean the system pool
-	// SILENTLY, which left the one remaining hole in a transport built to have
-	// none: every other way of weakening it was closed — no caller-supplied
-	// client, no reachable Transport, a TLS 1.3 floor, no followed redirect —
-	// and the trust anchor was still whatever the image happened to ship. A
-	// mint endpoint is platform infrastructure, so a public CA has no business
-	// vouching for it; a mis-issued certificate for the host name, or a
-	// corporate interception root in the image, receives the projected
-	// service-account token. Construction refuses silence now, because the
-	// choice is a deployment decision and a default is not a decision.
+	// REQUIRED. Nil used to mean the system pool SILENTLY, which left the one
+	// remaining hole in a transport built to have none: every other way of
+	// weakening it was closed — no caller-supplied client, no reachable
+	// Transport, a TLS 1.3 floor, no followed redirect — and the trust anchor
+	// was still whatever the image happened to ship. A mint endpoint is
+	// platform infrastructure, so a public CA has no business vouching for it;
+	// a mis-issued certificate for the host name, or a corporate interception
+	// root in the image, receives the projected service-account token.
+	//
+	// A revision in between accepted a TrustSystemRoots flag beside this, so
+	// the system pool was a sentence somebody wrote rather than a field
+	// somebody left alone. That is better than a default and it is not the
+	// posture this module is held to: the flag is the same decision with a
+	// shorter spelling, and a shorter spelling is what gets copied. A
+	// deployment that really means the host's pool says
+	//
+	//	pool, err := x509.SystemCertPool()
+	//
+	// which is two lines, is a thing a reader of the call site can see, and
+	// cannot be arrived at by leaving a field alone.
 	//
 	// It replaces an *http.Client, and that is the point. A client is a hole:
 	// its Transport may be nil (so the global, mutable http.DefaultTransport),
@@ -248,17 +258,6 @@ type MintOptions struct {
 	// thing is how this one came to claim a TLS 1.2 floor for three revisions
 	// after the floor became 1.3.
 	RootCAs *x509.CertPool
-
-	// TrustSystemRoots says, in as many words, that the host's own root pool is
-	// the right trust anchor for this endpoint. It is the alternative to
-	// RootCAs and never a companion to it: exactly one of the two is set, or
-	// construction refuses.
-	//
-	// It exists so that using the system pool is a sentence somebody wrote
-	// rather than a field somebody left alone. There are deployments where it
-	// is correct — a mint endpoint behind a certificate from the same public
-	// CA the image already trusts — and this says so out loud.
-	TrustSystemRoots bool
 
 	// RequestTimeout bounds one mint request.
 	RequestTimeout time.Duration
@@ -482,18 +481,13 @@ func NewMintClient(options MintOptions) (*MintClient, error) {
 	if strings.TrimSpace(options.ProjectionAudience) == "" {
 		return nil, fmt.Errorf("%w: no projection audience", ErrInvalid)
 	}
-	switch {
-	case options.RootCAs != nil && options.TrustSystemRoots:
+	if options.RootCAs == nil {
 		return nil, fmt.Errorf(
-			"%w: name the roots that may sign the mint endpoint's certificate, or say TrustSystemRoots; not both",
-			ErrInvalid,
-		)
-	case options.RootCAs == nil && !options.TrustSystemRoots:
-		return nil, fmt.Errorf(
-			"%w: no trust anchor for the mint endpoint; set RootCAs to the roots that may sign its certificate, "+
-				"or TrustSystemRoots to use the host's pool. The projected service-account token is sent to "+
-				"whatever answers at %s, so which certificates are acceptable there is a deployment decision "+
-				"and there is no safe default to fall back to",
+			"%w: no trust anchor for the mint endpoint. RootCAs names the roots that may sign "+
+				"the certificate at %s, which is where this process sends its service-account "+
+				"token, so there is no safe default to fall back to. A deployment that really "+
+				"means the host's pool passes x509.SystemCertPool(), which a reader of the call "+
+				"site can see",
 			ErrInvalid, endpoint,
 		)
 	}
@@ -541,7 +535,7 @@ func NewMintClient(options MintOptions) (*MintClient, error) {
 	options.RenewalLead = lead
 	return &MintClient{
 		options:    options,
-		httpClient: mintHTTPClient(options.RootCAs), // nil here means TrustSystemRoots, checked above
+		httpClient: mintHTTPClient(options.RootCAs),
 		now:        now,
 		id:         mintClientIDs.Add(1),
 	}, nil
@@ -564,9 +558,9 @@ func mintHTTPClient(roots *x509.CertPool) *http.Client {
 		CheckRedirect: refuseMintRedirect,
 		Transport: &http.Transport{
 			TLSClientConfig: &tls.Config{
-				// Nil reaches here only when the caller said TrustSystemRoots:
-				// NewMintClient refuses an unstated anchor, so this nil is a
-				// decision rather than an omission.
+				// Never nil: NewMintClient refuses a client with no trust
+				// anchor, so there is no path here that falls back to the
+				// system pool by omission.
 				RootCAs: roots,
 				// TLS 1.3 FLOOR. The projected service-account token is the
 				// one secret this process hands to anybody, and 1.2 permits
@@ -592,13 +586,21 @@ func mintHTTPClient(roots *x509.CertPool) *http.Client {
 // second would carry it to an address nothing configured.
 //
 // It refuses rather than returning http.ErrUseLastResponse so the outcome is a
-// named refusal instead of a 3xx that later checks have to recognise, and it
-// carries ErrMintRefused rather than ErrMintUnavailable: retrying would send
-// the projection again.
+// named refusal instead of a 3xx that later checks have to recognise.
+//
+// RETRYABLE, which is the opposite of the previous revision, and the reason it
+// gave does not survive being stated precisely. It carried ErrMintRefused
+// because "retrying would send the projection again" — but the projection is
+// sent to the CONFIGURED endpoint on every attempt either way, and the
+// redirect's destination receives nothing, now or on a retry, because this
+// function is what stops it. Latching bought no confidentiality at all. What it
+// did buy was a permanent stop on a 307 during a rollout or a 308 adding a
+// trailing slash, both measured, both of which clear in seconds. Exactly the
+// TLS-verification mistake, one layer up.
 func refuseMintRedirect(request *http.Request, via []*http.Request) error {
 	return fmt.Errorf(
-		"%w: the mint endpoint redirected to %s after %d request(s); a credential request is not followed to an address the configuration did not name",
-		ErrMintRefused, request.URL.Redacted(), len(via),
+		"%w: the mint endpoint redirected to %s after %d request(s); a credential request is not followed to an address the configuration did not name, and this retries",
+		ErrMintUnavailable, request.URL.Redacted(), len(via),
 	)
 }
 
@@ -1184,9 +1186,8 @@ func (c *MintClient) mintLocked(ctx context.Context, audience string) (Credentia
 	request.Header.Set("Authorization", "Bearer "+projected)
 	response, err := c.httpClient.Do(request)
 	if err != nil {
-		// A refused redirect arrives here already named. It is a refusal and
-		// not an outage: retrying it would send the projection again.
-		if errors.Is(err, ErrMintRefused) {
+		// A refused redirect arrives here already named and already classed.
+		if errors.Is(err, ErrMintRefused) || errors.Is(err, ErrMintUnavailable) {
 			return Credential{}, err
 		}
 		if reason := tlsVerificationFailure(err); reason != "" {
@@ -1271,11 +1272,12 @@ func (c *MintClient) mintLocked(ctx context.Context, audience string) (Credentia
 		return Credential{}, fmt.Errorf("%w: read mint response: %w", ErrMintUnavailable, err)
 	}
 	if len(payload) > maxMintResponseBytes {
-		// Terminal, unlike the read failure above: the host answered, and
-		// answered with something this client will not accept. Retrying gets
-		// the same answer.
-		// Retryable for the same reason: an oversized body on a 200 is
-		// something in the middle answering, not the host refusing.
+		// Retryable: an oversized body on a 200 is something in the middle
+		// answering, not the host refusing. (A "Terminal, unlike the read
+		// failure above" paragraph sat directly on top of this one for three
+		// revisions after the classification changed under it — the C10 class,
+		// and the reason both the refusal and the recovery are now asserted in
+		// one table.)
 		return Credential{}, fmt.Errorf(
 			"%w: mint response exceeds %d bytes", ErrMintUnavailable, maxMintResponseBytes,
 		)
@@ -1308,7 +1310,28 @@ func (c *MintClient) credentialFrom(payload []byte, audience string) (Credential
 	token := body.WorkContext
 	claims, seal, binding, err := sealOf(token)
 	if err != nil {
-		return Credential{}, fmt.Errorf("%w: %v", ErrMintRefused, err)
+		// RETRYABLE, and this was the last place in the 200 path that latched.
+		//
+		// Measured over httptest-TLS: a 200 carrying `{}`, a 200 carrying
+		// `null`, and a 200 carrying `{"work_context":"not-a-capability"}` each
+		// latched ErrMintRefused and stayed refused forever, through the host
+		// recovering and the clock passing every hold-off. ErrMintRefused is
+		// documented as "the host will give the same answer again", and this is
+		// the shape where that is least likely to be true: a body with no
+		// capability in it is a rollout mid-flight, a cache, a mesh, an ingress
+		// — something answering that is not the mint — and it is the same class
+		// as the text/html 200 and the oversized 200 immediately above, both of
+		// which were already retryable. Three readings of one situation, one of
+		// them terminal.
+		//
+		// What still latches is a capability the HOST SIGNED that contradicts
+		// what this client asked for: a wrong audience, a wrong installation, a
+		// wrong execution. Those are decisions, and a decision repeats.
+		return Credential{}, fmt.Errorf(
+			"%w: the mint answered 200 with no readable capability (%v); "+
+				"something that is not the host may be answering, and this retries",
+			ErrMintUnavailable, err,
+		)
 	}
 	if body.InstallationID != "" && body.InstallationID != seal.GetInstallationId() {
 		return Credential{}, fmt.Errorf(
@@ -1490,10 +1513,18 @@ func sealCarriesAnExecution(seal *SealedValues) bool {
 // "retryable" costs one request per hold-off, and a wrong "terminal" costs the
 // process.
 //
-// A refusal this client decides for ITSELF — an audience that does not match
-// the pin, a seal the host contradicted, a refused redirect, a certificate that
-// did not verify — still latches, because those are this client's own verdicts
-// and not a status somebody in the middle chose.
+// A refusal this client decides for ITSELF latches only when the HOST SIGNED
+// the thing being refused: an audience that does not match the pin, a seal or
+// an execution the host's own token contradicts. Those are verdicts, and a
+// verdict repeats.
+//
+// Three things that read like that and are NOT: a refused redirect (the
+// destination receives nothing either way, so latching bought no
+// confidentiality and stopped the process on a rollout's 307), a certificate
+// that did not verify (the handshake fails before any request bytes leave, and
+// a rotation is the ordinary cause), and a 200 whose body holds no readable
+// capability (a mesh, a cache or an ingress answering). Each of those latched
+// once, each was measured latching forever, and each is an outage now.
 var refusalStatuses = []int{
 	http.StatusUnauthorized,
 	http.StatusForbidden,

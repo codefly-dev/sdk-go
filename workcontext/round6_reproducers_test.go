@@ -2,7 +2,10 @@ package workcontext
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"go/ast"
+	"net/http"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -350,7 +353,7 @@ func (s *blockingSource) ProjectedToken() (string, error) {
 // projected service-account token. It is a deployment decision, so it is stated
 // or construction refuses; TrustSystemRoots is how a deployment that means the
 // host's pool says so.
-func TestTheMintEndpointsTrustAnchorMustBeStated(t *testing.T) {
+func TestTheMintEndpointsTrustAnchorIsRequired(t *testing.T) {
 	base := MintOptions{
 		URL:                "https://mint.example/platform/_mint",
 		Authority:          newTestPin(),
@@ -364,21 +367,185 @@ func TestTheMintEndpointsTrustAnchorMustBeStated(t *testing.T) {
 	require.ErrorContains(t, err, "no trust anchor")
 	require.ErrorContains(t, err, "https://mint.example/platform/_mint",
 		"the refusal must name the endpoint the projection would have been sent to")
-
-	stated := base
-	stated.TrustSystemRoots = true
-	_, err = NewMintClient(stated)
-	require.NoError(t, err, "a deployment that says it means the host's pool is configured")
+	require.ErrorContains(t, err, "x509.SystemCertPool",
+		"and must name the two lines a deployment that really means the host's pool writes, "+
+			"because a refusal with no way forward gets worked around")
 
 	named := base
 	named.RootCAs = certPoolOf()
 	_, err = NewMintClient(named)
-	require.NoError(t, err, "and so is one that names the roots")
+	require.NoError(t, err, "naming the roots is the whole of the requirement")
+}
 
-	both := named
-	both.TrustSystemRoots = true
-	_, err = NewMintClient(both)
-	require.ErrorIs(t, err, ErrInvalid)
-	require.ErrorContains(t, err, "not both",
-		"two anchors is not a stronger statement than one; it is an unanswered question")
+// F-5 and F-6. EVERY 200 THAT IS NOT A CAPABILITY LATCHED FOREVER, and so did
+// every redirect. Executed over httptest-TLS: `{}`, `null`,
+// `{"work_context":"not-a-capability"}`, a 307 to another host and a 308 to the
+// same host with a trailing slash each became ErrMintRefused and stayed refused
+// through the host recovering and the clock passing every hold-off.
+//
+// They are the same class as the text/html 200 and the oversized 200 beside
+// them, both already retryable: something that is not the host is answering.
+// ErrMintRefused is documented as "the host will give the same answer again",
+// and a mesh mid-rollout is the shape least likely to.
+//
+// This also covers the classifications F-6 named as untested, because the table
+// drives each one and then drives RECOVERY, which is the half that makes
+// "retryable" mean anything.
+func TestNoAnswerFromSomethingThatIsNotTheHostLatches(t *testing.T) {
+	for name, answer := range map[string]struct {
+		status  int
+		headers map[string]string
+		body    string
+	}{
+		"an empty JSON object": {status: http.StatusOK, body: `{}`},
+		"a JSON null":          {status: http.StatusOK, body: `null`},
+		"a work_context that is not a capability": {status: http.StatusOK, body: `{"work_context":"not-a-capability"}`},
+		"an empty work_context":                   {status: http.StatusOK, body: `{"work_context":""}`},
+		// The two F-6 named as untested, beside the new ones so one table
+		// drives the whole 200 path.
+		"a 200 carrying text/html": {
+			status:  http.StatusOK,
+			headers: map[string]string{"Content-Type": "text/html; charset=utf-8"},
+			body:    "<html>gateway</html>",
+		},
+		"a 200 that does not decode": {status: http.StatusOK, body: `{"work_context":`},
+		"a 200 with no Content-Type at all": {
+			status:  http.StatusOK,
+			headers: map[string]string{"Content-Type": ""},
+			body:    `{"work_context":"x"}`,
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			clock := &movableClock{at: testClock}
+			host := newMintHost(t, clock.now)
+			host.answer = &cannedAnswer{status: answer.status, headers: answer.headers, body: answer.body}
+			client := newTestMintClient(t, host, projectedFile(t, "projected"), clock.now)
+
+			_, err := client.Credential(context.Background())
+
+			require.ErrorIs(t, err, ErrMintUnavailable,
+				"something that is not the host answered; that is not a verdict")
+			require.NotErrorIs(t, err, ErrMintRefused)
+			require.NoError(t, client.Refused(),
+				"this latched and stayed refused forever through the host recovering")
+
+			// AND IT RECOVERS, which is the half that makes "retryable" a
+			// claim rather than a label.
+			host.answer = nil
+			clock.set(clock.at.Add(time.Minute))
+			credential, err := client.Credential(context.Background())
+			require.NoError(t, err, "the host recovered and the client did not")
+			require.NotEmpty(t, credential.Token())
+		})
+	}
+}
+
+// F-6. THE ONE LATCH RULE, asserted. Reverting it to its negation — "anything
+// that is not an outage latches" — survived every test in this suite.
+//
+// The rule is one sentence: only ErrMintRefused is terminal. Its negation is
+// also one sentence and is the previous revision, under which every error this
+// client had not thought about became a permanent stop. So it is driven over
+// the error CLASSES rather than over one of them.
+func TestOnlyAHostRefusalIsTerminal(t *testing.T) {
+	for name, source := range map[string]struct {
+		err     error
+		latches bool
+	}{
+		// ErrInvalid says in its own comment that it is not latched, and the
+		// negation latched it.
+		"a misconfiguration from the token source": {
+			err: fmt.Errorf("%w: no projected token path", ErrInvalid),
+		},
+		// An error from a caller's own reader carrying NO sentinel. Under the
+		// negation this latched, so errors.Is(client.Refused(), ErrMintRefused)
+		// was false while the client was permanently refused — the two ways of
+		// asking disagreed.
+		"an unlabelled error from a caller's source": {
+			err: errors.New("the caller's own reader failed"),
+		},
+		"an outage from the token source": {
+			err: fmt.Errorf("%w: read projected token: EIO", ErrMintUnavailable),
+		},
+		// And the one that does latch, so this is not green by never latching.
+		"a refusal from the token source": {
+			err: fmt.Errorf("%w: the host said no", ErrMintRefused), latches: true,
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			clock := &movableClock{at: testClock}
+			host := newMintHost(t, clock.now)
+			faulty := &faultySource{err: source.err}
+			client := newTestMintClient(t, host, projectedFile(t, "projected"), clock.now,
+				func(options *MintOptions) { options.ProjectedToken = faulty })
+
+			_, err := client.Credential(context.Background())
+			require.Error(t, err)
+
+			if source.latches {
+				require.ErrorIs(t, client.Refused(), ErrMintRefused,
+					"a host refusal is terminal and Refused() must say so")
+				return
+			}
+			require.NoError(t, client.Refused(),
+				"only ErrMintRefused is terminal; this stopped the process for good")
+
+			// THE RECOVERY, which is what "not terminal" means.
+			faulty.err = nil
+			faulty.token = "projected"
+			clock.set(clock.at.Add(time.Minute))
+			credential, err := client.Credential(context.Background())
+			require.NoError(t, err)
+			require.NotEmpty(t, credential.Token())
+		})
+	}
+}
+
+// F-6. THE DETACHED REQUEST CARRIES THE CALLER'S VALUES. Reverting
+// context.WithoutCancel(caller) to context.Background() survived, because
+// nothing read anything off the request's context.
+//
+// What that costs is invisible and real: a trace span, a request id, whatever
+// an http.RoundTripper in the caller's stack reads. Background() dropped all of
+// it silently while the comment said the detaching was about cancellation.
+func TestTheDetachedMintRequestKeepsTheCallersValues(t *testing.T) {
+	type key struct{}
+	clock := &movableClock{at: testClock}
+	host := newMintHost(t, clock.now)
+	client := newTestMintClient(t, host, projectedFile(t, "projected"), clock.now)
+
+	carried := make(chan any, 1)
+	client.httpClient.Transport = &valueReadingTransport{
+		inner: client.httpClient.Transport,
+		key:   key{},
+		seen:  carried,
+	}
+
+	_, err := client.Credential(context.WithValue(context.Background(), key{}, "trace-42"))
+	require.NoError(t, err)
+
+	select {
+	case value := <-carried:
+		require.Equal(t, "trace-42", value,
+			"the detached request dropped the caller's context values; detaching from "+
+				"CANCELLATION is the point, not from everything")
+	default:
+		t.Fatal("the transport was never reached, so this asserted nothing")
+	}
+}
+
+// valueReadingTransport reports the caller's context value as the request saw
+// it.
+type valueReadingTransport struct {
+	inner http.RoundTripper
+	key   any
+	seen  chan any
+}
+
+func (t *valueReadingTransport) RoundTrip(request *http.Request) (*http.Response, error) {
+	select {
+	case t.seen <- request.Context().Value(t.key):
+	default:
+	}
+	return t.inner.RoundTrip(request) //nolint:wrapcheck // a transport returns the inner error
 }

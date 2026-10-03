@@ -108,11 +108,10 @@ func TestTheDefaultTransportIsNeverTheOneThatCarriesTheBearer(t *testing.T) {
 		Audience:           testAudienceName,
 		ProjectedToken:     ProjectedTokenFile(projectedFile(t, "fixture-bearer")),
 		ProjectionAudience: "projection-audience",
-		// No socket is dialled in either of these, so the trust anchor is
-		// never exercised — but it is now a stated decision rather than a
-		// field left alone, and construction refuses silence.
-		TrustSystemRoots: true,
-		Now:              func() time.Time { return testClock },
+		// No socket is dialled in either of these, so the anchor is never
+		// exercised — but RootCAs is required, so it is named.
+		RootCAs: x509.NewCertPool(),
+		Now:     func() time.Time { return testClock },
 	})
 	require.NoError(t, err)
 
@@ -269,11 +268,10 @@ func TestRedirectContainmentWithoutASocket(t *testing.T) {
 		Audience:           testAudienceName,
 		ProjectedToken:     ProjectedTokenFile(projectedFile(t, "projected")),
 		ProjectionAudience: "projection-audience",
-		// No socket is dialled in either of these, so the trust anchor is
-		// never exercised — but it is now a stated decision rather than a
-		// field left alone, and construction refuses silence.
-		TrustSystemRoots: true,
-		Now:              func() time.Time { return testClock },
+		// No socket is dialled in either of these, so the anchor is never
+		// exercised — but RootCAs is required, so it is named.
+		RootCAs: x509.NewCertPool(),
+		Now:     func() time.Time { return testClock },
 	})
 	require.NoError(t, err)
 
@@ -298,8 +296,11 @@ func TestRedirectContainmentWithoutASocket(t *testing.T) {
 	_, err = client.Credential(t.Context())
 	require.EqualValues(t, 0, destination.Load(),
 		"the redirect destination received a request carrying the projection")
-	require.ErrorIs(t, err, ErrMintRefused)
+	// RETRYABLE: the destination receives nothing either way, so latching
+	// bought no confidentiality and stopped the process on an ordinary 307.
+	require.ErrorIs(t, err, ErrMintUnavailable)
 	require.ErrorContains(t, err, "redirected")
+	require.NoError(t, client.Refused(), "a redirect must not latch")
 }
 
 type roundTripFunc func(*http.Request) (*http.Response, error)

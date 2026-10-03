@@ -2090,9 +2090,11 @@ func codecArgumentIsPermitted(file sourceFile, call ast.Node, codec string, oper
 		// type at all.
 		//
 		// Closing it needs the legitimate indirections enumerated, which they
-		// now are — there are three, all in receipts, all taking a
-		// proto.Message by design. A new one is a finding and has to be argued
-		// here, which is the point.
+		// now are — FOUR of them: three in receipts, all taking a
+		// proto.Message by design, and the runtime's own configuration
+		// document. ("Three" sat here after the fourth was added, which is the
+		// C10 class and is why the count is now derived from the map rather
+		// than written out: len(codecIndirections).)
 		//
 		// WHAT THIS STILL DOES NOT CATCH, stated rather than implied: a
 		// capability passed INTO one of those three allowlisted functions.
@@ -2157,9 +2159,9 @@ func isCodecInterfaceType(resolved string) bool {
 // codecIndirections are the functions that legitimately apply a codec to an
 // interface-typed parameter, by file and by function name.
 //
-// Three, all in receipts, all taking a proto.Message because that is what the
-// receipts contract is about: a caller's own request and response messages,
-// never a capability. Keyed on the enclosing function rather than the file,
+// Four: three in receipts, all taking a proto.Message because that is what the
+// receipts contract is about — a caller's own request and response messages,
+// never a capability — and the runtime's own configuration document. Keyed on the enclosing function rather than the file,
 // because a file-wide exemption is what let the type rule be bypassed twice
 // already.
 var codecIndirections = map[string][]string{
