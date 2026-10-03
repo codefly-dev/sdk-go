@@ -45,22 +45,28 @@ const (
 	minRenewalLeadTime = 5 * time.Second
 
 	// defaultMaxCredentialLifetime is the longest credential this client will
-	// hold. It is CORE'S OWN CONSTANT, deliberately, so there is one rule and
-	// not two numbers to keep in step.
+	// hold, and it is CORE'S OWN CONSTANT so there is one number rather than
+	// two to keep in step.
 	//
-	// This check has been deleted once on core's advice and restored once on
-	// review, so what it is for is worth saying precisely. Core 72d72eb2 made
-	// MaxTTLCeiling absolute (maxTTL clamps to it, Start refuses past it,
-	// Verify refuses a lifetime over it), which is exactly the condition this
-	// client named when it declined to drop the ceiling. The reason changes;
-	// the check stays, because of what neither of core's bounds covers:
+	// WHAT THIS IS NOW FOR, because it is not what it was for. The argument
+	// that kept this check was that a mint client NEVER VERIFIES A SIGNATURE —
+	// it is the party the credential is minted FOR, not a receiver — so it
+	// reads its own window through corework.Inspect, which was structural and
+	// bounded no lifetime. Core's first two attempts bounded Authority.Start
+	// and then Verify alone, neither of which a holder can reach: a thirty-day
+	// capability that every Verify refuses was reported to its HOLDER as
+	// thirty days of validity.
 	//
-	// THIS CLIENT NEVER VERIFIES A SIGNATURE. It cannot — it is the party the
-	// credential is minted FOR, not a receiver — so it reads the window
-	// through corework.Inspect, which is structural and checks no signature at
-	// all. Core's Start bounds an honest minter and core's Verify bounds a
-	// receiver running a current core. What this process holds in memory, and
-	// presents for the rest of its life, is bounded here or nowhere.
+	// Core 67ee7220 moved the bound into decodeClaims, which Inspect uses, so
+	// an over-ceiling lifetime is refused IN THIS CLIENT'S OWN READ PATH —
+	// inside sealOf, before checkWindow runs at all.
+	//
+	// So the safety net is core's and this is no longer one. What remains is a
+	// DEPLOYMENT POLICY: a process that will hold a credential for at most
+	// five minutes says so here, and the check fires below core's ceiling
+	// where core has nothing to say. That is the only case it can reach, and
+	// it is the case its test exercises — describing it as a safety net would
+	// be claiming a branch nothing can enter.
 	defaultMaxCredentialLifetime = corework.MaxTTLCeiling
 
 	// Backoff after a mint that failed. A failed renewal used to return an
@@ -1236,6 +1242,10 @@ func (c *MintClient) checkWindow(credential Credential) error {
 		)
 	}
 	if lifetime := credential.expiresAt.Sub(credential.notBefore); lifetime > c.options.MaxCredentialLifetime {
+		// A DEPLOYMENT POLICY, below core's absolute ceiling. Anything above
+		// that ceiling was refused by corework.Inspect before this ran, in
+		// sealOf — so what is reachable here is a process that chose to hold a
+		// credential for less time than the platform permits.
 		return fmt.Errorf(
 			"%w: the minted credential is valid for %s, and this process holds one for at most %s",
 			ErrMintRefused, lifetime, c.options.MaxCredentialLifetime,
