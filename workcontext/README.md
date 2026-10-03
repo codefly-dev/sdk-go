@@ -804,8 +804,8 @@ root:
 
 ### This module merges on a pseudo-version, deliberately
 
-`workcontext/go.mod` pins **`v0.7.2-0.20261003160146-4cb260d3d726`** — core at
-`4cb260d3` — and not a release tag, because there is no tag to move to and will
+`workcontext/go.mod` pins **`v0.7.2-0.20261003161926-4051e4383635`** — core at
+`4051e438` — and not a release tag, because there is no tag to move to and will
 not be one before this merges. Core's `version/info.codefly.yaml` already says
 `0.8.0`, but its `version-tag.yml` cuts the tag from the **merge commit** of
 core#692 and core never tags by hand; core#692 is still open on two owner
