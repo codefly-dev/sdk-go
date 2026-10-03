@@ -112,12 +112,16 @@ func TestTheDefaultTransportIsNeverTheOneThatCarriesTheBearer(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	// The mint will fail — mint.example.test resolves nowhere through a
-	// transport this test does not control, which is exactly the point. What
-	// matters is that it failed WITHOUT the bearer reaching the endpoint the
-	// hostile default transport dials.
+	// The mint fails because mint.example.test resolves nowhere through the
+	// transport the CLIENT built — and it fails as an OUTAGE, which is the
+	// assertion that distinguishes "the client used its own transport and
+	// could not reach the host" from "the client used the hostile one and got
+	// an answer". Accepting any error would also have accepted success
+	// followed by some later failure.
 	_, err = client.Credential(t.Context())
-	require.Error(t, err)
+	require.ErrorIs(t, err, ErrMintUnavailable)
+	require.Equal(t, MintCounts{}, client.Counts(),
+		"nothing was minted, so nothing was counted")
 
 	select {
 	case bearer := <-received:
@@ -331,16 +335,25 @@ func hourOfCalls(t *testing.T, lifetime time.Duration, maxTTL time.Duration) (ui
 	host.authority.core.MaxTTL = maxTTL // zero takes core's DefaultMaxTTL
 	client := newTestMintClient(t, host, projectedFile(t, "projected"), now)
 
+	// Errors are collected and asserted on the TEST goroutine: require inside a
+	// goroutine calls FailNow off it, which Go's testing package does not
+	// support and which can leave the run reporting a pass.
 	var waiting sync.WaitGroup
+	failures := make(chan error, 32)
 	for range 32 {
 		waiting.Add(1)
 		go func() {
 			defer waiting.Done()
-			_, err := client.Credential(context.Background())
-			require.NoError(t, err)
+			if _, err := client.Credential(context.Background()); err != nil {
+				failures <- err
+			}
 		}()
 	}
 	waiting.Wait()
+	close(failures)
+	for err := range failures {
+		require.NoError(t, err, "a concurrent first call must not fail")
+	}
 
 	for minute := range 60 {
 		clockMu.Lock()

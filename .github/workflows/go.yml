@@ -57,9 +57,42 @@ jobs:
     timeout-minutes: 5
     steps:
       - name: Checkout
+        # fetch-depth 0 so the compat refs are reachable: the second step reads
+        # them out of the object database.
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          fetch-depth: 0
       - name: Sweep every tracked Go file for a second implementation
         run: ./scripts/check-one-implementation.sh
+      - name: Sweep every published release line
+        # This step is EXPECTED TO FAIL until the owner retires the three refs
+        # that still carry the deleted implementation, and that failure is the
+        # point rather than an oversight.
+        #
+        # go.yml builds compat/** as published artifacts, and those branches
+        # carry their own copy of this workflow — so no change here can gate a
+        # push to one of them. What a change here CAN do is refuse to let main
+        # move while the rule is false of a ref this repository publishes.
+        # Under "legacy means delete", retiring them is a merge precondition,
+        # not a runbook item: the previous revision ran the sweep with no
+        # arguments, so a green check meant only that the working tree was
+        # clean, which is the weakest thing it could have meant.
+        run: |
+          git fetch --no-tags --quiet origin \
+            '+refs/heads/compat/*:refs/remotes/origin/compat/*' \
+            '+refs/heads/feat/*:refs/remotes/origin/feat/*' || true
+          # Collected into an array rather than word-split from a string, so a
+          # ref name with a space cannot silently become two arguments.
+          refs=()
+          while IFS= read -r ref; do
+            [ -n "$ref" ] && refs+=("$ref")
+          done < <(git for-each-ref --format='%(refname:short)' \
+            'refs/remotes/origin/compat/*' 'refs/remotes/origin/feat/*compat*')
+          if [ ${#refs[@]} -eq 0 ]; then
+            echo "no published release lines to sweep"
+            exit 0
+          fi
+          ./scripts/check-one-implementation.sh "${refs[@]}"
 
   lint:
     name: lint

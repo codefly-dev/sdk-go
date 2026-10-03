@@ -55,7 +55,22 @@ var (
 		// Second encodings of the message. encoding/json is handled separately
 		// because one file is allowed it for the mint endpoint's HTTP bodies.
 		"google.golang.org/protobuf/encoding/protojson",
+		"google.golang.org/protobuf/encoding/protowire",
+		"google.golang.org/protobuf/types/known/anypb",
 		"encoding/gob", "encoding/asn1", "encoding/xml",
+	}
+
+	// envelopeDecoders are banned EXCEPT where a file is allowlisted below. A
+	// second parser applying its own seal rule was the last blocker here, and
+	// it needed exactly this: base64 to open the envelope by hand, and
+	// proto.Unmarshal to read it. corework.Inspect does both now and hands back
+	// the claims, so opening an envelope here has no honest use.
+	envelopeDecoders = []string{"encoding/base64"}
+
+	// envelopeDecoderAllowlist is every file that may reach for one, and what
+	// it does with it — which is never a capability.
+	envelopeDecoderAllowlist = map[string]string{
+		"cache_partition.go": "ENCODES a tenant and installation id into a cache key; it opens no envelope",
 	}
 	bannedImportPrefixes = []string{"golang.org/x/crypto/"}
 	// Any JOSE, JWT or token-library path, whoever publishes it. A capability
@@ -217,14 +232,29 @@ func inspectForSecondImplementation(file sourceFile) []string {
 	var findings []string
 	coreImports := map[string]bool{}
 	plumbing := map[string]string{} // local name -> allowed import path
-	for name, path := range importsOf(file.syntax) {
-		findings = append(findings, inspectImport(file, name, path, plumbing)...)
-		if path == coreModulePath || strings.HasPrefix(path, coreModulePath+"/") {
-			coreImports[name] = true
+	protoNames := map[string]bool{} // every local name google.golang.org/protobuf is reachable under
+	for _, imported := range importsOf(file.syntax) {
+		if imported.name == "." {
+			// A dot import makes every one of a package's identifiers
+			// unqualified, which defeats every symbol rule below and collided
+			// in the map this used to build. Nothing here needs one.
+			findings = append(findings, fmt.Sprintf(
+				"%s dot-imports %q.\n"+
+					"A dot import makes a package's identifiers unqualified, so every rule in this gate\n"+
+					"that reasons about a qualifier stops applying — and two dot imports collided in the\n"+
+					"map this check used to build, which hid whichever came first.",
+				file.path, imported.path))
+		}
+		findings = append(findings, inspectImport(file, imported.name, imported.path, plumbing)...)
+		if imported.path == coreModulePath || strings.HasPrefix(imported.path, coreModulePath+"/") {
+			coreImports[imported.name] = true
+		}
+		if strings.HasPrefix(imported.path, "google.golang.org/protobuf") {
+			protoNames[imported.name] = true
 		}
 	}
 	findings = append(findings, inspectPlumbingSymbols(file, plumbing)...)
-	findings = append(findings, inspectProtoEncoding(file)...)
+	findings = append(findings, inspectProtoEncoding(file, protoNames)...)
 	findings = append(findings, inspectDeclarations(file, coreImports)...)
 	findings = append(findings, inspectJSONTags(file)...)
 	return findings
@@ -241,6 +271,19 @@ func inspectImport(file sourceFile, name string, path string, plumbing map[strin
 		return []string{fmt.Sprintf(
 			"%s imports %q, which only %v may: it is the mint client's own transport plumbing.",
 			file.path, path, allowed.files)}
+	}
+	if slices.Contains(envelopeDecoders, path) {
+		if reason, allowed := envelopeDecoderAllowlist[file.path]; allowed {
+			_ = reason
+			return nil
+		}
+		return []string{fmt.Sprintf(
+			"%s imports %q.\n"+
+				"Opening a capability's envelope by hand is the beginning of a second parser, which\n"+
+				"is what this module last had to delete — its own seal rule disagreed with core's\n"+
+				"fixtures about three refusals. corework.Inspect opens the envelope and returns the\n"+
+				"claims. Only %v may reach for this, and only because %v.",
+			file.path, path, allowedEnvelopeDecoderFiles(), envelopeDecoderReasons())}
 	}
 	banned := slices.Contains(bannedImports, path)
 	for _, prefix := range bannedImportPrefixes {
@@ -313,10 +356,7 @@ func inspectPlumbingSymbols(file sourceFile, plumbing map[string]string) []strin
 // encodes something which is not a capability. Unmarshal and Clone are not
 // restricted: reading a capability the host issued is this module's job, and
 // writing one is core's.
-func inspectProtoEncoding(file sourceFile) []string {
-	if _, allowed := protoMarshalAllowlist[file.path]; allowed {
-		return nil
-	}
+func inspectProtoEncoding(file sourceFile, protoNames map[string]bool) []string {
 	var findings []string
 	ast.Inspect(file.syntax, func(node ast.Node) bool {
 		selector, ok := node.(*ast.SelectorExpr)
@@ -324,19 +364,43 @@ func inspectProtoEncoding(file sourceFile) []string {
 			return true
 		}
 		qualifier, ok := selector.X.(*ast.Ident)
-		if !ok || qualifier.Name != "proto" {
+		// The qualifier is resolved from the IMPORT MAP rather than compared
+		// against the literal "proto". An aliased import — pb.Marshal — passed
+		// the identifier check, which made this a rule about a name in a gate
+		// whose whole point is not to be one.
+		if !ok || !protoNames[qualifier.Name] {
 			return true
 		}
-		if selector.Sel.Name != "Marshal" && selector.Sel.Name != "MarshalOptions" {
+		switch selector.Sel.Name {
+		case "Marshal", "MarshalOptions":
+			if _, allowed := protoMarshalAllowlist[file.path]; allowed {
+				return true
+			}
+		case "Unmarshal", "UnmarshalOptions":
+			// Unrestricted until now, and it is half of the defect that was the
+			// last blocker: a second unverified parser needs base64 to open the
+			// envelope and Unmarshal to read it. corework.Inspect does both, and
+			// hands back the claims, so nothing here needs either.
+			findings = append(findings, fmt.Sprintf(
+				"%s calls %s.%s.\n"+
+					"Reading a capability off the wire is corework.Inspect's job, and it returns the\n"+
+					"claims it decoded. A decode here is the beginning of a second parser — which is\n"+
+					"what this module last had to delete, and its own seal rule disagreed with core's\n"+
+					"fixtures about three refusals.",
+				file.path, qualifier.Name, selector.Sel.Name))
+			return true
+		default:
 			return true
 		}
 		findings = append(findings, fmt.Sprintf(
-			"%s calls proto.%s.\n"+
+			"%s calls %s.%s.\n"+
 				"Encoding the message is half of a signer: core signs the deterministic protobuf\n"+
-				"encoding, so proto.MarshalOptions{Deterministic: true} over a capability is the\n"+
-				"deleted implementation with a different import list. Only %v may encode, and only\n"+
+				"encoding, so MarshalOptions{Deterministic: true} over a capability is the deleted\n"+
+				"implementation with a different import list. The qualifier is resolved from the\n"+
+				"import map, so an alias does not get past this. Only %v may encode, and only\n"+
 				"because what it encodes is %v.",
-			file.path, selector.Sel.Name, allowedProtoMarshalFiles(), protoMarshalReasons()))
+			file.path, qualifier.Name, selector.Sel.Name,
+			allowedProtoMarshalFiles(), protoMarshalReasons()))
 		return true
 	})
 	return findings
@@ -668,6 +732,78 @@ type thing struct{}
 func (thing) WorkContextSign(payload []byte) []byte { return payload }`,
 			says: "declares method WorkContextSign",
 		},
+		// Below: the bypasses round three found. Each defeated the gate as it
+		// stood after round two, which is the pattern worth noticing — every
+		// round the gate was tightened, and every round the next reviewer
+		// found the thing the tightening did not reach.
+		"a dot-import collision hiding a signing primitive": {
+			path: "carrier.go",
+			source: `package workcontext
+import (
+	. "crypto/ed25519"
+	. "strings"
+)
+var _ = Sign
+var _ = TrimSpace`,
+			says: `dot-imports "crypto/ed25519"`,
+		},
+		"a single dot import": {
+			path: "carrier.go",
+			source: `package workcontext
+import . "crypto/ed25519"
+var _ = Sign`,
+			says: "dot-imports",
+		},
+		"an ALIASED protobuf marshal": {
+			path: "carrier.go",
+			source: `package workcontext
+import pb "google.golang.org/protobuf/proto"
+func encode(claims *Claims) ([]byte, error) {
+	return pb.MarshalOptions{Deterministic: true}.Marshal(claims)
+}`,
+			says: "calls pb.MarshalOptions",
+		},
+		"a hand parser: base64 plus Unmarshal": {
+			path: "carrier.go",
+			source: `package workcontext
+import (
+	"encoding/base64"
+	"google.golang.org/protobuf/proto"
+)
+func parse(encoded string) (*Claims, error) {
+	raw, err := base64.RawURLEncoding.DecodeString(encoded)
+	if err != nil {
+		return nil, err
+	}
+	claims := &Claims{}
+	return claims, proto.Unmarshal(raw, claims)
+}`,
+			says: `imports "encoding/base64"`,
+		},
+		"proto.Unmarshal on its own": {
+			path: "carrier.go",
+			source: `package workcontext
+import "google.golang.org/protobuf/proto"
+func read(raw []byte) (*Claims, error) {
+	claims := &Claims{}
+	return claims, proto.Unmarshal(raw, claims)
+}`,
+			says: "calls proto.Unmarshal",
+		},
+		"the wire encoder": {
+			path: "carrier.go",
+			source: `package workcontext
+import "google.golang.org/protobuf/encoding/protowire"
+var _ = protowire.AppendTag`,
+			says: "encoding/protowire",
+		},
+		"anypb, which marshals anything": {
+			path: "carrier.go",
+			source: `package workcontext
+import "google.golang.org/protobuf/types/known/anypb"
+var _ = anypb.New`,
+			says: "types/known/anypb",
+		},
 		"a WorkContext func bound to a var": {
 			path: "carrier.go",
 			source: `package workcontext
@@ -803,10 +939,14 @@ func moduleFiles(t *testing.T) []sourceFile {
 	return files
 }
 
-// importsOf returns this file's imports by the local name each is reachable
-// under, which is what an alias's qualifier has to be checked against.
-func importsOf(file *ast.File) map[string]string {
-	paths := make(map[string]string, len(file.Imports))
+// importsOf returns this file's imports as (local name, path) PAIRS.
+//
+// It used to return a map keyed by local name, which two imports can collide
+// in: `import ( . "crypto/ed25519"; . "strings" )` maps "." twice, the second
+// wins, and the signing primitive is never inspected at all. A gate whose
+// coverage depends on import order is not a gate. Pairs cannot collide.
+func importsOf(file *ast.File) []importedPackage {
+	imports := make([]importedPackage, 0, len(file.Imports))
 	for _, imported := range file.Imports {
 		path, err := strconv.Unquote(imported.Path.Value)
 		if err != nil {
@@ -816,9 +956,32 @@ func importsOf(file *ast.File) map[string]string {
 		if imported.Name != nil {
 			name = imported.Name.Name
 		}
-		paths[name] = path
+		imports = append(imports, importedPackage{name: name, path: path})
 	}
-	return paths
+	return imports
+}
+
+type importedPackage struct {
+	name string
+	path string
+}
+
+func allowedEnvelopeDecoderFiles() []string {
+	names := make([]string, 0, len(envelopeDecoderAllowlist))
+	for name := range envelopeDecoderAllowlist {
+		names = append(names, name)
+	}
+	slices.Sort(names)
+	return names
+}
+
+func envelopeDecoderReasons() []string {
+	reasons := make([]string, 0, len(envelopeDecoderAllowlist))
+	for _, reason := range envelopeDecoderAllowlist {
+		reasons = append(reasons, reason)
+	}
+	slices.Sort(reasons)
+	return reasons
 }
 
 func allowedProtoMarshalFiles() []string {

@@ -143,8 +143,8 @@ The fix was not to sync the rule. **`corework.Inspect` now owns every
 structural decision** — shape, encoding, schema, attenuation, grant shape, a
 seal naming an installation, an epoch on every actor hop — and this module's
 `readClaims` runs after it, reads two values, and decides nothing. Core added
-`Inspect` for this, when asked; the eight structural refusals must reach core's
-sentinel here, and the other seventeen must **pass**, because an unverified
+`Inspect` for this, when asked; the twelve structural refusals must reach core's
+sentinel here, and every other fixture must **pass**, because an unverified
 inspection that refused a signature or a live-state failure would be claiming to
 have verified something it cannot see. `Inspect` checks no signature at all —
 core's own test asserts a token re-signed with a key nobody holds passes it — so
@@ -153,16 +153,19 @@ nil means *shaped right*, never *permitted*.
 **And one sweep, because the test above walks from this module's root.** The
 implementation this repository deleted lived at the REPOSITORY root, in package
 `codefly` — exactly where that walk does not reach.
-`scripts/check-one-implementation.sh` (the `one implementation` workflow) sweeps
-every tracked Go file in both modules, and it is a **required pull-request check
-that is green**. There is no compatibility period in it and no countdown: a
-second implementation on a ref this repository builds is a failure to fix.
+`scripts/check-one-implementation.sh` sweeps every tracked Go file in both
+modules, as a job in `go.yml` — the workflow that builds every ref this
+repository publishes — and it is **required on `main` by an active ruleset**.
 
-Refs outside this repository's build that still carry the deleted
-implementation are the cold-cutover runbook's business, and that runbook lives
-outside this repository — this repository holds the rule, not a consumer
-inventory. The script takes refs as arguments for whoever is doing that work
-(`scripts/check-one-implementation.sh origin/some-ref`), which CI does not run.
+It sweeps the **published release lines too**, and that step **fails today**.
+Three refs (`compat/v0.1.65`, `compat/v0.1.65-tls`, `feat/file-carriers-compat`)
+still carry the deleted implementation. Running the sweep with no arguments made
+a green check mean only that the working tree was clean, which is the weakest
+thing it could have meant; passing it the refs makes the rule true of the
+repository or red. **Retiring those refs is a merge precondition**, not a
+runbook item: under "legacy means delete" a release line that cannot meet the
+rule is deleted by the owner, and `main` does not move while the rule is false
+of something this repository publishes.
 
 ## The model: mint once, sealed, verified exactly
 
@@ -648,14 +651,17 @@ else. The sealed fields are proto fields — `seal.principal_epoch`,
 `operation_binding.binding_id` / `.revision` / `.incarnation`, all three
 together or none.
 
-This module reads a capability's seal and lifetime in one place (`carrier.go`,
-`claimsOf`): core's `CheckEncoding` on the decoded payload, then
-`proto.Unmarshal` into core's generated type, and **no signature check**. That
-is sound only because nothing trusts the result — it fills the pre-check
-carriers, and it tells the mint client when its own freshly issued credential
-expires. A receiver that preferred a carrier over the sealed claim would have
-made a caller-controlled header into authority, which is why the incoming side
-refuses a disagreement instead.
+This module no longer reads a capability itself. `corework.Inspect` runs the
+size bound, the envelope, `CheckEncoding`, `proto.Unmarshal`, **protovalidate**
+and the full structural seal check, and returns the claims it decoded;
+`readClaims` (`carrier.go`) calls it and clones the result. There is no second
+decode, no local rule, and **no signature check** — core's own test asserts a
+token re-signed with a key nobody holds passes `Inspect`, so nil means "shaped
+like a sealed capability" and never "permitted". That is sound only because
+nothing trusts it: it fills the pre-check carriers and tells the mint client
+when its own freshly issued credential expires, and a receiver that preferred a
+carrier over the sealed claim would have made a caller-controlled header into
+authority, which is why the incoming side refuses a disagreement instead.
 
 `CheckEncoding` is core's and is called rather than reimplemented, so a token in
 another format is named `ErrNotACoreToken` **here too**. Two decoders giving an

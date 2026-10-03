@@ -16,8 +16,10 @@ import (
 // can assert that a message did NOT leave.
 type recordingStream struct {
 	grpc.ServerStream
-	ctx  context.Context
-	sent []any
+	ctx      context.Context
+	sent     []any
+	headers  int
+	trailers int
 }
 
 func (s *recordingStream) Context() context.Context { return s.ctx }
@@ -27,10 +29,18 @@ func (s *recordingStream) SendMsg(message any) error {
 	return nil
 }
 
-func (s *recordingStream) SetHeader(metadata.MD) error  { return nil }
-func (s *recordingStream) SendHeader(metadata.MD) error { return nil }
-func (s *recordingStream) SetTrailer(metadata.MD)       {}
-func (s *recordingStream) RecvMsg(any) error            { return nil }
+func (s *recordingStream) SetHeader(metadata.MD) error {
+	s.headers++
+	return nil
+}
+
+func (s *recordingStream) SendHeader(metadata.MD) error {
+	s.headers++
+	return nil
+}
+
+func (s *recordingStream) SetTrailer(metadata.MD) { s.trailers++ }
+func (s *recordingStream) RecvMsg(any) error      { return nil }
 
 // A guarded stream re-checks before EVERY message, and a refused message does
 // not leave.
@@ -122,4 +132,107 @@ func TestGuardRefusesToWrapNothing(t *testing.T) {
 	var absent *GuardedServerStream
 	require.ErrorIs(t, absent.SendMsg("x"), workcontext.ErrInvalid)
 	require.NoError(t, absent.Terminated())
+}
+
+// Metadata is a channel out too. SendHeader, SetHeader and SetTrailer were
+// unguarded, so a handler that could not send a message could still send a
+// trailer describing one.
+func TestAGuardedStreamGuardsMetadataAsWellAsMessages(t *testing.T) {
+	refuse := false
+	guard, err := workcontext.NewStreamGuard(workcontext.StreamGuardOptions{
+		Recheck: func(context.Context) error {
+			if refuse {
+				return workcontext.ErrRevoked
+			}
+			return nil
+		},
+	})
+	require.NoError(t, err)
+
+	underlying := &recordingStream{ctx: context.Background()}
+	guarded, err := Guard(underlying, guard)
+	require.NoError(t, err)
+
+	require.NoError(t, guarded.SetHeader(metadata.Pairs("a", "1")))
+	require.NoError(t, guarded.SendHeader(metadata.Pairs("b", "2")))
+	guarded.SetTrailer(metadata.Pairs("c", "3"))
+	require.Equal(t, 3, underlying.trailers+underlying.headers)
+
+	refuse = true
+	require.ErrorIs(t, guarded.SetHeader(metadata.Pairs("d", "4")), workcontext.ErrStreamTerminated)
+	require.ErrorIs(t, guarded.SendHeader(metadata.Pairs("e", "5")), workcontext.ErrStreamTerminated)
+	before := underlying.trailers
+	guarded.SetTrailer(metadata.Pairs("f", "6"))
+	require.Equal(t, before, underlying.trailers,
+		"a terminated stream sets no trailer rather than setting one nobody checked")
+}
+
+// The interceptor is the half a wrapper cannot provide: enforcement as wiring.
+//
+// Guard leaves the original stream in the handler's scope, so "guard your
+// stream" was advice. Installed at the server, the handler receives a stream it
+// cannot write around, because the unguarded one never reaches it.
+func TestTheStreamInterceptorHandsTheHandlerAGuardedStream(t *testing.T) {
+	refuse := false
+	guard, err := workcontext.NewStreamGuard(workcontext.StreamGuardOptions{
+		Recheck: func(context.Context) error {
+			if refuse {
+				return workcontext.ErrRevoked
+			}
+			return nil
+		},
+	})
+	require.NoError(t, err)
+
+	underlying := &recordingStream{ctx: context.Background()}
+	interceptor := StreamServerInterceptor(
+		func(context.Context, *grpc.StreamServerInfo) (*workcontext.StreamGuard, error) {
+			return guard, nil
+		})
+
+	var handed grpc.ServerStream
+	err = interceptor(nil, underlying, &grpc.StreamServerInfo{FullMethod: "/x/Y"},
+		func(_ any, stream grpc.ServerStream) error {
+			handed = stream
+			require.NoError(t, stream.SendMsg("first"))
+			refuse = true
+			return stream.SendMsg("the one that must not leave")
+		})
+	require.ErrorIs(t, err, workcontext.ErrStreamTerminated)
+	require.IsType(t, &GuardedServerStream{}, handed,
+		"the handler must not be able to receive the unguarded stream")
+	require.Len(t, underlying.sent, 1)
+}
+
+// A server may declare a stream unguarded, but it does so AT THE SERVER where
+// a reviewer sees it, not inside a handler.
+func TestTheStreamInterceptorRefusesWhenItCannotBuildAGuard(t *testing.T) {
+	underlying := &recordingStream{ctx: context.Background()}
+	refused := errors.New("this capability did not verify")
+
+	err := StreamServerInterceptor(
+		func(context.Context, *grpc.StreamServerInfo) (*workcontext.StreamGuard, error) {
+			return nil, refused
+		})(nil, underlying, &grpc.StreamServerInfo{}, func(any, grpc.ServerStream) error {
+		t.Fatal("the handler must not run when the stream could not be guarded")
+		return nil
+	})
+	require.ErrorIs(t, err, refused)
+
+	// Explicitly unguarded: allowed, and the handler gets the raw stream.
+	var handed grpc.ServerStream
+	err = StreamServerInterceptor(
+		func(context.Context, *grpc.StreamServerInfo) (*workcontext.StreamGuard, error) {
+			return nil, nil
+		})(nil, underlying, &grpc.StreamServerInfo{}, func(_ any, stream grpc.ServerStream) error {
+		handed = stream
+		return nil
+	})
+	require.NoError(t, err)
+	require.Same(t, underlying, handed)
+
+	// And no guard-builder at all is a configuration error, not a pass.
+	err = StreamServerInterceptor(nil)(nil, underlying, &grpc.StreamServerInfo{},
+		func(any, grpc.ServerStream) error { return nil })
+	require.ErrorIs(t, err, workcontext.ErrInvalid)
 }

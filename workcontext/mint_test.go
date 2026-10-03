@@ -177,7 +177,12 @@ func TestMintOncePerExecutionAndRenewOnlyAtExpiry(t *testing.T) {
 
 	first, err := client.Credential(t.Context())
 	require.NoError(t, err)
-	require.Equal(t, testSeal, first.Seal())
+	// The seal as the capability CARRIES it — core's wire message, which also
+	// carries the owner's epoch that core's live Seal type no longer has.
+	require.Equal(t, testInstallation, first.Seal().GetInstallationId())
+	require.EqualValues(t, 3, first.Seal().GetInstallationRevision())
+	require.EqualValues(t, 11, first.Seal().GetBuildIncarnation())
+	require.EqualValues(t, testPrincipalEpoch, first.Seal().GetPrincipalEpoch())
 	require.EqualValues(t, 1, host.requests.Load())
 
 	// Every call for the next twelve minutes is answered from the credential
@@ -282,23 +287,34 @@ func TestEveryMintRefusesWhenTheBootReadAuthorityHasDrifted(t *testing.T) {
 	require.NoError(t, err)
 	require.EqualValues(t, 1, host.pin.checks.Load(), "the first mint checks the pin too")
 
+	// A drift is a REFUSAL, and the test's name always said so while its
+	// assertion said the opposite. The previous revision returned the held
+	// credential with a nil error here, because "serve the held credential
+	// rather than manufacture an outage" had been applied to every error
+	// instead of only to outages — and this assertion was changed to match,
+	// which is the worst shape a test failure can take.
+	//
+	// ErrMintRefused means the host will say the same thing again and a
+	// process that sees it must not serve. A credential still having a minute
+	// left does not change that: the value it is sealed to has moved.
 	host.pin.set(testAudience, errors.New("audience changed under a running process"))
 	clock = testClock.Add(14 * time.Minute)
-	credential, err := client.Credential(t.Context())
-	// The credential in hand has a minute left, so the drift does not make this
-	// process stop serving — it makes it stop MINTING, which is the point.
-	require.NoError(t, err)
-	require.NotEmpty(t, credential.Token())
-	require.EqualValues(t, 2, host.pin.checks.Load())
-	require.EqualValues(t, 1, host.requests.Load(), "a drifted authority must not reach the mint endpoint")
-
-	// Once the held credential has expired there is nothing to serve, and the
-	// drift is the error.
-	clock = testClock.Add(2 * time.Hour)
 	_, err = client.Credential(t.Context())
 	require.ErrorIs(t, err, ErrMintRefused)
 	require.ErrorContains(t, err, "audience changed")
+	require.EqualValues(t, 2, host.pin.checks.Load())
+	require.EqualValues(t, 1, host.requests.Load(), "a drifted authority must not reach the mint endpoint")
+
+	// And it is TERMINAL. A later call does not outlive it, and the pin being
+	// put back does not resurrect the client: the process already minted
+	// against a value that has since moved, and only a restart re-establishes
+	// what it runs under.
+	require.ErrorIs(t, client.Refused(), ErrMintRefused)
+	host.pin.set(testAudience, nil)
+	_, err = client.Credential(t.Context())
+	require.ErrorIs(t, err, ErrMintRefused)
 	require.EqualValues(t, 1, host.requests.Load())
+	require.EqualValues(t, 2, host.pin.checks.Load(), "a refused client stops asking")
 }
 
 // The first mint, specifically: a client constructed at boot whose pin has
@@ -462,7 +478,8 @@ func TestRefreshIsTiedToTheRefusedCredential(t *testing.T) {
 // A refresh rechecks the pin and re-reads the projection, exactly as a renewal
 // does: it is a mint, and every mint goes through the same door.
 func TestRefreshRechecksThePinAndRereadsTheProjection(t *testing.T) {
-	now := func() time.Time { return testClock }
+	clock := testClock
+	now := func() time.Time { return clock }
 	host := newMintHost(t, now)
 	path := projectedFile(t, "projected-before")
 	client := newTestMintClient(t, host, path, now)
@@ -475,17 +492,23 @@ func TestRefreshRechecksThePinAndRereadsTheProjection(t *testing.T) {
 	require.NoError(t, os.WriteFile(path, []byte("projected-after"), 0o600))
 	replaced, err := client.Refresh(t.Context(), held)
 	require.NoError(t, err)
+	require.NotEqual(t, held.Token(), replaced.Token())
 	require.EqualValues(t, 2, host.pin.checks.Load())
 	require.EqualValues(t, 2, host.pin.reads.Load())
 	require.Equal(t, "Bearer projected-after", host.presented.Load())
 
-	// A drifted pin stops the refresh, and the credential already held stays
-	// held: a refused replacement must not leave the process holding nothing,
-	// which would read as a boot failure somewhere it is not.
+	// A drifted pin REFUSES the refresh, and the refusal is what the caller
+	// gets. Handing the credential back would be worse than useless here: the
+	// caller asked for a replacement because the far end refused this one, so
+	// returning it reports a replacement that did not happen.
+	// A refresh inside the rate limit is an outage to the caller, so move past
+	// it before asserting what a DRIFT does.
+	clock = testClock.Add(5 * time.Minute)
 	host.pin.set(testAudience, errors.New("audience changed under a running process"))
-	still, err := client.Refresh(t.Context(), replaced)
-	require.NoError(t, err, "a credential with time left is served while minting is refused")
-	require.Equal(t, replaced.Token(), still.Token())
+	_, err = client.Refresh(t.Context(), replaced)
+	require.ErrorIs(t, err, ErrMintRefused)
+	require.ErrorContains(t, err, "audience changed")
+	require.ErrorIs(t, client.Refused(), ErrMintRefused)
 }
 
 // The host may echo the sealed values for a log. An echo that disagrees with
@@ -595,9 +618,38 @@ func TestMintRefusesACredentialThatIsUnusableOnArrival(t *testing.T) {
 	// What this test asserts about it is therefore core's constant, not a
 	// number of ours: a host cannot configure its way past it without a
 	// reviewer seeing the configuration.
-	require.Equal(t, time.Hour, corework.DefaultMaxTTL,
-		"the lifetime ceiling lives at the minter; if core's default moves, the README moves with it")
+	// The ceiling is BACK, as defence in depth, and this asserts what THIS
+	// client does rather than what core's constant says: a host that raises
+	// its own MaxTTL past what this process will hold is refused here.
+	//
+	// Core's cap is the primary one and this is the second layer. Deleting
+	// this layer on the strength of core having a cap was a weakening, because
+	// MaxTTL is configurable with no ceiling of its own and nothing bounds a
+	// lifetime at use.
+	host = newMintHost(t, now)
+	host.authority.core.MaxTTL = 30 * 24 * time.Hour // a host that raised it
+	month := 30 * 24 * time.Hour
+	host.mintedAt, host.mintedFor = &monthStart, &month
+	client = newTestMintClient(t, host, projectedFile(t, "projected"), now)
+	_, err = client.Credential(t.Context())
+	require.ErrorIs(t, err, ErrMintRefused)
+	require.ErrorContains(t, err, "holds one for at most")
+
+	// And it is configurable, because what a process should hold is the
+	// deployment's call — the point is that there IS one.
+	host = newMintHost(t, now)
+	host.authority.core.MaxTTL = 30 * 24 * time.Hour
+	week := 7 * 24 * time.Hour
+	host.mintedAt, host.mintedFor = &monthStart, &week
+	client = newTestMintClient(t, host, projectedFile(t, "projected"), now,
+		func(options *MintOptions) { options.MaxCredentialLifetime = 14 * 24 * time.Hour })
+	credential, err := client.Credential(t.Context())
+	require.NoError(t, err)
+	require.Equal(t, testClock.Add(week), credential.ExpiresAt())
 }
+
+// monthStart is an addressable testClock, for the host overrides above.
+var monthStart = testClock
 
 // A refusal the host will give again is not retryable, and an outage is. A
 // client that confused them would either spin against a permanent refusal or
@@ -834,7 +886,16 @@ func TestCredentialSurfaceComesFromTheSignedCapability(t *testing.T) {
 
 	credential, err := client.Credential(t.Context())
 	require.NoError(t, err)
-	require.Equal(t, testSeal, credential.Seal())
+	require.Equal(t, testInstallation, credential.Seal().GetInstallationId())
+	require.EqualValues(t, 3, credential.Seal().GetInstallationRevision())
+
+	// Seal hands back a CLONE of the wire message. A caller that mutated it
+	// must not be able to change what the credential reports it is bound to —
+	// and the type is the carried seal rather than core's live Seal, which a
+	// client cannot answer for.
+	mutated := credential.Seal()
+	mutated.InstallationId = "installation-the-caller-preferred"
+	require.Equal(t, testInstallation, credential.Seal().GetInstallationId())
 
 	// The binding AS SEALED: the three fields the capability carries. The live
 	// binding has three more — the principal it is granted to, the installation
@@ -1016,11 +1077,17 @@ func TestACancelledWaiterStillGetsAUsableHeldCredential(t *testing.T) {
 	<-renewing
 }
 
-// A receiver whose live state lags refuses every fresh credential, and each
-// refusal is a NEW generation — so the generation check alone does not bound
-// it. The hold-off is what does.
-func TestRepeatedRefreshesAreBounded(t *testing.T) {
-	now := func() time.Time { return testClock }
+// A receiver whose live state lags refuses every FRESH credential, so each
+// refusal is a new generation and the failure hold-off never engages. The bound
+// has to be a bound on successful refreshes.
+//
+// The previous version of this test used a 503 host, so no new generation ever
+// appeared and it modelled an outage rather than the lagging receiver it
+// claimed — and it asserted that handing the refused credential back was a
+// success, which is the C2 defect written down as expected behaviour.
+func TestASuccessfulRefreshIsRateLimitedSoALaggingReceiverCannotMintForever(t *testing.T) {
+	clock := testClock
+	now := func() time.Time { return clock }
 	host := newMintHost(t, now)
 	client := newTestMintClient(t, host, projectedFile(t, "projected"), now)
 
@@ -1028,21 +1095,162 @@ func TestRepeatedRefreshesAreBounded(t *testing.T) {
 	require.NoError(t, err)
 	require.EqualValues(t, 1, host.requests.Load())
 
-	// The first refusal gets a replacement.
-	replaced, err := client.Refresh(t.Context(), held)
-	require.NoError(t, err)
-	require.EqualValues(t, 2, host.requests.Load())
-
-	// Now the host starts failing, and a caller refused on each fresh
-	// credential keeps coming back. Without the hold-off this is one mint per
-	// call for as long as the receiver lags.
-	host.refuseWith = http.StatusServiceUnavailable
-	current := replaced
+	// The host mints happily; it is the RECEIVER that is behind, so every
+	// credential this caller presents comes back ErrRevoked and every refusal
+	// is on a credential one generation newer than the last.
+	current := held
+	served := 0
+	refused := 0
 	for range 20 {
 		next, err := client.Refresh(t.Context(), current)
-		require.NoError(t, err, "a credential with time left is served")
-		current = next
+		switch {
+		case err == nil:
+			require.NotEqual(t, current.Token(), next.Token(),
+				"a successful refresh must never hand back the credential that was refused")
+			current = next
+			served++
+		default:
+			require.ErrorIs(t, err, ErrMintUnavailable,
+				"a rate-limited refresh is an outage to the caller, not a refusal")
+			require.ErrorContains(t, err, "held off")
+			refused++
+		}
 	}
-	require.EqualValues(t, 3, host.requests.Load(),
-		"twenty refusals inside one hold-off make one request")
+
+	require.Positive(t, served, "the first refusal must get a replacement")
+	require.Positive(t, refused, "and the twentieth must not")
+	require.LessOrEqual(t, int(host.requests.Load()), 4,
+		"twenty refusals on twenty successive generations must not be twenty mints")
+	counts := client.Counts()
+	require.EqualValues(t, 1, counts.Mints)
+	require.LessOrEqual(t, int(counts.Refreshes), 3)
+
+	// The rate limit is a limit and not a wall: once it elapses, a refresh
+	// works again.
+	clock = testClock.Add(5 * time.Minute)
+	recovered, err := client.Refresh(t.Context(), current)
+	require.NoError(t, err)
+	require.NotEqual(t, current.Token(), recovered.Token())
+}
+
+// A refusal from the host is never dressed up as a replacement.
+//
+// This is the sequence the review set out, and it is the likely one: the
+// installation is revoked, so the receiver answers ErrRevoked, so the caller
+// refreshes — and the host refuses the mint for the same reason. The previous
+// revision returned the refused credential with a nil error, for its whole
+// remaining lifetime, so a caller could not tell "replaced" from "here is the
+// revoked one again".
+func TestARefusedRefreshNeverReturnsTheRefusedCredential(t *testing.T) {
+	now := func() time.Time { return testClock }
+	host := newMintHost(t, now)
+	client := newTestMintClient(t, host, projectedFile(t, "projected"), now)
+
+	held, err := client.Credential(t.Context())
+	require.NoError(t, err)
+
+	// The installation is revoked, so the host refuses the mint too.
+	host.refuseWith = http.StatusForbidden
+	replacement, err := client.Refresh(t.Context(), held)
+	require.ErrorIs(t, err, ErrMintRefused)
+	require.Empty(t, replacement.Token(),
+		"a refused refresh returns no credential at all, least of all the refused one")
+
+	// Terminal, so a caller looping cannot be handed the revoked credential on
+	// the next pass either — and Credential does not hand it out.
+	require.ErrorIs(t, client.Refused(), ErrMintRefused)
+	_, err = client.Credential(t.Context())
+	require.ErrorIs(t, err, ErrMintRefused)
+	again, err := client.Refresh(t.Context(), held)
+	require.ErrorIs(t, err, ErrMintRefused)
+	require.Empty(t, again.Token())
+}
+
+// A cancelled caller must not become everybody else's outage.
+//
+// The shared mint runs on the LEADER's context. If the leader's caller gives
+// up, that used to count as a failure: failures++ and a hold-off, so every
+// waiter then hit "held off" — and at boot, with no credential held, one
+// cancelled first request was an outage for every other caller, growing toward
+// a minute with each repetition. A caller giving up is not the host failing.
+func TestACancelledLeaderDoesNotHoldOffEveryoneElse(t *testing.T) {
+	now := func() time.Time { return testClock }
+	host := newMintHost(t, now)
+	release := make(chan struct{})
+	var releaseOnce sync.Once
+	letGo := func() { releaseOnce.Do(func() { close(release) }) }
+	t.Cleanup(letGo)
+	host.before = func() {
+		select {
+		case <-release:
+		case <-time.After(2 * time.Second):
+		}
+	}
+	client := newTestMintClient(t, host, projectedFile(t, "projected"), now)
+
+	// The leader cancels while the host is still holding its request. There is
+	// no credential, so nothing can be served.
+	leader, cancel := context.WithCancel(context.Background())
+	leaderDone := make(chan error, 1)
+	go func() {
+		_, err := client.Credential(leader)
+		leaderDone <- err
+	}()
+	require.Eventually(t, func() bool { return host.requests.Load() == 1 },
+		2*time.Second, time.Millisecond)
+	cancel()
+	require.ErrorIs(t, <-leaderDone, ErrMintUnavailable)
+	letGo()
+
+	// A caller arriving now must be able to mint. Under the old behaviour it
+	// was held off for a second, and for longer each time a caller cancelled.
+	credential, err := client.Credential(t.Context())
+	require.NoError(t, err, "a cancelled leader must not hold off the next caller")
+	require.NotEmpty(t, credential.Token())
+	require.Equal(t, MintCounts{Mints: 1}, client.Counts(),
+		"and the cancellation is not counted as a mint that happened")
+}
+
+// An outage is still servable, and a refusal is still not: the two branches
+// that the previous revision collapsed into one, asserted apart.
+func TestOnlyAnOutageServesTheHeldCredential(t *testing.T) {
+	for name, arrange := range map[string]struct {
+		status   int
+		sentinel error
+		serves   bool
+	}{
+		"503 is an outage": {http.StatusServiceUnavailable, ErrMintUnavailable, true},
+		"429 is an outage": {http.StatusTooManyRequests, ErrMintUnavailable, true},
+		"403 is a refusal": {http.StatusForbidden, ErrMintRefused, false},
+		"401 is a refusal": {http.StatusUnauthorized, ErrMintRefused, false},
+		"400 is a refusal": {http.StatusBadRequest, ErrMintRefused, false},
+		"404 is a refusal": {http.StatusNotFound, ErrMintRefused, false},
+	} {
+		t.Run(name, func(t *testing.T) {
+			clock := testClock
+			now := func() time.Time { return clock }
+			host := newMintHost(t, now)
+			client := newTestMintClient(t, host, projectedFile(t, "projected"), now)
+
+			held, err := client.Credential(t.Context())
+			require.NoError(t, err)
+
+			host.refuseWith = arrange.status
+			clock = testClock.Add(13 * time.Minute) // inside the renewal lead
+			served, err := client.Credential(t.Context())
+
+			if arrange.serves {
+				require.NoError(t, err,
+					"a credential with two minutes left survives the host being unreachable")
+				require.Equal(t, held.Token(), served.Token())
+				require.NoError(t, client.Refused())
+				return
+			}
+			require.ErrorIs(t, err, arrange.sentinel)
+			require.Empty(t, served.Token(),
+				"a refusal returns no credential: this process must not serve")
+			require.ErrorIs(t, client.Refused(), ErrMintRefused,
+				"and the refusal is terminal")
+		})
+	}
 }

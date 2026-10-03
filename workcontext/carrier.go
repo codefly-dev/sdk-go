@@ -150,7 +150,7 @@ func SealedInstallation(encoded string) (id string, revision string, err error) 
 	if err != nil {
 		return "", "", err
 	}
-	return seal.InstallationID, strconv.FormatUint(seal.InstallationRevision, 10), nil
+	return seal.GetInstallationId(), strconv.FormatUint(seal.GetInstallationRevision(), 10), nil
 }
 
 // readClaims asks core what a capability is, and reads the claims core has
@@ -192,27 +192,29 @@ func readClaims(encoded string) (*Claims, error) {
 }
 
 // sealOf reads the seal and the sealed operation binding of a capability whose
-// structure core has approved.
+// structure core has approved. Both come back as core's own WIRE messages,
+// already cloned by readClaims.
 //
-// It applies no rule. Every refusal a capability's own bytes can earn —
-// another encoding, a bad envelope, a schema violation, a seal naming no
-// installation, a zero epoch, revision or incarnation, a partial binding, a
-// widening hop, an actor hop with no epoch — is corework.Inspect's answer, with
-// corework's sentinel. TestTheSDKParsePathsAgreeWithCore drives every fixture
-// in core's kit through this path and requires core's declared sentinel for
-// each, so the agreement is tested rather than described.
-func sealOf(encoded string) (*Claims, Seal, *SealedOperationBinding, error) {
+// It applies no rule and copies no field. It used to build core's LIVE Seal
+// type by hand from three wire fields, which is the same conflation this
+// module fixed for OperationBinding and left in place for the seal: a client
+// cannot answer what the issuer holds, and a field core adds to the seal —
+// image_digest is next — would have been silently zero in a value that reads
+// as the issuer's.
+//
+// Every refusal a capability's own bytes can earn — another encoding, a bad
+// envelope, a schema violation, no seal, a seal naming no installation, a zero
+// epoch, revision or incarnation, a partial binding, a widening hop, an actor
+// hop with no epoch — is corework.Inspect's answer, with corework's sentinel.
+// TestTheSDKParsePathsAgreeWithCore drives every fixture in core's kit through
+// this path and requires core's declared sentinel for each, so the agreement is
+// tested rather than described.
+func sealOf(encoded string) (*Claims, *SealedValues, *SealedOperationBinding, error) {
 	claims, err := readClaims(encoded)
 	if err != nil {
-		return nil, Seal{}, nil, err
+		return nil, nil, nil, err
 	}
-	sealed := claims.GetSeal()
-	seal := Seal{
-		InstallationID:       sealed.GetInstallationId(),
-		InstallationRevision: sealed.GetInstallationRevision(),
-		BuildIncarnation:     sealed.GetBuildIncarnation(),
-	}
-	return claims, seal, cloneSealedBinding(claims.GetOperationBinding()), nil
+	return claims, claims.GetSeal(), claims.GetOperationBinding(), nil
 }
 
 // cloneSealedBinding copies the message, so a caller that mutates what it is

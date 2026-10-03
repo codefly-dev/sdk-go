@@ -342,18 +342,22 @@ func TestCachePartitionByViewerSeparatesTheSameIdAtDifferentKinds(t *testing.T) 
 	scopes := []*basev0.WorkScopeV1{scope("document", "read")}
 	parent := a.start(t, mintInput{scopes: scopes})
 
+	// ONE field varies. The earlier version changed kind AND agent together,
+	// so it survived removing kind from the digest — the exact defect the
+	// dynamic review's mutation found in the other two viewer tests, repeated
+	// in their replacement.
+	asHuman, err := a.verifier(t).Verify(context.Background(), a.childAs(t, parent, hopInput{
+		principal: "ambiguous-id", kind: "human", scopes: scopes,
+	}))
+	require.NoError(t, err)
 	asService, err := a.verifier(t).Verify(context.Background(), a.childAs(t, parent, hopInput{
 		principal: "ambiguous-id", kind: "service", scopes: scopes,
 	}))
 	require.NoError(t, err)
-	asAgent, err := a.verifier(t).Verify(context.Background(), a.childAs(t, parent, hopInput{
-		principal: "ambiguous-id", kind: "agent", agent: "agent-manifest-a", scopes: scopes,
-	}))
-	require.NoError(t, err)
 
 	require.NotEqual(t,
+		partition(t, asHuman, ByViewer()).Key,
 		partition(t, asService, ByViewer()).Key,
-		partition(t, asAgent, ByViewer()).Key,
 		"an id is unique within a kind, not across kinds",
 	)
 }

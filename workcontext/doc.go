@@ -16,7 +16,7 @@
 // core signed the deterministic protobuf encoding of the same message. Both
 // forms are "<base64url payload>.<base64url signature>" with an Ed25519
 // signature, so a token from either looked well-formed to the other and then
-// failed SIGNATURE verification — a message that reads like a rotated key or a
+// failed to resolve a key id read out of a payload in the other format — a message that reads like a rotated key or a
 // wrong trust root, and sends everyone to look at keys. The gate test in this
 // package is what stops it coming back; see README.md, "One implementation, and
 // the gate that keeps it that way".

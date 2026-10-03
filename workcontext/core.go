@@ -50,6 +50,19 @@ type OperationBinding = corework.OperationBinding
 // message for that, so there is no second spelling of what travels.
 type SealedOperationBinding = basev0.WorkOperationBindingV1
 
+// SealedValues is the SEAL a capability carries, as core's own message.
+//
+// It is a different type from Seal for the same reason SealedOperationBinding
+// is a different type from OperationBinding: Seal is the LIVE binding as the
+// issuer holds it, and a client filling it by hand from three wire fields is
+// claiming to answer a question only the issuer can. That hand-copy was also a
+// field-by-field dependency on core's struct — core adding a required
+// seal field (image_digest is next) would have left it silently zero, which is
+// the hazard this module already hit once with OperationBinding's PrincipalID.
+//
+// Credential.Seal returns one of these, cloned from what core decoded.
+type SealedValues = basev0.WorkSealV1
+
 // SealSource answers the live values a seal is compared against.
 type SealSource = corework.SealSource
 

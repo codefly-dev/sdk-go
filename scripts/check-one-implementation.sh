@@ -43,7 +43,7 @@ primitives='"crypto"|crypto/ed25519|crypto/ecdsa|crypto/rsa|crypto/dsa|crypto/hm
 # Second encodings of the message. protojson is a complete JSON encoding of a
 # protobuf message on its own, which is how the deleted implementation's payload
 # would come back without an encoding/json import.
-encoders='encoding/protojson|encoding/gob|encoding/asn1|encoding/xml'
+encoders='encoding/protojson|encoding/protowire|known/anypb|encoding/gob|encoding/asn1|encoding/xml'
 status=0
 
 # allowed <path> <pattern> — the exceptions, each with a reason in the comment.
@@ -96,7 +96,7 @@ carrying_in_tree() {
       *.go) ;;
       *) continue ;;
     esac
-    grep -E '^\s*(import\s+)?(_\s+|[A-Za-z0-9_]+\s+)?"' "$path" > "$tmp" 2>/dev/null || : > "$tmp"
+    grep -E '^\s*(import\s+)?([._]\s+|[A-Za-z0-9_]+\s+)?"' "$path" > "$tmp" 2>/dev/null || : > "$tmp"
     local bad
     bad=$(offending_imports "$path" "$tmp")
     if [ -n "$bad" ]; then
@@ -117,7 +117,7 @@ carrying_in_ref() {
       *) continue ;;
     esac
     git cat-file blob "$ref:$path" 2>/dev/null |
-      grep -E '^\s*(import\s+)?(_\s+|[A-Za-z0-9_]+\s+)?"' > "$tmp" 2>/dev/null || : > "$tmp"
+      grep -E '^\s*(import\s+)?([._]\s+|[A-Za-z0-9_]+\s+)?"' > "$tmp" 2>/dev/null || : > "$tmp"
     local bad
     bad=$(offending_imports "$path" "$tmp")
     if [ -n "$bad" ]; then

@@ -1,7 +1,6 @@
 package workcontext
 
 import (
-	"errors"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -59,7 +58,7 @@ var structurallyRefused = map[string]bool{
 // `&Verifier{}` exercises core, because Verifier is an alias of core's type —
 // it is core testing core, and it would have passed unchanged beside the
 // implementation this PR deletes. The SDK's own decision paths are
-// claimsOf/sealOf, SealedInstallation, FromHeaders and credentialFrom, and that
+// readClaims/sealOf, SealedInstallation, FromHeaders and credentialFrom, and that
 // is where a divergence from core can actually live. Three did:
 //
 //   - seal-without-installation: core answers ErrInvalid, because protovalidate
@@ -83,9 +82,10 @@ var structurallyRefused = map[string]bool{
 // described in a comment, so core changing its order breaks this test here
 // rather than surfacing as a mismatched sentinel in somebody's gateway.
 //
-// It does not make this module's parser correct by construction. One exported
-// unverified inspection entry point in core would; that is asked for in
-// core#691 and said plainly in the PR body.
+// It does not make this module's reading correct by construction — core's
+// Inspect does that, and this test is what holds the two in agreement. Core
+// built Inspect when it was asked for; this module applies no structural rule
+// of its own any more.
 func TestTheSDKParsePathsAgreeWithCore(t *testing.T) {
 	fixtures, err := corework.Fixtures(time.Now())
 	require.NoError(t, err)
@@ -172,12 +172,12 @@ func TestNoCarrierAcceptsWhatCoreRefusesOnItsOwnBytes(t *testing.T) {
 			headers.Set(HeaderName, fixture.Token)
 			headers.Set(InstallationIDHeaderName, corework.FixtureInstallation)
 			headers.Set(InstallationRevisionHeaderName, "1")
+			// Core's sentinel, with no alternative: the `|| ErrInvalid` this
+			// used to allow made the assertion vacuous for the eleven of
+			// twelve fixtures whose sentinel IS ErrInvalid.
 			_, headerErr := FromHeaders(headers)
-			require.Error(t, headerErr)
-			require.True(t,
-				errors.Is(headerErr, fixture.Err) || errors.Is(headerErr, ErrInvalid),
-				"FromHeaders refused %q as %v, which is neither core's %v nor a carrier mismatch",
-				fixture.Name, headerErr, fixture.Err)
+			require.ErrorIs(t, headerErr, fixture.Err,
+				"FromHeaders refused %q as %v; core declares %v", fixture.Name, headerErr, fixture.Err)
 		})
 	}
 }
