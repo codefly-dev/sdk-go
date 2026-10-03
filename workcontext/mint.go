@@ -445,6 +445,17 @@ type MintClient struct {
 	// caller left.
 	refreshWanted bool
 
+	// readMu and outstandingRead bound the token-source reads to ONE in flight.
+	//
+	// ProjectedTokenSource takes no context, so a read cannot be cancelled: a
+	// blocked source leaves its goroutine blocked. Starting one per attempt
+	// therefore accumulated them without limit against a source that never
+	// returns, and handed a source that single-flight had been protecting
+	// concurrent calls. A separate mutex from c.mu because a read must not be
+	// held across the client's own lock.
+	readMu          sync.Mutex
+	outstandingRead chan projectedRead
+
 	// id distinguishes this client from any other in the process, so a
 	// Credential can say which one issued it.
 	id uint64
@@ -1043,6 +1054,32 @@ func (c *MintClient) Refused() error {
 // means something.
 func (c *MintClient) mintOnce(ctx context.Context) (Credential, error) {
 	if err := c.options.Authority.Recheck(ctx); err != nil {
+		// TERMINAL, AND I TRIED TO CHANGE THIS AND WAS WRONG. Recording why,
+		// because the next person to audit the latch sites will see the same
+		// thing I did.
+		//
+		// Reading the latch rule against this site, it looks like the
+		// projected-token defect one layer up: Recheck reports any failure to
+		// re-resolve a pinned value, and a momentary failure to read the
+		// runtime's configuration would then permanently stop a process
+		// holding a good credential. So a distinction between "could not read"
+		// and "changed" seemed obviously right.
+		//
+		// It is not available at this layer. A value that has been WITHDRAWN
+		// and a value that is momentarily unreadable both arrive as a failed
+		// lookup — withdrawing an injected variable makes the live read fail,
+		// not return empty — so any split would have classed a real withdrawal
+		// as retryable. And the asymmetry runs the other way here than it does
+		// for a token read: a held credential keeps being SERVED through an
+		// outage, so a withdrawn audience treated as an outage means serving
+		// under authority somebody deliberately removed, until expiry. That is
+		// the security property, and TestAuthorityValueWithdrawnIsAChange says
+		// so in the root module.
+		//
+		// So this stays terminal. The cost is real and is the documented one:
+		// a configuration read that fails transiently stops the process. The
+		// fix for that belongs where the distinction exists — in whatever
+		// resolves the value — not in a guess made here.
 		return Credential{}, fmt.Errorf("%w: %v", ErrMintRefused, err)
 	}
 	audience, err := c.options.Authority.Value(c.options.Audience.Name, c.options.Audience.Key)
@@ -1111,12 +1148,38 @@ type projectedRead struct {
 // goroutine per attempt and attempts are single-flighted and held off; a
 // permanently wedged client is not.
 func (c *MintClient) projectedToken(ctx context.Context) (string, error) {
-	// Buffered, so the goroutine is not held open by a receiver that left.
-	answers := make(chan projectedRead, 1)
-	go func() {
-		token, err := c.options.ProjectedToken.ProjectedToken()
-		answers <- projectedRead{token: token, err: err}
-	}()
+	c.readMu.Lock()
+	if c.outstandingRead == nil {
+		// ONE OUTSTANDING READ, NOT ONE PER ATTEMPT. The previous revision
+		// started a goroutine per attempt and left it blocked on timeout, so a
+		// permanently blocked source accumulated readers indefinitely — at the
+		// maximum-backoff rate, forever — and exposed a source that
+		// single-flight had been protecting to concurrent calls. "One goroutine
+		// per attempt" is not a bound on outstanding goroutines, and the test
+		// that proved one caller returns promptly said nothing about the
+		// second.
+		//
+		// The channel is buffered and is never closed: whichever attempt is
+		// waiting takes the value, and if none is, it sits in the buffer until
+		// the next attempt reads it. A stale token cannot be served from it
+		// because the next attempt that finds no outstanding read starts a
+		// fresh one.
+		answers := make(chan projectedRead, 1)
+		c.outstandingRead = answers
+		go func() {
+			token, err := c.options.ProjectedToken.ProjectedToken()
+			answers <- projectedRead{token: token, err: err}
+			// The read finished, so the slot is free for the next attempt.
+			c.readMu.Lock()
+			if c.outstandingRead == answers {
+				c.outstandingRead = nil
+			}
+			c.readMu.Unlock()
+		}()
+	}
+	answers := c.outstandingRead
+	c.readMu.Unlock()
+
 	select {
 	case answer := <-answers:
 		return answer.token, answer.err
@@ -1171,7 +1234,12 @@ func (c *MintClient) mintLocked(ctx context.Context, audience string) (Credentia
 		ProjectionAudience: c.options.ProjectionAudience,
 	})
 	if err != nil {
-		return Credential{}, fmt.Errorf("%w: encode mint request: %v", ErrMintRefused, err)
+		// LOCAL MISUSE, so ErrInvalid: this package built the value being
+		// encoded, and a failure here is a bug here. Neither of these is
+		// reachable with a validated URL and a struct of two strings, and
+		// latching an unreachable branch is still the wrong classification to
+		// leave written down.
+		return Credential{}, fmt.Errorf("%w: encode mint request: %v", ErrInvalid, err)
 	}
 	requestContext, cancel := context.WithTimeout(ctx, c.options.RequestTimeout)
 	defer cancel()
@@ -1179,7 +1247,7 @@ func (c *MintClient) mintLocked(ctx context.Context, audience string) (Credentia
 		requestContext, http.MethodPost, c.options.URL, bytes.NewReader(body),
 	)
 	if err != nil {
-		return Credential{}, fmt.Errorf("%w: create mint request: %v", ErrMintRefused, err)
+		return Credential{}, fmt.Errorf("%w: create mint request: %v", ErrInvalid, err)
 	}
 	request.Header.Set("Content-Type", "application/json")
 	request.Header.Set("Accept", "application/json")

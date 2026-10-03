@@ -643,17 +643,49 @@ func StreamServerInterceptor(
 // server, and inventing a registration hook to reach one would be a bigger
 // surface than a call a server makes.
 func ValidateMethodSet(served map[string]grpc.ServiceInfo, capabilityBearing []string) error {
+	// STREAMING METHODS ONLY. Every grpc.MethodInfo went into this map,
+	// ignoring IsClientStream and IsServerStream — so for a service with a
+	// unary Read and a streaming Emit, declaring only "/Service/Read" passed
+	// validation, produced a non-empty guarded set, and let Emit reach the raw
+	// handler without guardFor ever being called. That is precisely the
+	// installed-interceptor-that-guards-nothing configuration the empty-set
+	// refusal exists to reject, reached by naming a method that cannot stream.
 	known := map[string]bool{}
+	unary := map[string]bool{}
 	for service, info := range served {
 		for _, method := range info.Methods {
-			known["/"+service+"/"+method.Name] = true
+			full := "/" + service + "/" + method.Name
+			if method.IsClientStream || method.IsServerStream {
+				known[full] = true
+				continue
+			}
+			unary[full] = true
 		}
 	}
-	var unknown []string
+	var unknown, notStreaming []string
 	for _, method := range capabilityBearing {
-		if !known[method] {
+		switch {
+		case known[method]:
+		case unary[method]:
+			notStreaming = append(notStreaming, method)
+		default:
 			unknown = append(unknown, method)
 		}
+	}
+	if len(notStreaming) > 0 {
+		return fmt.Errorf(
+			"%w: these methods are declared capability-bearing for a STREAM interceptor and "+
+				"are unary on this server: %v. A unary method's name in this set guards nothing "+
+				"and makes the set non-empty, which is how an interceptor that enforces nothing "+
+				"passes its own startup check",
+			errStreamMisuse, notStreaming,
+		)
+	}
+	if len(known) == 0 {
+		return fmt.Errorf(
+			"%w: this server registers no streaming method, so a stream interceptor has "+
+				"nothing to guard", errStreamMisuse,
+		)
 	}
 	if len(unknown) > 0 {
 		return fmt.Errorf(

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"go/ast"
 	"net/http"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -485,4 +486,127 @@ func (t *valueReadingTransport) RoundTrip(request *http.Request) (*http.Response
 	default:
 	}
 	return t.inner.RoundTrip(request) //nolint:wrapcheck // a transport returns the inner error
+}
+
+// THE LATCH SITES, AUDITED, with the one candidate examined and REJECTED.
+//
+// Reading the one-latch rule against mintOnce, Authority.Recheck looked like
+// the projected-token defect one layer up: any failure to re-resolve a pinned
+// value latches, so a momentary configuration read failure would permanently
+// stop a healthy process. I changed it, and the root module's
+// TestAuthorityValueWithdrawnIsAChange rejected the change — correctly.
+//
+// A withdrawn value and an unreadable one arrive identically (withdrawing an
+// injected variable makes the live read FAIL, it does not return empty), and
+// the asymmetry runs the other way here: a held credential keeps being served
+// through an outage, so a withdrawn audience classed as an outage means serving
+// under authority somebody removed, until expiry.
+//
+// What this asserts is the classification as it stands, so the next audit finds
+// the argument instead of repeating the attempt.
+func TestThePinnedAuthorityLatchesAndTheRestDoNot(t *testing.T) {
+	for name, probe := range map[string]struct {
+		install func(*mintHost, *MintClient)
+		latches bool
+	}{
+		// The pin: terminal, deliberately, and argued above.
+		"the pinned authority did not re-check": {
+			install: func(host *mintHost, _ *MintClient) {
+				host.pin.set(testAudience, errors.New("audience changed under a running process"))
+			},
+			latches: true,
+		},
+		// Everything a host or a middlebox does that is not 401/403: an outage.
+		"a 200 with no capability in it": {
+			install: func(host *mintHost, _ *MintClient) {
+				host.answer = &cannedAnswer{status: http.StatusOK, body: `{}`}
+			},
+		},
+		"a 503": {
+			install: func(host *mintHost, _ *MintClient) { host.refuseWith = http.StatusServiceUnavailable },
+		},
+		// And the two enumerated refusals, so this is not green by never
+		// latching.
+		"a 401": {
+			install: func(host *mintHost, _ *MintClient) { host.refuseWith = http.StatusUnauthorized },
+			latches: true,
+		},
+		"a 403": {
+			install: func(host *mintHost, _ *MintClient) { host.refuseWith = http.StatusForbidden },
+			latches: true,
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			clock := &movableClock{at: testClock}
+			host := newMintHost(t, clock.now)
+			client := newTestMintClient(t, host, projectedFile(t, "projected"), clock.now)
+			probe.install(host, client)
+
+			_, err := client.Credential(context.Background())
+			require.Error(t, err)
+
+			if probe.latches {
+				require.ErrorIs(t, client.Refused(), ErrMintRefused,
+					"this is an enumerated refusal and Refused() must say so")
+				return
+			}
+			require.NoError(t, client.Refused(), "only an enumerated refusal is terminal")
+
+			host.answer = nil
+			host.refuseWith = 0
+			clock.set(clock.at.Add(time.Minute))
+			credential, err := client.Credential(context.Background())
+			require.NoError(t, err, "the host recovered and the client did not")
+			require.NotEmpty(t, credential.Token())
+		})
+	}
+}
+
+// CODEX 6: the timeout fix left an UNBOUNDED population of abandoned readers.
+//
+// ProjectedTokenSource takes no context, so a read cannot be cancelled and a
+// blocked source leaves its goroutine blocked. One goroutine per ATTEMPT is not
+// a bound on outstanding goroutines: against a source that never returns they
+// accumulate forever, at the maximum-backoff rate, and a source that
+// single-flight had been protecting gets concurrent calls. The committed test
+// proved one caller returns promptly and said nothing about the second.
+func TestABlockedTokenSourceIsReadOnceNoMatterHowManyAttempts(t *testing.T) {
+	clock := &movableClock{at: testClock}
+	host := newMintHost(t, clock.now)
+	source := &countingBlockedSource{released: make(chan struct{})}
+	t.Cleanup(func() { close(source.released) })
+	client := newTestMintClient(t, host, projectedFile(t, "projected"), clock.now,
+		func(options *MintOptions) {
+			options.ProjectedToken = source
+			options.RequestTimeout = 60 * time.Millisecond
+		})
+
+	// SIX attempts, each timing out, with the clock moved past every hold-off
+	// so each one really starts.
+	for attempt := range 6 {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		_, err := client.Credential(ctx)
+		cancel()
+		require.ErrorIs(t, err, ErrMintUnavailable, "attempt %d", attempt)
+		clock.set(clock.at.Add(10 * time.Minute))
+	}
+
+	require.EqualValues(t, 1, source.calls.Load(),
+		"six attempts against a blocked source started %d reads; a source that cannot be "+
+			"cancelled must be read once and waited on, or the readers accumulate without "+
+			"limit and a source single-flight was protecting gets concurrent calls",
+		source.calls.Load())
+	require.NoError(t, client.Refused(), "and none of it latches")
+}
+
+// countingBlockedSource blocks and counts how many times it was entered.
+type countingBlockedSource struct {
+	calls    atomic.Int64
+	released chan struct{}
+}
+
+func (s *countingBlockedSource) ProjectedToken() (string, error) {
+	s.calls.Add(1)
+	<-s.released
+	return "projected", nil
 }

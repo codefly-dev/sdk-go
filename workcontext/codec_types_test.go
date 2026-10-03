@@ -58,6 +58,23 @@ var codecFunctions = map[string][]string{
 	},
 }
 
+// envelopeDecoders are the base64 methods that OPEN an envelope, by package and
+// name, resolved as objects.
+//
+// The syntactic rule required the receiver to be written as a selector —
+// `base64.RawURLEncoding.DecodeString(…)` — so one assignment walked past it:
+//
+//	var payloadEncoding = base64.RawURLEncoding
+//	func openPayload(s string) ([]byte, error) { return payloadEncoding.DecodeString(s) }
+//
+// in the one file allowed to reach for base64. go/types answers the method's
+// OBJECT regardless of how the receiver was spelled, which is the same
+// correction the codec rule needed and for the same reason: a spelling was
+// standing in for a kind.
+var envelopeDecodeMethods = map[string][]string{
+	"encoding/base64": {"Decode", "DecodeString", "AppendDecode", "NewDecoder"},
+}
+
 // codecIndirectionObjects are the functions that legitimately apply a codec to
 // a value whose type is not statically known, keyed on PACKAGE PATH and the
 // function's own name — which with go/types identifies the object rather than
@@ -199,6 +216,36 @@ func inspectCodecUses(loaded *packages.Package, file *ast.File, path string) []s
 	//
 	// There is no row here and there is not going to be one: these four take a
 	// caller's own messages, never a capability.
+	// BASE64 MAY ENCODE AND MAY NEVER DECODE, by object. The file allowed to
+	// build a cache key is the only file that may reach base64 at all, and
+	// decoding there plus a proto.Unmarshal is the whole of a second parser.
+	ast.Inspect(file, func(node ast.Node) bool {
+		selector, ok := node.(*ast.SelectorExpr)
+		if !ok {
+			return true
+		}
+		object, ok := loaded.TypesInfo.Uses[selector.Sel]
+		if !ok {
+			return true
+		}
+		method, ok := object.(*types.Func)
+		if !ok || method.Pkg() == nil {
+			return true
+		}
+		if !slices.Contains(envelopeDecodeMethods[method.Pkg().Path()], method.Name()) {
+			return true
+		}
+		findings = append(findings, fmt.Sprintf(
+			"%s calls %s.\n"+
+				"This file may ENCODE with base64 — it builds a cache key — and may never\n"+
+				"DECODE. base64 decoding plus proto.Unmarshal is the entire second parser this\n"+
+				"module deleted; corework.Inspect opens the envelope and hands back the claims.\n"+
+				"Resolved as an OBJECT, so assigning the encoding to a variable first does not\n"+
+				"change the answer.",
+			path, method.FullName()))
+		return true
+	})
+
 	ast.Inspect(file, func(node ast.Node) bool {
 		call, ok := node.(*ast.CallExpr)
 		if !ok {
@@ -812,6 +859,39 @@ func (other) Handle(raw []byte, m proto.Message) error { return proto.Unmarshal(
 						"every method spelled the same")
 			})
 		}
+	})
+
+	// CODEX 2: base64 DECODING through an ALIASED RECEIVER, in the one file
+	// allowed to reach base64 at all. The syntactic rule required the receiver
+	// to be written as `base64.RawURLEncoding`, so one assignment walked past
+	// it — a spelling standing in for a kind, the same correction the codec
+	// rule needed.
+	t.Run("base64 decoding through an aliased receiver", func(t *testing.T) {
+		loaded, file := typeCheckedProbe(t, `package probe
+
+import "encoding/base64"
+
+var payloadEncoding = base64.RawURLEncoding
+
+func openPayload(s string) ([]byte, error) { return payloadEncoding.DecodeString(s) }
+`)
+		findings := inspectCodecUses(loaded, file, "workcontext/cache_partition.go")
+		require.NotEmpty(t, findings, "the file that may ENCODE a cache key may never DECODE")
+		require.Contains(t, strings.Join(findings, "\n"), "may never")
+	})
+
+	// And the shapes that file legitimately uses stay legitimate, which is the
+	// mutation guard for the case above.
+	t.Run("encoding a cache key is still permitted", func(t *testing.T) {
+		loaded, file := typeCheckedProbe(t, `package probe
+
+import "encoding/base64"
+
+var payloadEncoding = base64.RawURLEncoding
+
+func key(raw []byte) string { return payloadEncoding.EncodeToString(raw) }
+`)
+		require.Empty(t, inspectCodecUses(loaded, file, "workcontext/cache_partition.go"))
 	})
 
 	// A CAPABILITY HANDED INTO A PERMITTED INDIRECTION. The exemption is for

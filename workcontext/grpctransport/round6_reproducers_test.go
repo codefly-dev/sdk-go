@@ -182,3 +182,32 @@ func TestACapabilityThatExpiresMidStreamTellsTheClientToMintAgain(t *testing.T) 
 			"arrived as codes.Internal, which tells a client the server is broken")
 	require.Contains(t, status.Convert(err).Message(), "expired")
 }
+
+// CODEX 7: a set of only UNARY methods passed validation, so a streaming method
+// reached the raw handler with guardFor never called — the
+// interceptor-that-guards-nothing configuration, reached by naming a method
+// that cannot stream.
+func TestAUnaryMethodNameGuardsNothingAndIsRefused(t *testing.T) {
+	served := map[string]grpc.ServiceInfo{
+		streamService: {Methods: []grpc.MethodInfo{
+			{Name: "Emit", IsServerStream: true},
+			{Name: "Read"},
+		}},
+	}
+
+	require.NoError(t, ValidateMethodSet(served, []string{streamMethod}),
+		"the streaming method this server serves is declared correctly")
+
+	err := ValidateMethodSet(served, []string{"/" + streamService + "/Read"})
+	require.Error(t, err, "a unary method's name makes the set non-empty and guards nothing")
+	require.ErrorIs(t, err, workcontext.ErrInvalid)
+	require.Contains(t, err.Error(), "are unary on this server")
+	require.Contains(t, err.Error(), "Read",
+		"the refusal must name the method, because the defect is that it looks declared")
+
+	// A server with no streaming method at all has nothing for a stream
+	// interceptor to do, which is also not something to express by omission.
+	require.Error(t, ValidateMethodSet(
+		map[string]grpc.ServiceInfo{streamService: {Methods: []grpc.MethodInfo{{Name: "Read"}}}},
+		[]string{"/" + streamService + "/Read"}))
+}
