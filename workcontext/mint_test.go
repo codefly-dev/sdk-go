@@ -13,6 +13,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -29,6 +30,12 @@ import (
 // It is served over TLS, because that is the only way the client will talk to
 // it: the projected service-account token is a bearer credential on this
 // request, and MintOptions.URL refuses anything but https.
+// mintHost records what went wrong on the SERVER's goroutine rather than
+// calling require there. require.NoError inside an http.Handler calls FailNow
+// off the test goroutine, which Go documents as undefined: it stops the
+// handler's goroutine and lets the test carry on, so a failed assertion in the
+// host could pass the test. faults is asserted from the test goroutine by
+// assertNoHostFaults, which every test using a host runs through t.Cleanup.
 type mintHost struct {
 	t         *testing.T
 	server    *httptest.Server
@@ -56,6 +63,14 @@ type mintHost struct {
 	pin *testPin
 	// before runs at the top of every request, so a test can hold one open.
 	before func()
+
+	// replay makes the host IDEMPOTENT: it answers every request with this
+	// exact token. A real mint endpoint that deduplicates by projected token
+	// does the same thing.
+	replay string
+
+	faultsMu sync.Mutex
+	faults   []string
 }
 
 func newMintHost(t *testing.T, now func() time.Time) *mintHost {
@@ -67,6 +82,11 @@ func newMintHost(t *testing.T, now func() time.Time) *mintHost {
 	}
 	host.server = httptest.NewTLSServer(http.HandlerFunc(host.handle))
 	t.Cleanup(host.server.Close)
+	t.Cleanup(func() {
+		host.faultsMu.Lock()
+		defer host.faultsMu.Unlock()
+		require.Empty(t, host.faults, "the mint host hit something it should not have")
+	})
 	return host
 }
 
@@ -109,13 +129,25 @@ func (h *mintHost) handle(writer http.ResponseWriter, request *http.Request) {
 	// The host mints with core's Authority, because that is what the host does.
 	// A test endpoint that assembled a token itself would be a second
 	// implementation wearing a test's clothes.
-	token := h.authority.startAt(h.t, mintedAt, mintInput{audience: audience, binding: h.binding}, lifetime)
+	token, err := h.authority.tryStartAt(mintedAt, mintInput{audience: audience, binding: h.binding}, lifetime)
+	if err != nil {
+		// Recorded and answered with a 503, never asserted here: this is the
+		// server's goroutine.
+		h.fault("mint %s for %s: %v", mintedAt, lifetime, err)
+		writer.WriteHeader(http.StatusServiceUnavailable)
+		return
+	}
+	if h.replay != "" {
+		token = h.replay
+	}
 	response := mintResponse{WorkContext: token, InstallationID: testInstallation}
 	if h.echoWrong {
 		response.InstallationID = "installation-the-host-did-not-seal"
 	}
 	writer.Header().Set("Content-Type", "application/json")
-	require.NoError(h.t, json.NewEncoder(writer).Encode(response))
+	if err := json.NewEncoder(writer).Encode(response); err != nil {
+		h.fault("encode the mint response: %v", err)
+	}
 }
 
 func readAll(request *http.Request) ([]byte, error) {
@@ -465,14 +497,21 @@ func TestRefreshIsTiedToTheRefusedCredential(t *testing.T) {
 
 	// A Credential this client never issued is not something to refresh
 	// against: it names no generation of this client's life.
+	// Local misuse is ErrInvalid, not ErrMintRefused. They were the same
+	// sentinel, so errors.Is(err, ErrMintRefused) was true for a caller that
+	// passed a zero Credential while Refused() stayed nil — the two ways of
+	// asking "is this client refused" disagreeing, over a programmer error.
 	_, err = client.Refresh(t.Context(), Credential{})
-	require.ErrorIs(t, err, ErrMintRefused)
+	require.ErrorIs(t, err, ErrInvalid)
+	require.NotErrorIs(t, err, ErrMintRefused)
 	require.ErrorContains(t, err, "the credential that was refused")
+	require.NoError(t, client.Refused(), "misuse must not latch this client")
 
 	fresh := newTestMintClient(t, host, projectedFile(t, "projected"), now)
 	_, err = fresh.Refresh(t.Context(), second)
-	require.ErrorIs(t, err, ErrMintRefused)
-	require.ErrorContains(t, err, "issued no credential")
+	require.ErrorIs(t, err, ErrInvalid)
+	require.ErrorContains(t, err, "issued by another mint client",
+		"a credential from one client names a generation that means nothing to another")
 }
 
 // A refresh rechecks the pin and re-reads the projection, exactly as a renewal
@@ -606,50 +645,53 @@ func TestMintRefusesACredentialThatIsUnusableOnArrival(t *testing.T) {
 	_, err := client.Credential(t.Context())
 	require.NoError(t, err, "a credential minted inside core's skew is usable")
 
-	// There is no client-side lifetime ceiling any more, and that is core's
-	// cap arriving rather than a check being dropped. A review asked for one
-	// because core checked only that a TTL was positive; this carried one,
-	// labelled a stopgap with its own condition — it goes when core has a cap.
-	// Core has one now (Authority.MaxTTL, DefaultMaxTTL of an hour), so a
-	// credential longer than the host permits is refused where it is MINTED,
-	// which is the side of the wire that binds every client rather than the
-	// ones that opted in.
+	// THE CLIENT-SIDE CEILING, which has now been deleted once on advice and
+	// restored once on review, so what it is for is worth stating exactly.
 	//
-	// What this test asserts about it is therefore core's constant, not a
-	// number of ours: a host cannot configure its way past it without a
-	// reviewer seeing the configuration.
-	// The ceiling is BACK, as defence in depth, and this asserts what THIS
-	// client does rather than what core's constant says: a host that raises
-	// its own MaxTTL past what this process will hold is refused here.
+	// At core cd443989 the argument for it was that Authority.MaxTTL took any
+	// positive value and Verify bounded no lifetime. Core 72d72eb2 closed both:
+	// MaxTTLCeiling is absolute, maxTTL() clamps to it, and Verify refuses a
+	// lifetime over it. That is the falsifiable condition this client stated
+	// when it declined to drop the ceiling — and it is now met, so the
+	// REASON changes and the check stays, for a reason neither of core's two
+	// bounds covers:
 	//
-	// Core's cap is the primary one and this is the second layer. Deleting
-	// this layer on the strength of core having a cap was a weakening, because
-	// MaxTTL is configurable with no ceiling of its own and nothing bounds a
-	// lifetime at use.
+	// THIS CLIENT NEVER VERIFIES A SIGNATURE. It cannot: it is the party being
+	// minted for, not a receiver. It reads the window through corework.Inspect,
+	// which is structural only and checks no signature. So core's Start bounds
+	// an honest MINTER and core's Verify bounds a RECEIVER on a current core;
+	// neither bounds what this process holds in memory and presents for the
+	// rest of its life. That is this check's whole subject.
+	//
+	// It therefore defaults to core's own constant rather than a number of its
+	// own — one rule, enforced at the layer that holds the credential — and a
+	// deployment may lower it, which is what this asserts. A 30-day window is
+	// no longer constructible through core at all, which is the measurement
+	// that made this test change shape.
+	require.Equal(t, corework.MaxTTLCeiling, defaultMaxCredentialLifetime,
+		"the client's default ceiling is core's constant, not a second number")
+
 	host = newMintHost(t, now)
-	host.authority.core.MaxTTL = 30 * 24 * time.Hour // a host that raised it
-	month := 30 * 24 * time.Hour
-	host.mintedAt, host.mintedFor = &monthStart, &month
-	client = newTestMintClient(t, host, projectedFile(t, "projected"), now)
+	quarterHour := 15 * time.Minute
+	host.mintedAt, host.mintedFor = &testClockStart, &quarterHour
+	client = newTestMintClient(t, host, projectedFile(t, "projected"), now,
+		func(options *MintOptions) { options.MaxCredentialLifetime = 5 * time.Minute })
 	_, err = client.Credential(t.Context())
 	require.ErrorIs(t, err, ErrMintRefused)
 	require.ErrorContains(t, err, "holds one for at most")
 
-	// And it is configurable, because what a process should hold is the
-	// deployment's call — the point is that there IS one.
+	// And the same host is fine for a process that permits the window it mints.
 	host = newMintHost(t, now)
-	host.authority.core.MaxTTL = 30 * 24 * time.Hour
-	week := 7 * 24 * time.Hour
-	host.mintedAt, host.mintedFor = &monthStart, &week
+	host.mintedAt, host.mintedFor = &testClockStart, &quarterHour
 	client = newTestMintClient(t, host, projectedFile(t, "projected"), now,
-		func(options *MintOptions) { options.MaxCredentialLifetime = 14 * 24 * time.Hour })
+		func(options *MintOptions) { options.MaxCredentialLifetime = time.Hour })
 	credential, err := client.Credential(t.Context())
 	require.NoError(t, err)
-	require.Equal(t, testClock.Add(week), credential.ExpiresAt())
+	require.Equal(t, testClock.Add(quarterHour), credential.ExpiresAt())
 }
 
-// monthStart is an addressable testClock, for the host overrides above.
-var monthStart = testClock
+// testClockStart is an addressable testClock, for the host overrides above.
+var testClockStart = testClock
 
 // A refusal the host will give again is not retryable, and an outage is. A
 // client that confused them would either spin against a permanent refusal or
@@ -678,17 +720,38 @@ func TestMintSeparatesARefusalFromAnOutage(t *testing.T) {
 // turn "the token is missing" into the host's "this build is not approved",
 // which is the wrong thing to go looking for.
 func TestProjectedTokenFileRefusesWhatIsNotAToken(t *testing.T) {
-	for name, path := range map[string]ProjectedTokenFile{
-		"no path":     "",
-		"absent file": ProjectedTokenFile(filepath.Join(t.TempDir(), "missing")),
-		"empty file":  ProjectedTokenFile(projectedFile(t, "")),
-		"whitespace":  ProjectedTokenFile(projectedFile(t, "   \n\t ")),
+	// Each fault gets the sentinel its RECOVERY needs, which is the whole
+	// point: ErrMintRefused latches and permanently stops the process. A
+	// momentary local fault classified that way stopped a process holding a
+	// perfectly good credential, and it stayed stopped after the fault
+	// cleared.
+	for name, fault := range map[string]struct {
+		path     ProjectedTokenFile
+		sentinel error
+		why      string
+	}{
+		"no path": {"", ErrInvalid,
+			"misconfiguration: no request was made and no host refused anything"},
+		"absent file": {ProjectedTokenFile(filepath.Join(t.TempDir(), "missing")), ErrMintUnavailable,
+			"the projection is mounted and rotated under the process; absent is a moment, not a verdict"},
+		"empty file": {ProjectedTokenFile(projectedFile(t, "")), ErrMintUnavailable,
+			"an empty read is the middle of a rotation"},
+		"whitespace": {ProjectedTokenFile(projectedFile(t, "   \n\t ")), ErrMintUnavailable,
+			"same as empty once trimmed"},
 	} {
 		t.Run(name, func(t *testing.T) {
-			_, err := path.ProjectedToken()
-			require.ErrorIs(t, err, ErrMintRefused)
+			_, err := fault.path.ProjectedToken()
+			require.ErrorIs(t, err, fault.sentinel, fault.why)
+			require.NotErrorIs(t, err, ErrMintRefused,
+				"a local fault must not latch as a host refusal")
 		})
 	}
+
+	// A file that is there and is the wrong thing IS a refusal: the host would
+	// refuse it, and the next read returns the same bytes.
+	oversized := strings.Repeat("x", maxProjectedTokenBytes+1)
+	_, err := ProjectedTokenFile(projectedFile(t, oversized)).ProjectedToken()
+	require.ErrorIs(t, err, ErrMintRefused)
 
 	token, err := ProjectedTokenFile(projectedFile(t, "  projected-with-trailing-newline\n")).ProjectedToken()
 	require.NoError(t, err)
@@ -802,7 +865,8 @@ func TestTheMintTransportIsOwnedByTheClient(t *testing.T) {
 	require.True(t, ok, "the client builds a concrete *http.Transport, not a wrapper it cannot reason about")
 	require.NotNil(t, transport.TLSClientConfig, "a nil TLS config would mean the package defaults")
 	require.False(t, transport.TLSClientConfig.InsecureSkipVerify)
-	require.EqualValues(t, tls.VersionTLS12, transport.TLSClientConfig.MinVersion)
+	require.EqualValues(t, tls.VersionTLS13, transport.TLSClientConfig.MinVersion,
+		"the projected service-account token goes over 1.3 or it does not go")
 	require.Nil(t, transport.DialTLSContext,
 		"a custom TLS dialer bypasses TLSClientConfig entirely")
 	require.Nil(t, transport.DialContext)
@@ -1253,4 +1317,11 @@ func TestOnlyAnOutageServesTheHeldCredential(t *testing.T) {
 				"and the refusal is terminal")
 		})
 	}
+}
+
+// fault records a host-side problem for the test goroutine to assert.
+func (h *mintHost) fault(format string, args ...any) {
+	h.faultsMu.Lock()
+	defer h.faultsMu.Unlock()
+	h.faults = append(h.faults, fmt.Sprintf(format, args...))
 }

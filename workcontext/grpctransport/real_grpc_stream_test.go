@@ -63,13 +63,22 @@ func serveGuarded(
 	handler func(stream grpc.ServerStream) error,
 ) *grpc.ClientConn {
 	t.Helper()
+	return serveWith(t, StreamServerInterceptor(
+		func(context.Context, *grpc.StreamServerInfo) (*workcontext.StreamGuard, error) {
+			return guard, nil
+		}), handler)
+}
+
+// serveWith is serveGuarded with the interceptor supplied, so a test can drive
+// the interceptor's own decisions rather than only the wrapper's.
+func serveWith(
+	t *testing.T,
+	interceptor grpc.StreamServerInterceptor,
+	handler func(stream grpc.ServerStream) error,
+) *grpc.ClientConn {
+	t.Helper()
 	listener := bufconn.Listen(1024 * 1024)
-	server := grpc.NewServer(grpc.StreamInterceptor(
-		StreamServerInterceptor(
-			func(context.Context, *grpc.StreamServerInfo) (*workcontext.StreamGuard, error) {
-				return guard, nil
-			}),
-	))
+	server := grpc.NewServer(grpc.StreamInterceptor(interceptor))
 	server.RegisterService(&grpc.ServiceDesc{
 		ServiceName: streamService,
 		HandlerType: (*any)(nil),
@@ -173,21 +182,35 @@ func TestARealHandlerCannotSendUnderRevokedAuthority(t *testing.T) {
 	authority.revoked.Store(true)
 
 	var attempts, refusals int
+	faults := &handlerFaults{}
 	connection := serveGuarded(t, authority.guard(t), func(stream grpc.ServerStream) error {
-		// Whatever this handler reaches for, it is the wrapper.
-		require.IsType(t, &GuardedServerStream{}, stream)
+		// Whatever this handler reaches for, it is the wrapper. Recorded
+		// rather than asserted: require inside a handler calls FailNow on the
+		// SERVER's goroutine, which stops that goroutine and lets the test
+		// carry on, so a failed assertion here could pass the test.
+		if _, ok := stream.(*GuardedServerStream); !ok {
+			faults.record("the handler was handed %T, not the wrapper", stream)
+		}
 		for range 3 {
 			attempts++
 			if err := stream.SendMsg(wrapperspb.String("message under revoked authority")); err != nil {
 				refusals++
 			}
 		}
+		// Every route out, not only SendMsg: a queued header and a queued
+		// trailer under revoked authority.
+		if err := stream.SetHeader(metadata.Pairs("leaked-header", "yes")); err == nil {
+			faults.record("SetHeader was accepted under revoked authority")
+		}
 		stream.SetTrailer(metadata.Pairs("leaked", "yes"))
 		return nil
 	})
 
-	received, trailer, err := drain(t, connection)
+	header, trailer, err := clientSaw(t, connection)
+	received := 0
+	faults.assert(t)
 	require.Error(t, err)
+	require.Empty(t, header.Get("leaked-header"))
 	require.Zero(t, received, "a message left under revoked authority")
 	require.Empty(t, trailer.Get("leaked"))
 	require.Equal(t, attempts, refusals, "every send under revoked authority was refused")

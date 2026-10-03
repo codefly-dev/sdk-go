@@ -268,7 +268,7 @@ mutable `http.DefaultTransport`; a wrapping `RoundTripper` is opaque; a
 `*http.Transport` pointer can turn verification off after construction, because
 copying an `http.Client` shares its `Transport`. Each of those sent the
 projection over a channel nobody authenticated. So the client builds the
-transport — TLS 1.2 minimum, verification on, no custom dialer, no proxy — and
+transport — TLS 1.3 minimum, verification on, no custom dialer, no proxy — and
 refuses redirects, because Go's own client forwards `Authorization` across a
 redirect to the same host.
 
@@ -321,34 +321,58 @@ rather than on the client's mutex, so a caller whose `ctx` is cancelled stops
 waiting instead of blocking on a request it is not making. After a failure the
 next attempt is **held off**, doubling to a minute. Without that, a host
 answering 503 received one request per caller per call — the heartbeat under
-another name, arriving exactly when the host was least able to serve it. The
-hold-off bounds `Refresh` too, which the generation check alone does not: a
-receiver whose live state lags refuses each FRESH credential, and every refusal
-is a new generation.
+another name, arriving exactly when the host was least able to serve it.
 
-**There are two lifetime ceilings, deliberately.** Core's `Authority.MaxTTL`
-(one hour by default) is the primary one, at the minter where it binds every
-client. `MintOptions.MaxCredentialLifetime` (24h by default) is the second, at
-the process that holds the credential.
+**The request itself is detached from the caller that started it,** bounded by
+`RequestTimeout`. It used to run on the leader's own context, and a cancelled
+leader was then a case of its own — no failure, so no hold-off. Measured: with
+twenty callers whose deadlines were shorter than a degraded host's latency,
+every call became the new leader and the host received **twenty requests**,
+each of which it may complete and audit while this process discards it. A
+refusal arriving just after its caller gave up was discarded too, so the next
+caller presented the projected token again. Detached, the request completes
+once, is classified once, and installs its result for everybody — and the same
+twenty callers produce **one** request.
 
-Keeping both is a decision taken twice. It was deleted once on core's advice
-that the cap now lives at the minter, and a review was right that deleting it
-was a **weakening**: `MaxTTL` has no ceiling of its own — core honours any
-positive value, and its own error says *"raise `Authority.MaxTTL` deliberately
-if that is wanted"* — and core's `Verify` does not bound a lifetime at use at
-all. So a misconfigured host minting month-long credentials would be refused by
-nothing else. Two layers enforcing one rule is not the duplication this module
-exists to prevent: that was two *implementations* of one decision reaching
-different answers.
+**`Refresh` has its own rate limit, and it decays.** The generation check does
+not bound it: a receiver whose live state lags refuses each FRESH credential, so
+every refusal is a new generation. The bound is a token bucket — a burst of
+three, refilling one per minute — which bounds the steady state to one mint a
+minute while answering an honest revocation at once. It used to be the failure
+backoff computed from the lifetime refresh count, which never decayed: after a
+few legitimate refreshes the bound was a minute *permanently*, so a refresh days
+later still waited for a receiver that had lagged that morning. That is a tax,
+not a rate limit.
 
-**What follows is the ceiling's effect on #47's arithmetic:** A
-review asked for a client-side cap because core checked only that a TTL was
-positive; this carried one, labelled a stopgap whose condition was "it goes
-when core has a cap". Core has one — `Authority.MaxTTL`, defaulting to
-`DefaultMaxTTL` of **one hour** — so the cap is at the minter, where it binds
-every client rather than the ones that opted in, and a host raising it does so
-in configuration a reviewer sees. A second ceiling here at a different number
-would be the two-places-one-rule failure this whole change is about.
+**There are two lifetime ceilings, deliberately, and they are ONE NUMBER.**
+Core's `MaxTTLCeiling` (24h) is absolute: `Authority.maxTTL` clamps to it,
+`Start` refuses a TTL beyond it, and `Verify` refuses a credential whose
+lifetime exceeds it. `MintOptions.MaxCredentialLifetime` defaults to **that same
+constant**, read from core, so there is no second number to keep in step — a
+deployment may lower it, and configuring it above core's ceiling is refused at
+construction.
+
+This check has now been deleted once on advice and restored once on review, so
+what it is for is worth stating plainly. The earlier argument was that
+`Authority.MaxTTL` took any positive value and `Verify` bounded no lifetime;
+core `72d72eb2` closed both, which is exactly the falsifiable condition this
+module named when it declined to drop the ceiling. The reason changes and the
+check stays, for something neither of core's bounds covers:
+
+**this client never verifies a signature.** It cannot — it is the party the
+credential is minted *for*, not a receiver — so it reads the window through
+`corework.Inspect`, which is structural and checks no signature at all. Core's
+`Start` bounds an honest *minter*; core's `Verify` bounds a *receiver* running a
+current core. What this process holds in memory and presents for the rest of its
+life is bounded here or nowhere.
+
+**The ceiling's effect on #47's arithmetic:** at `Authority.MaxTTL`'s default
+of **one hour**, a process that runs for an hour costs one mint and one renewal
+— so the issue's "one audit event per hour" criterion is not reachable by
+holding a credential longer unless the host raises `MaxTTL`, within core's 24h
+absolute ceiling. That is the host's configuration decision and this module
+cannot make it; it is named in the pull request as an open question for the
+issue's owner rather than silently satisfied.
 
 **That ceiling changes #47's acceptance arithmetic, so read it before sizing.**
 One mint across an hour of calls needs a lifetime of at least
@@ -528,17 +552,42 @@ guard, err := workcontext.NewStreamGuard(workcontext.StreamGuardOptions{
     Recheck: workcontext.RecheckWith(verifier, verified),
 })
 
-// And let the STREAM enforce it, rather than remembering to call it.
-guarded, err := grpctransport.Guard(stream, guard)
-if err != nil {
-    return err
-}
-for message := range messages {
-    if err := guarded.SendMsg(message); err != nil {
-        return err // terminated; do not resume
+// And let the SERVER enforce it, rather than each handler remembering to.
+server := grpc.NewServer(grpc.StreamInterceptor(
+    grpctransport.StreamServerInterceptor(
+        func(ctx context.Context, info *grpc.StreamServerInfo) (*workcontext.StreamGuard, error) {
+            // Whether a method is capability-bearing is static, and the FIRST
+            // answer for a method is binding.
+            if !capabilityBearing[info.FullMethod] {
+                return nil, nil
+            }
+            verified := verifiedFor(ctx) // from the server's own stream setup
+            return workcontext.NewStreamGuard(workcontext.StreamGuardOptions{
+                Recheck: workcontext.RecheckWith(verifier, verified),
+            })
+        }),
+))
+
+// The handler then just sends. It is handed the wrapper, it has no route to
+// the raw stream, and the interceptor calls Finish.
+func (s *server) Emit(_ *pb.Request, stream pb.Streamer_EmitServer) error {
+    for message := range messages {
+        if err := stream.Send(message); err != nil {
+            return err // terminated; do not resume
+        }
     }
+    return nil
 }
 ```
+
+**Use the interceptor, not `Guard` directly.** This README's previous recipe
+called `Guard` in the handler, which leaves the original stream in scope, never
+calls `Finish` — so every trailer the handler set was silently dropped — and
+cannot replace the context, so the package-level `grpc.SetHeader`,
+`grpc.SendHeader` and `grpc.SetTrailer` still wrote straight to the transport.
+`Guard` remains exported for a server doing its own wrapping; if you use it,
+you must call `Finish` and must pass the wrapper's `Context` to anything that
+writes metadata.
 
 `grpctransport.Guard` wraps a `grpc.ServerStream` so `SendMsg` **is** the
 re-check followed by the send. A guard on its own is advice: `BeforeSend` has to
@@ -557,6 +606,31 @@ not ask" as a pass is how a stream outlives its authority with clean logs.
 Termination is sticky: a caller that loops past the first refusal is not handed
 a second chance to emit, and the authority coming back does not resurrect the
 stream.
+
+### There are three routes out of a stream, not one
+
+Each of these was a live bypass of the wrapper, and each was found only after
+the previous one was closed. They are listed together because the lesson is that
+"the handler calls our method" was never the only way metadata leaves.
+
+| Route | What happened | What closes it |
+| --- | --- | --- |
+| the embedded field | the wrapper embedded `grpc.ServerStream` publicly, so `stream.(*GuardedServerStream).ServerStream` sent with **no check at all** — a real gRPC probe delivered a message under revoked authority with zero re-checks | the stream is a private field and every interface method is forwarded by hand |
+| when gRPC sends | gRPC sends trailers, and flushes a pending header, when the **handler returns** — so a handler could queue, have authority revoked, return, and the client received it. Measured over bufconn: a header queued under authority arrived at the client *after* `Finish` had refused | headers **and** trailers are held in the wrapper and released only by `Finish`, after one last check |
+| the context | `grpc.SetHeader`, `grpc.SendHeader` and `grpc.SetTrailer` are package-level functions that resolve a `grpc.ServerTransportStream` out of the context and write to the transport. Measured over bufconn with the guard revoked for the whole call: both a header and a trailer reached the client, and the guard was **never asked** | the wrapper owns the transport stream in the context it hands out, so those three functions route back through the checks |
+
+What stays deliberately open: a server that keeps the original stream from
+outside the interceptor, and `SendHeader`'s own flush — once a header frame is
+on the wire no later revocation recalls it, which is what `SendHeader` means.
+
+**A refusal reaches the client as a gRPC status it can act on.** Returning the
+plain Go error made every refusal arrive as `codes.Unknown` with internal text,
+so a receiver could not tell "mint again" from "the server broke" — which is the
+only decision the table above asks a caller to make. `ErrRevoked`, `ErrReplayed`,
+`ErrInvalid` and `ErrNotACoreToken` become `codes.Unauthenticated`; a
+termination for a source that could not be reached becomes `codes.Unavailable`.
+The sentinel chain is kept alongside the code, so `errors.Is` still works inside
+the server that produced it.
 
 What this costs is one live authorization check per message — against an
 RPC-backed `SealSource`, one round trip per emitted item. That is the price of

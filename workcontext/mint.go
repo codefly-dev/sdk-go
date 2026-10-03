@@ -16,6 +16,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	corework "github.com/codefly-dev/core/workcontext"
@@ -43,22 +44,23 @@ const (
 	minRenewalLeadTime = 5 * time.Second
 
 	// defaultMaxCredentialLifetime is the longest credential this client will
-	// hold, and it is DEFENCE IN DEPTH rather than the cap.
+	// hold. It is CORE'S OWN CONSTANT, deliberately, so there is one rule and
+	// not two numbers to keep in step.
 	//
-	// The cap is core's Authority.MaxTTL, which defaults to an hour. This was
-	// deleted on the strength of that — and deleting it was a weakening, which
-	// a review was right to call: MaxTTL is configurable with no ceiling of its
-	// own ("raise Authority.MaxTTL deliberately", core's own error says), and
-	// core's Verify does not bound a lifetime at all. So a host minting
-	// month-long credentials is refused by nothing, and a client that trusted
-	// the minter's default would hold one.
+	// This check has been deleted once on core's advice and restored once on
+	// review, so what it is for is worth saying precisely. Core 72d72eb2 made
+	// MaxTTLCeiling absolute (maxTTL clamps to it, Start refuses past it,
+	// Verify refuses a lifetime over it), which is exactly the condition this
+	// client named when it declined to drop the ceiling. The reason changes;
+	// the check stays, because of what neither of core's bounds covers:
 	//
-	// Two checks at two layers for one rule is not the duplication this PR is
-	// about: that was two IMPLEMENTATIONS of one decision disagreeing about the
-	// answer. This is one decision — "nothing holds a credential for longer
-	// than this" — enforced where it is minted and again where it is held, and
-	// the second one failing is a signal about the first.
-	defaultMaxCredentialLifetime = 24 * time.Hour
+	// THIS CLIENT NEVER VERIFIES A SIGNATURE. It cannot — it is the party the
+	// credential is minted FOR, not a receiver — so it reads the window
+	// through corework.Inspect, which is structural and checks no signature at
+	// all. Core's Start bounds an honest minter and core's Verify bounds a
+	// receiver running a current core. What this process holds in memory, and
+	// presents for the rest of its life, is bounded here or nowhere.
+	defaultMaxCredentialLifetime = corework.MaxTTLCeiling
 
 	// Backoff after a mint that failed. A failed renewal used to return an
 	// error to every caller while the held credential still had minutes left,
@@ -66,6 +68,16 @@ const (
 	// request per caller, which is the heartbeat under another name.
 	minMintBackoff = time.Second
 	maxMintBackoff = time.Minute
+
+	// The refresh bucket. A refresh is not a failure, so it is not held off by
+	// the failure backoff; it is rate-limited in its own right because a
+	// receiver whose live state lags refuses every FRESH credential too, and
+	// each refusal is a new generation that the generation check cannot stop.
+	//
+	// One per minute in the steady state, with a burst of three so the honest
+	// case — a revocation, then a second one shortly after — is not delayed.
+	refreshInterval = time.Minute
+	maxRefreshBurst = 3.0
 )
 
 // Errors a mint caller distinguishes.
@@ -104,25 +116,38 @@ type ProjectedTokenFile string
 // approved" rather than "the token is missing".
 func (path ProjectedTokenFile) ProjectedToken() (string, error) {
 	if strings.TrimSpace(string(path)) == "" {
-		return "", fmt.Errorf("%w: no projected token path", ErrMintRefused)
+		// Misconfiguration, not a host decision: no request was made and
+		// retrying changes nothing. ErrInvalid rather than ErrMintRefused,
+		// which is latched and means "the host refused you".
+		return "", fmt.Errorf("%w: no projected token path", ErrInvalid)
 	}
 	file, err := os.Open(string(path))
 	if err != nil {
-		return "", fmt.Errorf("%w: open projected token: %v", ErrMintRefused, err)
+		// A LOCAL TRANSIENT FAULT, so an outage and not a refusal. EMFILE
+		// under load, EIO on the mount, or the projection being replaced
+		// between unlink and create are all momentary — and classifying them
+		// ErrMintRefused made them TERMINAL once refusals latched: one
+		// exhausted file-descriptor table permanently stopped a process that
+		// was holding a perfectly good credential, and it stayed stopped. This
+		// is the same defect the response-body read had, on the local side.
+		return "", fmt.Errorf("%w: open projected token: %w", ErrMintUnavailable, err)
 	}
 	defer func() {
 		_ = file.Close()
 	}()
 	raw, err := io.ReadAll(io.LimitReader(file, maxProjectedTokenBytes+1))
 	if err != nil {
-		return "", fmt.Errorf("%w: read projected token: %v", ErrMintRefused, err)
+		return "", fmt.Errorf("%w: read projected token: %w", ErrMintUnavailable, err)
 	}
 	if len(raw) > maxProjectedTokenBytes {
+		// Not transient: the file is there and is the wrong thing.
 		return "", fmt.Errorf("%w: projected token exceeds %d bytes", ErrMintRefused, maxProjectedTokenBytes)
 	}
 	token := strings.TrimSpace(string(raw))
 	if token == "" {
-		return "", fmt.Errorf("%w: projected token is empty", ErrMintRefused)
+		// The projection is rewritten under the running process, so an empty
+		// read is a moment in the middle of a rotation. Retryable.
+		return "", fmt.Errorf("%w: projected token is empty", ErrMintUnavailable)
 	}
 	return token, nil
 }
@@ -241,6 +266,13 @@ type Credential struct {
 	// mints. It is deliberately not exported: it means nothing outside the
 	// client that issued it.
 	generation uint64
+
+	// origin is which client issued it, because generation means nothing
+	// outside that one. Two clients in a process each count from one, so a
+	// credential from client B presented to client A's Refresh named a
+	// generation A had issued to somebody else — and A would compare it,
+	// believe it, and mint. Checked rather than documented.
+	origin uint64
 }
 
 // Token returns the opaque signed capability, as it travels. It is a string and
@@ -353,14 +385,40 @@ type MintClient struct {
 	// and the error type is what tells them apart.
 	refused error
 
-	// refreshNotBefore rate-limits REFRESH specifically, and a successful mint
-	// does not reset it. A receiver whose live state lags refuses each fresh
-	// credential, so every refusal is a new generation and the failure
-	// hold-off never engages: one mint per call, without limit. This is the
-	// bound for that, and it is separate from backoffUntil because it is not a
-	// failure.
-	refreshNotBefore time.Time
+	// The refresh rate limit, as a token bucket that REFILLS.
+	//
+	// It was a hold-off computed from the lifetime count —
+	// mintBackoff(Refreshes) — which never decayed: after a few legitimate
+	// refreshes the bound was a minute, permanently, so a refresh days later
+	// waited for a receiver that had lagged that morning. A bucket bounds the
+	// steady-state rate, which is what the limit is for, and forgets: it
+	// refills one token per refreshInterval to a burst of maxRefreshBurst, so
+	// an idle client refreshes at once and a receiver refusing every fresh
+	// credential is held to one mint per interval.
+	refreshTokens float64
+	refreshFilled time.Time
+
+	// lastFailure is the most recent outage, kept so a caller held off by it
+	// learns WHY rather than only that minting is held off. The detached
+	// request has no caller to return its error to, so without this the
+	// transport's own words — a refused connection, a certificate, a 503 —
+	// reached nobody.
+	lastFailure error
+
+	// refreshWanted records that the in-flight request was started BY a
+	// refresh, so the detached goroutine can count it correctly. It cannot read
+	// the reason off its caller any more, which is the point: there may be no
+	// caller left.
+	refreshWanted bool
+
+	// id distinguishes this client from any other in the process, so a
+	// Credential can say which one issued it.
+	id uint64
 }
+
+// mintClientIDs numbers clients so a Credential's generation can be held to the
+// client that issued it.
+var mintClientIDs atomic.Uint64
 
 // NewMintClient validates configuration without performing any I/O.
 func NewMintClient(options MintOptions) (*MintClient, error) {
@@ -411,7 +469,16 @@ func NewMintClient(options MintOptions) (*MintClient, error) {
 		ceiling = defaultMaxCredentialLifetime
 	}
 	if ceiling <= 0 {
-		return nil, fmt.Errorf("%w: maximum credential lifetime must be positive", ErrMintRefused)
+		return nil, fmt.Errorf("%w: maximum credential lifetime must be positive", ErrInvalid)
+	}
+	if ceiling > corework.MaxTTLCeiling {
+		// Refused rather than clamped, so a deployment that configured a
+		// window nothing will mint finds out at construction instead of at the
+		// first mint. Core refuses the same thing on its own side.
+		return nil, fmt.Errorf(
+			"%w: maximum credential lifetime of %s is above core's absolute ceiling of %s, which no authority mints beyond",
+			ErrInvalid, ceiling, corework.MaxTTLCeiling,
+		)
 	}
 	now := options.Now
 	if now == nil {
@@ -426,6 +493,7 @@ func NewMintClient(options MintOptions) (*MintClient, error) {
 		options:    options,
 		httpClient: mintHTTPClient(options.RootCAs),
 		now:        now,
+		id:         mintClientIDs.Add(1),
 	}, nil
 }
 
@@ -446,8 +514,15 @@ func mintHTTPClient(roots *x509.CertPool) *http.Client {
 		CheckRedirect: refuseMintRedirect,
 		Transport: &http.Transport{
 			TLSClientConfig: &tls.Config{
-				RootCAs:    roots, // nil means the system pool
-				MinVersion: tls.VersionTLS12,
+				RootCAs: roots, // nil means the system pool
+				// TLS 1.3 FLOOR. The projected service-account token is the
+				// one secret this process hands to anybody, and 1.2 permits
+				// cipher suites and a renegotiation surface that 1.3 removes.
+				// A mint endpoint is infrastructure this platform runs, not an
+				// arbitrary third party, so there is no long tail of old
+				// servers to accommodate — a host that cannot speak 1.3 is a
+				// host to upgrade.
+				MinVersion: tls.VersionTLS13,
 			},
 			ForceAttemptHTTP2:   true,
 			DisableCompression:  true,
@@ -482,11 +557,16 @@ func refuseMintRedirect(request *http.Request, via []*http.Request) error {
 // has moved the state under it; that is what Refresh is for, and it is why a
 // receiver verifies rather than trusting that a caller re-asked.
 //
-// **A held credential that is still valid is served even when a renewal
-// fails.** Entering the renewal lead and failing used to return an error to
-// every caller while the credential in hand had minutes of validity left — an
-// outage this client manufactured out of a credential that still worked. A
-// renewal failure is only an error once the credential has actually expired.
+// **A held credential that is still valid is served through an OUTAGE, and
+// never through a refusal.** Entering the renewal lead and failing used to
+// return an error to every caller while the credential in hand had minutes of
+// validity left — an outage this client manufactured out of a credential that
+// still worked. But the fix was then applied to every error, so a refusal
+// served the held credential too, which is the opposite decision: ErrMintRefused
+// means the host will say the same thing again and a process seeing it must
+// stop serving. So an unreachable host serves what is in hand until it
+// expires, and a refusal is TERMINAL for this client — Refused reports it, and
+// every later call returns it.
 //
 // One mint at a time, and the wait is cancellable. Concurrent callers wait on a
 // channel rather than on the mutex, so a caller whose ctx is cancelled stops
@@ -496,10 +576,10 @@ func refuseMintRedirect(request *http.Request, via []*http.Request) error {
 // a request per call would be the heartbeat again under another name.
 func (c *MintClient) Credential(ctx context.Context) (Credential, error) {
 	if c == nil {
-		return Credential{}, fmt.Errorf("%w: nil mint client", ErrMintRefused)
+		return Credential{}, fmt.Errorf("%w: nil mint client", ErrInvalid)
 	}
 	if ctx == nil {
-		return Credential{}, fmt.Errorf("%w: nil context", ErrMintRefused)
+		return Credential{}, fmt.Errorf("%w: nil context", ErrInvalid)
 	}
 	return c.obtain(ctx, mintReasonRenewal, nil)
 }
@@ -520,32 +600,48 @@ func (c *MintClient) Credential(ctx context.Context) (Credential, error) {
 // replacement mint, and a caller holding a credential two generations old
 // cannot roll the client backwards by asking about it.
 //
-// It is held to the same backoff as a renewal, which matters for the case a
-// generation check alone does not cover: a receiver whose seal source lags
-// refuses each FRESH credential too, and every refusal is a new generation. The
-// backoff is what bounds that into one mint per hold-off rather than one per
-// call.
+// It has its OWN rate limit, which matters for the case a generation check
+// alone does not cover: a receiver whose seal source lags refuses each FRESH
+// credential too, and every refusal is a new generation, so the generation
+// check never fires. The limit is a token bucket — a burst of three, refilling
+// one per minute — so a lagging receiver costs one mint a minute in the steady
+// state while an honest revocation is answered at once. It refills with elapsed
+// time, so a client that refreshed this morning is not held off tonight.
+//
+// A credential this client did not issue is refused with ErrInvalid: the
+// generation it names belongs to whichever client minted it, and comparing it
+// here would let a credential from one client in the process drive another
+// client's mint.
 func (c *MintClient) Refresh(ctx context.Context, refused Credential) (Credential, error) {
 	if c == nil {
-		return Credential{}, fmt.Errorf("%w: nil mint client", ErrMintRefused)
+		return Credential{}, fmt.Errorf("%w: nil mint client", ErrInvalid)
 	}
 	if ctx == nil {
-		return Credential{}, fmt.Errorf("%w: nil context", ErrMintRefused)
+		return Credential{}, fmt.Errorf("%w: nil context", ErrInvalid)
 	}
+	// Local misuse carries ErrInvalid, not ErrMintRefused. The two were the
+	// same sentinel, which made errors.Is(err, ErrMintRefused) true for a
+	// caller that passed a zero Credential while Refused() was nil — so the
+	// two ways of asking "is this client refused" disagreed, and the sentinel
+	// whose documented meaning is "do not serve" was returned for a programmer
+	// error nobody should stop serving over.
 	if refused.generation == 0 {
 		return Credential{}, fmt.Errorf(
 			"%w: refresh needs the credential that was refused, as this client issued it",
-			ErrMintRefused,
+			ErrInvalid,
 		)
 	}
-	c.mu.Lock()
-	issued := c.credential != nil
-	c.mu.Unlock()
-	if !issued {
+	if refused.origin != c.id {
 		return Credential{}, fmt.Errorf(
-			"%w: this client has issued no credential to refresh", ErrMintRefused,
+			"%w: that credential was issued by another mint client; its generation means nothing here",
+			ErrInvalid,
 		)
 	}
+	// There is deliberately no "this client has issued nothing" check. The
+	// origin check above subsumes it: a credential whose origin is this
+	// client's id was issued BY this client, so there is one to replace. A
+	// branch no input reaches is the ErrUnsealed mistake again — a handler
+	// that never runs, read by everyone as a case that can happen.
 	return c.obtain(ctx, mintReasonRefresh, func(held *Credential) bool {
 		// The credential that was refused is still the one being held, so it
 		// has to be replaced. If it is NOT — somebody else was refused on the
@@ -592,12 +688,29 @@ func (c *MintClient) obtain(
 			c.mu.Unlock()
 			return credential, nil
 		}
+		if reason == mintReasonRefresh && held != nil && wanted != nil && !wanted(held) &&
+			c.now().UTC().Before(held.expiresAt) {
+			// A refresh asking about a generation this client has ALREADY
+			// replaced, where the replacement is the credential in hand. It is
+			// answered even when that credential has entered its renewal lead:
+			// the caller asked for something newer than what it was refused
+			// on, and this is it. The renewal is Credential's business and
+			// happens on its own schedule.
+			//
+			// Falling through here instead minted — and when the bucket was
+			// empty it returned a held-off ErrMintUnavailable, so the one
+			// credential that WAS the requested replacement was the one thing
+			// this would not hand over.
+			credential := *held
+			c.mu.Unlock()
+			return credential, nil
+		}
 		// servable is the credential this call may fall back on when minting is
 		// UNAVAILABLE. A refresh has none: its caller was refused on the
 		// credential being held, so handing that same credential back would
 		// report a replacement that did not happen. It is recomputed rather
 		// than captured wherever the clock may have moved since.
-		servable := c.servableLocked(reason)
+		servable := c.servableLocked(reason, wanted)
 		if waiting := c.inflight; waiting != nil {
 			// Another goroutine is minting. Wait for it rather than queueing a
 			// second request, and let ctx cancel the wait.
@@ -606,29 +719,7 @@ func (c *MintClient) obtain(
 			case <-waiting:
 				continue
 			case <-ctx.Done():
-				// Re-evaluate UNDER THE LOCK, against the clock as it is now.
-				// This used to answer from a snapshot taken before the wait,
-				// so a waiter that started one second before expiry and
-				// cancelled one second after it was handed an EXPIRED
-				// credential with a nil error — and two seconds fits easily
-				// inside the default five-second request timeout.
-				c.mu.Lock()
-				terminal := c.refused
-				servableNow := c.servableLocked(reason)
-				snapshot := Credential{}
-				if servableNow != nil {
-					snapshot = *servableNow
-				}
-				c.mu.Unlock()
-				if terminal != nil {
-					return Credential{}, terminal
-				}
-				if servableNow != nil {
-					return snapshot, nil
-				}
-				// Both stay in the chain: a caller that cancelled wants to see
-				// its own cancellation, not only that minting was unavailable.
-				return Credential{}, fmt.Errorf("%w: %w", ErrMintUnavailable, ctx.Err())
+				return c.answerCancelled(ctx, reason, wanted)
 			}
 		}
 		if until, holding := c.holdOffLocked(reason); holding {
@@ -637,74 +728,148 @@ func (c *MintClient) obtain(
 				c.mu.Unlock()
 				return credential, nil
 			}
+			failure := c.lastFailure
 			c.mu.Unlock()
+			if failure != nil {
+				// The transport's own words, plus when the next attempt may
+				// happen. A caller held off by a failure it cannot see has no
+				// way to tell a 503 from a certificate it must fix.
+				return Credential{}, fmt.Errorf("%w (held off until %s)", failure, until)
+			}
 			return Credential{}, fmt.Errorf(
 				"%w: minting is held off until %s", ErrMintUnavailable, until,
 			)
 		}
+		// This caller takes the slot and STARTS the request, then waits for
+		// it exactly as any other waiter does. It does not run the request on
+		// its own context.
+		//
+		// It used to, and the cancelled leader was then a case of its own:
+		// counted as no failure, so no hold-off. Under callers whose deadlines
+		// are shorter than a degraded host's latency, every call became the
+		// new leader, sent one request, cancelled it and learned nothing —
+		// roughly one mint request per caller deadline, each of which the host
+		// may well complete, and audit, while this process throws it away. A
+		// refusal arriving just after the leader gave up was discarded too, so
+		// the next caller presented the projected token again.
+		//
+		// Detached and bounded by RequestTimeout, the request outlives whoever
+		// asked for it: it completes once, is classified once, and the result
+		// is installed for everybody. However many callers give up, the host
+		// sees one request per hold-off.
 		done := make(chan struct{})
 		c.inflight = done
-		renewal := held != nil
+		if reason == mintReasonRefresh {
+			c.refreshWanted = true
+		}
 		c.mu.Unlock()
+		go c.mintInto(done)
 
-		credential, err := c.mintOnce(ctx)
+		select {
+		case <-done:
+			// Re-read the state the request installed, under the lock, at the
+			// top of the loop: a credential, a latched refusal, or a hold-off.
+			continue
+		case <-ctx.Done():
+			return c.answerCancelled(ctx, reason, wanted)
+		}
+	}
+}
 
-		c.mu.Lock()
-		c.inflight = nil
-		if err != nil {
-			outage := errors.Is(err, ErrMintUnavailable)
-			cancelled := ctx.Err() != nil
-			switch {
-			case cancelled:
-				// The LEADER's caller gave up. That is not the host failing, so
-				// it must not become everybody's hold-off: a cancelled first
-				// request at boot would otherwise be an outage for every other
-				// caller, growing toward a minute with each repetition. The
-				// slot is simply released and a waiter becomes the next leader.
-			case outage:
-				c.failures++
-				c.backoffUntil = c.now().UTC().Add(mintBackoff(c.failures))
-			default:
-				// A refusal, which includes an authority drift and the
-				// final-URL disclosure check. Latch it.
-				c.refused = err
-			}
-			servableNow := c.servableLocked(reason)
-			snapshot := Credential{}
-			if servableNow != nil {
-				snapshot = *servableNow
-			}
-			serve := servableNow != nil && outage && !cancelled
-			c.mu.Unlock()
-			close(done)
-			if serve {
-				// The credential in hand still works and the host is merely
-				// unreachable. A renewal that could not be attempted is not an
-				// outage until the thing it was renewing has expired.
-				return snapshot, nil
-			}
-			return Credential{}, err
-		}
-		c.failures = 0
-		c.backoffUntil = time.Time{}
-		c.generation++
-		credential.generation = c.generation
-		c.credential = &credential
-		switch {
-		case !renewal:
-			c.counts.Mints++
-		case reason == mintReasonRefresh:
-			c.counts.Refreshes++
-			// A success does NOT clear this one. The bound on a lagging
-			// receiver is a bound on successful refreshes, not on failures.
-			c.refreshNotBefore = c.now().UTC().Add(mintBackoff(int(c.counts.Refreshes)))
-		default:
-			c.counts.Renewals++
-		}
+// mintInto performs the one detached request and installs whatever it learned.
+//
+// Its context is NOT any caller's. It is bounded by RequestTimeout, which is
+// what makes the request terminate, and detached from the caller that started
+// it, which is what makes the result arrive whether or not that caller is still
+// interested.
+func (c *MintClient) mintInto(done chan struct{}) {
+	ctx, cancel := context.WithTimeout(
+		context.WithoutCancel(context.Background()), c.options.RequestTimeout,
+	)
+	defer cancel()
+	credential, err := c.mintOnce(ctx)
+
+	c.mu.Lock()
+	defer func() {
 		c.mu.Unlock()
 		close(done)
-		return credential, nil
+	}()
+	c.inflight = nil
+	refresh := c.refreshWanted
+	c.refreshWanted = false
+	renewal := c.credential != nil
+	if err != nil {
+		if errors.Is(err, ErrMintUnavailable) {
+			c.failures++
+			c.backoffUntil = c.now().UTC().Add(mintBackoff(c.failures))
+			c.lastFailure = err
+			return
+		}
+		// A refusal, which includes an authority drift, a TLS verification
+		// failure and the final-URL disclosure check. Latch it: the host will
+		// say the same thing again, and this package's contract is that a
+		// process seeing one must stop serving.
+		c.refused = err
+		return
 	}
+	if renewal && credential.token == c.credential.token {
+		// The host handed back the credential it was asked to replace. That is
+		// not a replacement: installing it would count a refresh or a renewal
+		// for a credential that did not change, and it would come due again
+		// immediately. An idempotent mint endpoint does exactly this.
+		c.failures++
+		c.backoffUntil = c.now().UTC().Add(mintBackoff(c.failures))
+		c.lastFailure = fmt.Errorf(
+			"%w: the mint returned the credential it was asked to replace", ErrMintUnavailable,
+		)
+		return
+	}
+	c.failures = 0
+	c.backoffUntil = time.Time{}
+	c.lastFailure = nil
+	c.generation++
+	credential.generation = c.generation
+	credential.origin = c.id
+	c.credential = &credential
+	switch {
+	case !renewal:
+		c.counts.Mints++
+	case refresh:
+		c.counts.Refreshes++
+		c.spendRefreshTokenLocked()
+	default:
+		c.counts.Renewals++
+	}
+}
+
+// answerCancelled is what a caller gets when it stops waiting: the credential
+// in hand if one is servable FOR THIS KIND OF CALL at the clock as it is now,
+// or its own cancellation.
+//
+// Re-evaluated under the lock rather than from a snapshot taken before the
+// wait. The snapshot version handed an EXPIRED credential, with a nil error, to
+// a waiter that entered one second before expiry and gave up one second after
+// it — and two seconds fits easily inside the default five-second timeout.
+func (c *MintClient) answerCancelled(
+	ctx context.Context, reason mintReason, wanted func(held *Credential) bool,
+) (Credential, error) {
+	c.mu.Lock()
+	terminal := c.refused
+	servable := c.servableLocked(reason, wanted)
+	snapshot := Credential{}
+	if servable != nil {
+		snapshot = *servable
+	}
+	c.mu.Unlock()
+	if terminal != nil {
+		return Credential{}, terminal
+	}
+	if servable != nil {
+		return snapshot, nil
+	}
+	// Both stay in the chain: a caller that cancelled wants to see its own
+	// cancellation, not only that minting was unavailable.
+	return Credential{}, fmt.Errorf("%w: %w", ErrMintUnavailable, ctx.Err())
 }
 
 // holdOffLocked reports whether minting is held off for this kind of call, and
@@ -715,17 +880,69 @@ func (c *MintClient) holdOffLocked(reason mintReason) (time.Time, bool) {
 	if !c.backoffUntil.IsZero() && now.Before(c.backoffUntil) {
 		return c.backoffUntil, true
 	}
-	if reason == mintReasonRefresh && !c.refreshNotBefore.IsZero() && now.Before(c.refreshNotBefore) {
-		return c.refreshNotBefore, true
+	if reason == mintReasonRefresh {
+		if available := c.refreshTokensLocked(); available < 1 {
+			// When the next token lands, which is a real instant rather than a
+			// growing penalty: the bucket refills whether or not anybody asks.
+			return now.Add(time.Duration((1 - available) * float64(refreshInterval))), true
+		}
 	}
 	return time.Time{}, false
+}
+
+// refreshTokensLocked refills the refresh bucket to now and reports what is in
+// it. It is a function of ELAPSED TIME, so the limit forgets: a client that
+// refreshed three times this morning is not still paying for it tonight.
+//
+// The previous bound was mintBackoff(Refreshes), computed from the LIFETIME
+// count, so after a few legitimate refreshes it was a minute — permanently.
+// "One refresh per minute, forever" is not a rate limit, it is a tax.
+func (c *MintClient) refreshTokensLocked() float64 {
+	now := c.now().UTC()
+	if c.refreshFilled.IsZero() {
+		c.refreshTokens = maxRefreshBurst
+		c.refreshFilled = now
+		return c.refreshTokens
+	}
+	if elapsed := now.Sub(c.refreshFilled); elapsed > 0 {
+		c.refreshTokens += elapsed.Seconds() / refreshInterval.Seconds()
+		if c.refreshTokens > maxRefreshBurst {
+			c.refreshTokens = maxRefreshBurst
+		}
+		c.refreshFilled = now
+	}
+	return c.refreshTokens
+}
+
+// spendRefreshTokenLocked charges one SUCCESSFUL refresh to the bucket. A
+// failure is charged to the failure backoff instead, which is the thing that
+// grows.
+func (c *MintClient) spendRefreshTokenLocked() {
+	if available := c.refreshTokensLocked(); available >= 1 {
+		c.refreshTokens = available - 1
+		return
+	}
+	c.refreshTokens = 0
 }
 
 // servableLocked is the credential a caller may be handed when minting is
 // unavailable: one that is held, unexpired, and not the one a refresh was
 // refused on.
-func (c *MintClient) servableLocked(reason mintReason) *Credential {
-	if reason == mintReasonRefresh || c.credential == nil {
+func (c *MintClient) servableLocked(reason mintReason, wanted func(held *Credential) bool) *Credential {
+	if c.credential == nil {
+		return nil
+	}
+	if reason == mintReasonRefresh && (wanted == nil || wanted(c.credential)) {
+		// The credential being held IS the one this refresh was refused on, so
+		// handing it back would report a replacement that did not happen.
+		//
+		// When it is NOT — the client has already moved on and this caller is
+		// asking about a generation that has been replaced — the credential in
+		// hand is exactly the replacement being asked for. Returning nil there
+		// was a defect of its own: a stale-generation refresh arriving while
+		// the current credential sat inside its renewal lead got a held-off
+		// ErrMintUnavailable instead of the perfectly good credential the
+		// client was holding.
 		return nil
 	}
 	if !c.now().UTC().Before(c.credential.expiresAt) {
@@ -819,7 +1036,17 @@ func (c *MintClient) dueForRenewalLocked(credential Credential) bool {
 func (c *MintClient) mintLocked(ctx context.Context, audience string) (Credential, error) {
 	projected, err := c.options.ProjectedToken.ProjectedToken()
 	if err != nil {
-		return Credential{}, err
+		// A source is a caller's code. An error from one that carries neither
+		// sentinel was returned as it stood and then LATCHED as terminal, so
+		// errors.Is(Refused(), ErrMintRefused) was false while the client was
+		// refused — and a transient local fault in somebody's own reader
+		// stopped the process for good. An unlabelled source failure is a
+		// local fault: retryable.
+		if errors.Is(err, ErrMintRefused) || errors.Is(err, ErrMintUnavailable) ||
+			errors.Is(err, ErrInvalid) {
+			return Credential{}, err
+		}
+		return Credential{}, fmt.Errorf("%w: read the projected token: %w", ErrMintUnavailable, err)
 	}
 	body, err := json.Marshal(mintRequest{
 		Audience:           audience,
@@ -846,7 +1073,21 @@ func (c *MintClient) mintLocked(ctx context.Context, audience string) (Credentia
 		if errors.Is(err, ErrMintRefused) {
 			return Credential{}, err
 		}
-		return Credential{}, fmt.Errorf("%w: %v", ErrMintUnavailable, err)
+		if reason := tlsVerificationFailure(err); reason != "" {
+			// NOT an outage. Every other transport error means "the endpoint
+			// is not answering"; this one means "something answered and could
+			// not prove it is the endpoint", which is the single case this
+			// whole transport exists to refuse. Treated as an outage it was
+			// retried on a hold-off while the held credential kept being
+			// served, with nothing anywhere saying that the channel carrying
+			// the projected service-account token had stopped being
+			// authenticated.
+			return Credential{}, fmt.Errorf(
+				"%w: the mint endpoint's certificate did not verify (%s); the projected token is not presented to an endpoint that cannot prove who it is",
+				ErrMintRefused, reason,
+			)
+		}
+		return Credential{}, fmt.Errorf("%w: %w", ErrMintUnavailable, err)
 	}
 	defer func() {
 		_ = response.Body.Close()
@@ -866,7 +1107,14 @@ func (c *MintClient) mintLocked(ctx context.Context, audience string) (Credentia
 	if response.StatusCode != http.StatusOK {
 		_, _ = io.Copy(io.Discard, io.LimitReader(response.Body, 4*1024))
 		sentinel := ErrMintRefused
-		if response.StatusCode == http.StatusTooManyRequests || response.StatusCode >= 500 {
+		if response.StatusCode == http.StatusTooManyRequests ||
+			response.StatusCode == http.StatusRequestTimeout ||
+			response.StatusCode >= 500 {
+			// 408 belongs with 429 and 5xx: the host is saying it did not get
+			// to the request in time, which is the definition of retryable. It
+			// was classified as a refusal, so one slow moment at the endpoint
+			// latched and permanently stopped a process holding a valid
+			// credential.
 			sentinel = ErrMintUnavailable
 		}
 		return Credential{}, fmt.Errorf("%w: mint returned HTTP %d", sentinel, response.StatusCode)
@@ -1063,4 +1311,39 @@ func validateMintURL(raw string) (string, error) {
 		)
 	}
 	return parsed.String(), nil
+}
+
+// tlsVerificationFailure names the reason when err is a failure to
+// AUTHENTICATE the endpoint, and returns "" for every other transport error.
+//
+// The distinction is the one this client's whole transport is about. A dial
+// timeout, a reset, a closed connection: the endpoint is not answering, which
+// is an outage and is retryable. A certificate that does not chain to the
+// configured roots, is for another name, or has expired: something answered and
+// could not prove it is the endpoint — so the next attempt would present the
+// projected service-account token to it again.
+func tlsVerificationFailure(err error) string {
+	var verification *tls.CertificateVerificationError
+	if errors.As(err, &verification) {
+		return "certificate verification failed"
+	}
+	var unknownAuthority x509.UnknownAuthorityError
+	if errors.As(err, &unknownAuthority) {
+		return "certificate is not signed by a configured root"
+	}
+	var hostname x509.HostnameError
+	if errors.As(err, &hostname) {
+		return "certificate is for another name"
+	}
+	var invalid x509.CertificateInvalidError
+	if errors.As(err, &invalid) {
+		return "certificate is not valid"
+	}
+	var recordHeader tls.RecordHeaderError
+	if errors.As(err, &recordHeader) {
+		// The endpoint answered something that is not TLS at all on a URL this
+		// client required to be https.
+		return "the endpoint did not answer with TLS"
+	}
+	return ""
 }

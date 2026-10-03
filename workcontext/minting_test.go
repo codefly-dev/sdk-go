@@ -147,6 +147,19 @@ func (a *authority) start(t *testing.T, input mintInput) string {
 // endpoint under a moving test clock needs.
 func (a *authority) startAt(t *testing.T, now time.Time, input mintInput, lifetime time.Duration) string {
 	t.Helper()
+	token, err := a.tryStartAt(now, input, lifetime)
+	require.NoError(t, err)
+	return token
+}
+
+// tryStartAt is startAt with the error RETURNED, for the mint host, which runs
+// on the server's goroutine where require would call FailNow off the test
+// goroutine. That is not a hypothetical: a test asked this host for an
+// eight-hour credential, core refused it as over the authority's MaxTTL,
+// require killed the handler mid-response, and the failure surfaced as `Post
+// "https://127.0.0.1:58543": EOF` — a transport error, for a configuration
+// mistake, exactly as the review predicted this shape would.
+func (a *authority) tryStartAt(now time.Time, input mintInput, lifetime time.Duration) (string, error) {
 	minter := *a.core
 	minter.Now = func() time.Time { return now }
 	if input.tenant == "" {
@@ -179,8 +192,7 @@ func (a *authority) startAt(t *testing.T, now time.Time, input mintInput, lifeti
 		OperationBindingID: input.binding,
 		TTL:                lifetime,
 	})
-	require.NoError(t, err)
-	return token
+	return token, err
 }
 
 // child delegates a verified capability one hop, which is how a test obtains a

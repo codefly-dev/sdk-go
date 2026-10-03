@@ -57,39 +57,61 @@ jobs:
     timeout-minutes: 5
     steps:
       - name: Checkout
-        # fetch-depth 0 so the compat refs are reachable: the second step reads
-        # them out of the object database.
+        # fetch-depth 0 so every published ref is reachable: the second step
+        # reads them out of the object database.
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           fetch-depth: 0
       - name: Sweep every tracked Go file for a second implementation
         run: ./scripts/check-one-implementation.sh
-      - name: Sweep every published release line
-        # This step is EXPECTED TO FAIL until the owner retires the three refs
-        # that still carry the deleted implementation, and that failure is the
-        # point rather than an oversight.
+      - name: Sweep every OTHER ref this repository publishes
+        # EVERY REMOTE BRANCH, not a name glob — minus the one this change is
+        # becoming, which the working-tree step above already swept.
         #
-        # go.yml builds compat/** as published artifacts, and those branches
-        # carry their own copy of this workflow — so no change here can gate a
-        # push to one of them. What a change here CAN do is refuse to let main
-        # move while the rule is false of a ref this repository publishes.
-        # Under "legacy means delete", retiring them is a merge precondition,
-        # not a runbook item: the previous revision ran the sweep with no
-        # arguments, so a green check meant only that the working tree was
-        # clean, which is the weakest thing it could have meant.
+        # The previous revision swept 'compat/*' and 'feat/*compat*', which was
+        # a rule about ref NAMES in a gate whose whole subject is that the
+        # implementation is gone. Measured: of 25 remote branches, 22 carried
+        # work_context.go, so retiring the three named compat refs would have
+        # turned this step green with 19 copies still published — on branches a
+        # consumer can pin exactly as it pins a compat ref. The owner has since
+        # deleted all of them, which is what makes a COMPLETE sweep possible
+        # rather than a documented gap.
+        #
+        # The base branch and this branch are excluded, and that is not a hole:
+        # sweeping the ref a pull request merges INTO is circular. main still
+        # carries workcontext/work_context.go, this pull request is what deletes
+        # it, and a check that stayed red until main was clean could never let
+        # the change that cleans it land. main is covered by the working-tree
+        # step of its own push build — the same sweep over the same files one
+        # commit later.
+        #
+        # It also no longer FAILS OPEN. `fetch || true` followed by "no refs,
+        # exit 0" meant a network failure, a permissions change or a renamed
+        # remote all reported success — the three cases where a gate is most
+        # needed and least able to say so.
         run: |
-          git fetch --no-tags --quiet origin \
-            '+refs/heads/compat/*:refs/remotes/origin/compat/*' \
-            '+refs/heads/feat/*:refs/remotes/origin/feat/*' || true
+          git fetch --no-tags --prune --quiet origin \
+            '+refs/heads/*:refs/remotes/origin/*'
+          base="${GITHUB_BASE_REF:-${GITHUB_REF_NAME:-main}}"
+          here="${GITHUB_HEAD_REF:-${GITHUB_REF_NAME:-}}"
           # Collected into an array rather than word-split from a string, so a
           # ref name with a space cannot silently become two arguments.
           refs=()
           while IFS= read -r ref; do
-            [ -n "$ref" ] && refs+=("$ref")
-          done < <(git for-each-ref --format='%(refname:short)' \
-            'refs/remotes/origin/compat/*' 'refs/remotes/origin/feat/*compat*')
+            [ -n "$ref" ] || continue
+            case "$ref" in
+              origin|origin/HEAD) continue ;;
+              "origin/$base") continue ;;
+            esac
+            if [ -n "$here" ] && [ "$ref" = "origin/$here" ]; then
+              continue
+            fi
+            refs+=("$ref")
+          done < <(git for-each-ref --format='%(refname:short)' 'refs/remotes/origin/*')
+          echo "sweeping ${#refs[@]} other published ref(s); the working tree was swept above"
           if [ ${#refs[@]} -eq 0 ]; then
-            echo "no published release lines to sweep"
+            # Not a pass by default: the fetch above is what would have failed.
+            echo "this repository publishes no ref other than $base"
             exit 0
           fi
           ./scripts/check-one-implementation.sh "${refs[@]}"

@@ -96,7 +96,7 @@ package line.
 | `tls.go` | workload leaf certificates, reloaded on rotation |
 | `receipts/` | effect receipts: the store, the digest, the replay/conflict interceptor |
 | `receipts/grpctransport/`, `receipts/connecttransport/` | the two transport adapters, split so neither drags the other's dependency in |
-| `workcontext/` | **separate leaf module**: the mint-once client, the carriers, the cache partition, the stream guard, and typed access to core's one implementation |
+| `workcontext/` | **separate leaf module**: the mint-once client, the carriers, the cache partition, the stream guard, and typed access to core's one implementation. Its own `AGENTS.md` holds what the two gates refuse |
 | `workcontext/grpctransport/` | the gRPC carrier, so a consumer that makes no gRPC call never compiles grpc |
 
 `workcontext` mints nothing and verifies nothing: `core/workcontext` is the only
@@ -117,40 +117,15 @@ see the skill below.
   variable ships the name with an empty string; `RuntimeValue` reports `false`
   so it cannot shadow the configuration a caller falls back to. Keep that.
 - **The Work Context has exactly one implementation and it is not here.**
-  `core/workcontext` signs, verifies, and — since this was asked for — answers
-  the *structural* question too, through `Inspect`. Nothing here may sign, check
-  a signature, encode a capability **or decide what a capability is**: a local
-  seal rule is a second implementation even when it signs nothing, and ours
-  disagreed with core's own fixtures about which sentinel three refusals earn.
-  `TestNoSecondWorkContextImplementation` refuses by capability rather than by
-  name — any signature, MAC or JOSE primitive, anything under `x/crypto`,
-  `protojson`, a `proto.Marshal` outside the one digest, `crypto/tls`/`x509`
-  outside the mint transport or using a symbol beyond it, an `encoding/json`
-  outside `mint.go` by exact path, a json-tagged struct anywhere else, and any
-  declaration whose name begins with `workcontext` case-insensitively unless it
-  aliases into core's module. `TestTheGateCatchesItsOwnBypasses` holds the gate
-  to that claim; `TestTheSDKParsePathsAgreeWithCore` drives every core fixture
-  through our own parse paths and requires core's sentinel. A claim added to the
-  wire is added to the proto in core, never to an encoder here. That test walks
-  from the `workcontext` module root, and the deleted implementation lived at
-  the repository root, so `scripts/check-one-implementation.sh` sweeps every
-  tracked Go file in both modules — as a job in `go.yml`, the workflow that
-  builds every ref this repository publishes, required on `main` by a ruleset.
-  There is no compatibility period: a release line that cannot meet the rule is
-  **retired by the owner**, not exempted.
-- **A credential is sealed or it is not a credential, and core says what that
-  means.** The seal, each actor hop's epoch and the seal's **image digest** are
-  schema-required, so a missing one is a `protovalidate` refusal inside core's
-  decode; an operation binding carries its id, revision and incarnation or none
-  of them; and core refuses an unknown field or a non-canonical encoding, so
-  nothing here may ever marshal a capability. `Attach` refuses an unsealed
-  capability with `corework.Inspect`'s answer — this claim was false for a while
-  precisely because we answered it ourselves and never read the actor chain.
-  **One sentinel for every structural seal defect, `ErrInvalid`.** `ErrUnsealed`
-  is deleted: once the schema requires the seal no branch can produce it, and a
-  sentinel no branch produces invites a handler that never runs. Read a
-  refusal's sentinel off core's fixture, never from a constant here — three
-  fixtures changed sentinel under us and the tests that did that needed no edit.
+  `core/workcontext` signs, verifies, and answers the *structural* question
+  through `Inspect`. Nothing here may sign, check a signature, encode a
+  capability **or decide what a capability is** — a local seal rule is a second
+  implementation even when it signs nothing, and ours disagreed with core's own
+  fixtures about which sentinel three refusals earn. Two gates hold that:
+  `TestNoSecondWorkContextImplementation` (AST, the leaf module) and
+  `scripts/check-one-implementation.sh` (both modules, every published ref).
+  **`workcontext/AGENTS.md` is what each one refuses and why** — read it before
+  touching that module, the gate, or the sweep.
 - **An authority-bearing value is read once.** A principal, binding or audience
   comes from `ReadAuthority` at boot. `WorkspaceValue` answers from that pin for
   a pinned name, so a drift is an error rather than a reload — the process has
@@ -159,15 +134,15 @@ see the skill below.
   receipt written after the commit leaves a window where the effect exists and
   the receipt does not, and a recovery landing there reads "no receipt" for an
   effect that already happened. That is why `receipts.Record` takes a `Tx`.
-- **`compat/**` branches are published artifacts and are held to these rules,
-  not exempted from them.** Consumers pin them when `main` holds an unreleased
-  breaking change, so CI builds them like `main` — and the one-implementation
-  sweep runs in `go.yml` for exactly that reason. A line that cannot meet a rule
-  is **retired** by the owner, not granted a period during which the rule is
-  false of this repository. There was a bullet here forbidding the back-port of
-  a breaking deletion into a release line; it is deleted, because for the
-  deleted Work Context implementation it is what kept the implementation alive
-  on three refs CI builds.
+- **Every published ref is held to these rules, not exempted from them.** A
+  consumer can pin any branch, so the sweep covers every one rather than a
+  `compat/*` name glob: measured, 22 of 25 remote branches still carried the
+  deleted implementation, so retiring the three NAMED compat refs would have
+  turned the gate green with 19 copies published. A line that cannot meet a
+  rule is **retired** by the owner, never granted a period during which the
+  rule is false here. A bullet forbidding the back-port of a breaking deletion
+  used to live here; it is what kept the implementation alive on refs CI
+  builds, so it is deleted.
 
 ## Procedures
 

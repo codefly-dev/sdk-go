@@ -154,9 +154,14 @@ func TestAGuardedStreamHoldsTrailersUntilFinishRechecks(t *testing.T) {
 	guarded, err := Guard(underlying, guard)
 	require.NoError(t, err)
 
+	// SetHeader HOLDS: gRPC flushes a pending header frame when the handler
+	// returns, so handing it over at queue time let a header leave after a
+	// revocation that happened in between. Only SendHeader reaches gRPC, and
+	// it carries what SetHeader queued.
 	require.NoError(t, guarded.SetHeader(metadata.Pairs("a", "1")))
+	require.Zero(t, underlying.headers, "a queued header must not reach gRPC before a check")
 	require.NoError(t, guarded.SendHeader(metadata.Pairs("b", "2")))
-	require.Equal(t, 2, underlying.headers)
+	require.Equal(t, 1, underlying.headers)
 
 	// Set under authority, and NOT yet handed to gRPC: gRPC would send it when
 	// the handler returned, which is after any revocation in between.

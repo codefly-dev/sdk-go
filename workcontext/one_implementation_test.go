@@ -79,26 +79,65 @@ var (
 	bannedImportSubstrings = []string{"jose", "jwt", "jwx", "paseto", "macaroon", "branca"}
 )
 
-// tlsPlumbing is the narrow exception: the mint client builds and owns its own
-// transport, which needs crypto/tls for the configuration and crypto/x509 for
-// the caller's root pool. Both are refused everywhere else, and even there only
-// these SYMBOLS may be used — so x509.ParsePKCS8PrivateKey, which is how a
-// signer gets a key without importing ed25519, is a finding rather than a
-// permitted use of an allowed import.
+// narrowedImports are the imports some file here genuinely needs, held to the
+// FILES that may have them and the SYMBOLS they may use. An import allowed
+// whole-file is an import allowed for everything in that package: this is why
+// x509.ParsePKCS8PrivateKey — how a signer gets a key without naming ed25519 —
+// is a finding rather than a permitted use of an allowed import.
 //
-// crypto/sha256 is deliberately absent from every list: a hash is not a
-// signature, and the cache partition's digest preimage needs one.
-var tlsPlumbing = map[string]struct {
+// It was called tlsPlumbing when crypto/tls and crypto/x509 were the only two.
+// They are not: crypto/sha256 is not a signature but a hand-written HMAC is two
+// of them and an xor, mime.WordDecoder decodes base64 with no base64 import,
+// and base64 itself is allowed in one file to ENCODE a cache key.
+var narrowedImports = map[string]struct {
 	files   []string
 	symbols []string
 }{
 	"crypto/tls": {
+		files: []string{"mint.go"},
+		// Config and the version floor, plus the two error types the client
+		// classifies on. Reading an error TYPE is not using a primitive, and
+		// the alternative was matching on error text — which is how a
+		// certificate failure quietly became an outage again the next time the
+		// standard library reworded one.
+		symbols: []string{
+			"Config", "VersionTLS13",
+			"CertificateVerificationError", "RecordHeaderError",
+		},
+	},
+	// mime, for one call: the mint response's Content-Type must be declared
+	// and must be application/json. A WordDecoder in this package decodes
+	// base64 with no base64 import, so the symbols matter here as much as
+	// anywhere.
+	"mime": {
 		files:   []string{"mint.go"},
-		symbols: []string{"Config", "VersionTLS12", "VersionTLS13"},
+		symbols: []string{"ParseMediaType"},
+	},
+	// crypto/sha256 is not a signature and the cache digest needs it, but a
+	// hand-written HMAC is two hashes and an xor — so the symbols and the
+	// files are named, which bounds that to the one file that hashes.
+	"crypto/sha256": {
+		files:   []string{"cache_partition.go"},
+		symbols: []string{"Sum256", "New", "Size"},
+	},
+	// encoding/base64 ENCODES a cache key here and must never DECODE: base64
+	// decoding plus proto.Unmarshal is the whole of a second parser, and the
+	// exemption used to be per file, so DecodeString was available in the one
+	// file that had it.
+	"encoding/base64": {
+		files:   []string{"cache_partition.go"},
+		symbols: []string{"RawURLEncoding", "URLEncoding", "StdEncoding"},
 	},
 	"crypto/x509": {
-		files:   []string{"mint.go"},
-		symbols: []string{"CertPool", "NewCertPool", "SystemCertPool"},
+		files: []string{"mint.go"},
+		// CertPool for the caller's roots, and the three verification error
+		// types for the same reason as above. Notably still refused:
+		// ParsePKCS8PrivateKey, which is how a signer gets a key without
+		// importing ed25519.
+		symbols: []string{
+			"CertPool", "NewCertPool", "SystemCertPool",
+			"UnknownAuthorityError", "HostnameError", "CertificateInvalidError",
+		},
 	},
 }
 
@@ -112,18 +151,30 @@ var tlsPlumbing = map[string]struct {
 // at all. Both were reproduced as AST probes that produced zero findings. A
 // whole-file exemption is an exemption for every type in the file.
 var codecAllowlist = []codecUse{
-	{file: "mint.go", operations: jsonOperations, types: mintEndpointJSONTypes,
+	{file: "mint.go", codec: codecJSON, operations: jsonOperations, types: mintEndpointJSONTypes,
 		reason: "the mint endpoint's two HTTP bodies, which carry the capability as an opaque string"},
-	{file: "mint.go", operations: jsonValueOperations,
-		types: append(append([]string{}, mintEndpointJSONTypes...), "RawMessage"),
+	{file: "mint.go", codec: codecJSON, operations: jsonValueOperations,
+		types: append(append([]string{}, mintEndpointJSONTypes...), "json.RawMessage"),
 		reason: "the same two bodies, plus a RawMessage the response decoder reads into to " +
 			"require EOF — it holds nothing and is discarded"},
-	{file: "cache_partition.go", operations: protoOperations, types: []string{"WorkScopeV1"},
+	{file: "cache_partition.go", codec: codecProto, operations: protoOperations,
+		types:  []string{"basev0.WorkScopeV1"},
 		reason: "one scope, for the cache digest preimage — never a capability"},
 }
 
+// The codecs a row can be about. A row used to be keyed on the file and the
+// OPERATION NAME, and "Marshal" is an operation name shared by every codec —
+// so mint.go's row for encoding/json, whose two allowed types are the HTTP
+// bodies, also permitted proto.Marshal and proto.Unmarshal on anything NAMED
+// mintRequest or mintResponse. A row has to say which codec it is about.
+const (
+	codecJSON  = "encoding/json"
+	codecProto = "google.golang.org/protobuf/proto"
+)
+
 type codecUse struct {
 	file       string
+	codec      string
 	operations []string
 	types      []string
 	reason     string
@@ -140,11 +191,11 @@ var (
 	protoOperations     = []string{"Marshal", "MarshalOptions", "Unmarshal", "UnmarshalOptions"}
 )
 
-// permittedCodecTypes is the set of type names a codec operation may be applied
-// to in this file, or nil when the file may use no codec at all.
-func permittedCodecTypes(path string, operation string) []string {
+// permittedCodecTypes is the set of type names THIS CODEC's operation may be
+// applied to in this file, or nil when it may not be used here at all.
+func permittedCodecTypes(path string, codec string, operation string) []string {
 	for _, use := range codecAllowlist {
-		if use.file == path && slices.Contains(use.operations, operation) {
+		if use.file == path && use.codec == codec && slices.Contains(use.operations, operation) {
 			return use.types
 		}
 	}
@@ -203,6 +254,11 @@ var (
 // coreModulePath is the module whose types this one aliases. An alias has to
 // resolve into it, or it is a local type wearing core's name.
 const coreModulePath = "github.com/codefly-dev/core"
+
+// coreAliasFile is the one file whose job is re-exporting core's surface, so it
+// is the one file where an alias to one of core's types is the point rather
+// than a second local name for a capability.
+const coreAliasFile = "core.go"
 
 // TestNoSecondWorkContextImplementation is the gate.
 //
@@ -273,9 +329,10 @@ func TestNoSecondWorkContextImplementation(t *testing.T) {
 func inspectForSecondImplementation(file sourceFile) []string {
 	var findings []string
 	coreImports := map[string]bool{}
-	plumbing := map[string]string{} // local name -> allowed import path
-	protoNames := map[string]bool{} // every local name google.golang.org/protobuf is reachable under
-	jsonNames := map[string]bool{}  // and encoding/json
+	plumbing := map[string]string{}  // local name -> allowed import path
+	protoNames := map[string]bool{}  // every local name google.golang.org/protobuf is reachable under
+	jsonNames := map[string]bool{}   // and encoding/json
+	base64Names := map[string]bool{} // and encoding/base64, which may only ENCODE
 	for _, imported := range importsOf(file.syntax) {
 		if imported.name == "." {
 			// A dot import makes every one of a package's identifiers
@@ -298,6 +355,9 @@ func inspectForSecondImplementation(file sourceFile) []string {
 		if imported.path == "encoding/json" {
 			jsonNames[imported.name] = true
 		}
+		if imported.path == "encoding/base64" {
+			base64Names[imported.name] = true
+		}
 	}
 	findings = append(findings, inspectPlumbingSymbols(file, plumbing)...)
 	findings = append(findings, inspectProtoEncoding(file, protoNames)...)
@@ -305,19 +365,139 @@ func inspectForSecondImplementation(file sourceFile) []string {
 	findings = append(findings, inspectJSONTags(file)...)
 	findings = append(findings, inspectJSONCalls(file, jsonNames)...)
 	findings = append(findings, inspectJSONValueCalls(file, len(jsonNames) > 0)...)
+	findings = append(findings, inspectLocalTypes(file)...)
+	findings = append(findings, inspectCoreAliases(file, coreImports)...)
+	findings = append(findings, inspectEnvelopeDecoding(file, base64Names)...)
+	return findings
+}
+
+// envelopeEncodeOnly are the methods an allowlisted base64 import may call on
+// an encoding. Everything else — DecodeString, Decode, NewDecoder, AppendDecode
+// — is the first half of a second parser.
+var envelopeEncodeOnly = []string{"EncodeToString", "Encode", "EncodedLen", "AppendEncode"}
+
+// inspectEnvelopeDecoding refuses DECODING in the one file allowed to encode.
+//
+// The symbol allowlist cannot see this on its own: base64.StdEncoding is the
+// permitted symbol and DecodeString is a method on the *value* it names, so
+// `base64.StdEncoding.DecodeString(payload)` passed a package-level symbol
+// check completely. The exemption was per file, so the file allowed to encode a
+// cache key could decode a capability's envelope — and with proto.Unmarshal
+// that is a whole parser.
+func inspectEnvelopeDecoding(file sourceFile, base64Names map[string]bool) []string {
+	if len(base64Names) == 0 {
+		return nil
+	}
+	var findings []string
+	ast.Inspect(file.syntax, func(node ast.Node) bool {
+		method, ok := node.(*ast.SelectorExpr)
+		if !ok {
+			return true
+		}
+		// The receiver must itself be base64.<something>, which is what makes
+		// this a base64 encoding rather than any other value's method.
+		receiver, ok := method.X.(*ast.SelectorExpr)
+		if !ok {
+			return true
+		}
+		qualifier, ok := receiver.X.(*ast.Ident)
+		if !ok || !base64Names[qualifier.Name] {
+			return true
+		}
+		if slices.Contains(envelopeEncodeOnly, method.Sel.Name) {
+			return true
+		}
+		findings = append(findings, fmt.Sprintf(
+			"%s calls %s.%s.%s.\n"+
+				"This file may ENCODE with base64 — it builds a cache key — and may never DECODE.\n"+
+				"base64 decoding plus proto.Unmarshal is the entire second parser this module\n"+
+				"deleted; corework.Inspect opens the envelope and hands back the claims. Only %v\n"+
+				"may be called here.",
+			file.path, qualifier.Name, receiver.Sel.Name, method.Sel.Name, envelopeEncodeOnly))
+		return true
+	})
+	return findings
+}
+
+// inspectLocalTypes refuses a type declared INSIDE a function.
+//
+// This is the alias bypass's other half. A function-local declaration is
+// invisible to every rule that reads a file's declarations, and `type X =
+// basev0.WorkContextV1` inside a function body is enough to give a codec row
+// whatever type name it asks for. It is also something this module has no use
+// for: a type worth declaring here is worth declaring where a reader finds it.
+func inspectLocalTypes(file sourceFile) []string {
+	var findings []string
+	for _, declaration := range file.syntax.Decls {
+		function, ok := declaration.(*ast.FuncDecl)
+		if !ok || function.Body == nil {
+			continue
+		}
+		ast.Inspect(function.Body, func(node ast.Node) bool {
+			spec, ok := node.(*ast.TypeSpec)
+			if !ok {
+				return true
+			}
+			findings = append(findings, fmt.Sprintf(
+				"%s declares the type %q inside a function.\n"+
+					"A function-local type is invisible to every rule here that reads a file's\n"+
+					"declarations, and a local alias is all it takes to hand a codec row a type name it\n"+
+					"permits — `type WorkScopeV1 = basev0.WorkContextV1` makes a capability marshal as\n"+
+					"an allowed scope. Declare it at file level, where it is read.",
+				file.path, spec.Name.Name))
+			return true
+		})
+	}
+	return findings
+}
+
+// inspectCoreAliases refuses an alias to one of core's types outside the one
+// file whose job is aliasing core.
+//
+// core.go exists so this module's surface IS core's surface: an alias there is
+// the re-export the one-implementation rule asks for. An alias anywhere else
+// renames core's type locally, which is how a capability acquires a second
+// name — and the name rule cannot catch it, because a reader chooses the name.
+func inspectCoreAliases(file sourceFile, coreImports map[string]bool) []string {
+	if file.path == coreAliasFile || len(coreImports) == 0 {
+		return nil
+	}
+	var findings []string
+	ast.Inspect(file.syntax, func(node ast.Node) bool {
+		spec, ok := node.(*ast.TypeSpec)
+		if !ok || !spec.Assign.IsValid() {
+			// Assign is set only for `type A = B`, which is the renaming case.
+			return true
+		}
+		selector, ok := spec.Type.(*ast.SelectorExpr)
+		if !ok {
+			return true
+		}
+		qualifier, ok := selector.X.(*ast.Ident)
+		if !ok || !coreImports[qualifier.Name] {
+			return true
+		}
+		findings = append(findings, fmt.Sprintf(
+			"%s aliases core's %s.%s as %q.\n"+
+				"Aliases to core's types belong in %s, which is this module's re-export of core's\n"+
+				"surface. An alias elsewhere gives one of core's types a second local name, which is\n"+
+				"precisely what a codec allowlist keyed by type name cannot see through.",
+			file.path, qualifier.Name, selector.Sel.Name, spec.Name.Name, coreAliasFile))
+		return true
+	})
 	return findings
 }
 
 // inspectImport refuses an import by what it can DO, not by whether its path is
 // one of two strings.
 func inspectImport(file sourceFile, name string, path string, plumbing map[string]string) []string {
-	if allowed, ok := tlsPlumbing[path]; ok {
+	if allowed, ok := narrowedImports[path]; ok {
 		if slices.Contains(allowed.files, file.path) {
 			plumbing[name] = path
 			return nil
 		}
 		return []string{fmt.Sprintf(
-			"%s imports %q, which only %v may: it is the mint client's own transport plumbing.",
+			"%s imports %q, which only %v may, and only for named symbols.",
 			file.path, path, allowed.files)}
 	}
 	if slices.Contains(envelopeDecoders, path) {
@@ -386,7 +566,7 @@ func inspectPlumbingSymbols(file sourceFile, plumbing map[string]string) []strin
 		if !isPlumbing {
 			return true
 		}
-		if slices.Contains(tlsPlumbing[path].symbols, selector.Sel.Name) {
+		if slices.Contains(narrowedImports[path].symbols, selector.Sel.Name) {
 			return true
 		}
 		findings = append(findings, fmt.Sprintf(
@@ -394,7 +574,7 @@ func inspectPlumbingSymbols(file sourceFile, plumbing map[string]string) []strin
 				"The import is allowed for the mint client's transport, not as a way into the package:\n"+
 				"x509.ParsePKCS8PrivateKey plus a crypto.Signer assertion is a complete signer that\n"+
 				"imports no signing primitive at all.",
-			file.path, qualifier.Name, selector.Sel.Name, tlsPlumbing[path].symbols, path))
+			file.path, qualifier.Name, selector.Sel.Name, narrowedImports[path].symbols, path))
 		return true
 	})
 	return findings
@@ -421,7 +601,7 @@ func inspectProtoEncoding(file sourceFile, protoNames map[string]bool) []string 
 		}
 		switch selector.Sel.Name {
 		case "Marshal", "MarshalOptions":
-			if codecArgumentIsPermitted(file, node, "Marshal") {
+			if codecArgumentIsPermitted(file, node, codecProto, "Marshal") {
 				return true
 			}
 		case "Unmarshal", "UnmarshalOptions":
@@ -429,7 +609,7 @@ func inspectProtoEncoding(file sourceFile, protoNames map[string]bool) []string 
 			// last blocker: a second unverified parser needs base64 to open the
 			// envelope and Unmarshal to read it. corework.Inspect does both, and
 			// hands back the claims, so nothing here needs either.
-			if codecArgumentIsPermitted(file, node, "Unmarshal") {
+			if codecArgumentIsPermitted(file, node, codecProto, "Unmarshal") {
 				return true
 			}
 			findings = append(findings, fmt.Sprintf(
@@ -642,7 +822,7 @@ func inspectJSONCalls(file sourceFile, jsonNames map[string]bool) []string {
 		if !slices.Contains(jsonOperations, selector.Sel.Name) {
 			return true
 		}
-		if codecArgumentIsPermitted(file, node, selector.Sel.Name) {
+		if codecArgumentIsPermitted(file, node, codecJSON, selector.Sel.Name) {
 			return true
 		}
 		findings = append(findings, fmt.Sprintf(
@@ -675,7 +855,7 @@ func inspectJSONValueCalls(file sourceFile, importsJSON bool) []string {
 		// allowlist row for Decode/Encode is what it may be pointed at, which
 		// is a DIFFERENT row from Marshal/Unmarshal's — so the operation's own
 		// name is what selects it.
-		if codecArgumentIsPermitted(file, node, selector.Sel.Name) {
+		if codecArgumentIsPermitted(file, node, codecJSON, selector.Sel.Name) {
 			return true
 		}
 		findings = append(findings, fmt.Sprintf(
@@ -702,6 +882,144 @@ func TestTheGateCatchesItsOwnBypasses(t *testing.T) {
 		source string
 		says   string
 	}{
+		// ---- Round four: the shapes the review found this gate blind to.
+		//
+		// Each is a complete second parser or encoder that COMPILED and
+		// produced zero findings at the previous revision. The common thread
+		// is that the codec rule was about names: a type name with no package,
+		// an identifier resolved to whichever same-named declaration came
+		// last, and a row keyed on an operation name shared by every codec.
+		"a local alias giving a capability an allowlisted type name": {
+			path: "cache_partition.go",
+			source: `package workcontext
+import (
+	basev0 "github.com/codefly-dev/core/generated/go/codefly/base/v0"
+	"google.golang.org/protobuf/proto"
+)
+func encode(wc *basev0.WorkContextV1) ([]byte, error) {
+	type WorkScopeV1 = basev0.WorkContextV1
+	return proto.MarshalOptions{Deterministic: true}.Marshal((*WorkScopeV1)(wc))
+}`,
+			says: "inside a function",
+		},
+		"a file-level alias giving a capability an allowlisted type name": {
+			path: "cache_partition.go",
+			source: `package workcontext
+import (
+	basev0 "github.com/codefly-dev/core/generated/go/codefly/base/v0"
+	"google.golang.org/protobuf/proto"
+)
+type WorkScopeV1 = basev0.WorkContextV1
+func encode(wc *WorkScopeV1) ([]byte, error) {
+	return proto.Marshal(wc)
+}`,
+			says: "aliases core's",
+		},
+		// The qualifier is the whole point: the allowlist row exists for ONE
+		// core message, and the resolver used to answer "WorkScopeV1" for
+		// every type whose final name was that, from any package.
+		"a marshal of a foreign package's WorkScopeV1": {
+			path: "cache_partition.go",
+			source: `package workcontext
+import (
+	"google.golang.org/protobuf/proto"
+	elsewhere "example.test/other"
+)
+func encode(scope *elsewhere.WorkScopeV1) ([]byte, error) {
+	return proto.Marshal(scope)
+}`,
+			says: "on a type it is not allowed to",
+		},
+		"a marshal of another package's identically named type": {
+			path: "cache_partition.go",
+			source: `package workcontext
+import (
+	"google.golang.org/protobuf/proto"
+	elsewhere "google.golang.org/protobuf/types/known/structpb"
+)
+type WorkScopeV1 = elsewhere.Struct
+func encode() ([]byte, error) {
+	return proto.Marshal(&WorkScopeV1{})
+}`,
+			says: "on a type it is not allowed to",
+		},
+		"base64 DECODING in the file allowed to encode": {
+			path: "cache_partition.go",
+			source: `package workcontext
+import "encoding/base64"
+func open(token string) ([]byte, error) {
+	return base64.RawURLEncoding.DecodeString(token)
+}`,
+			says: "may never DECODE",
+		},
+		"a proto codec riding mint.go's encoding/json row": {
+			path: "mint.go",
+			source: `package workcontext
+import "google.golang.org/protobuf/proto"
+type mintResponse struct{ WorkContext string }
+func read(raw []byte) error {
+	var body mintResponse
+	return proto.Unmarshal(raw, &body)
+}`,
+			says: "calls proto.Unmarshal",
+		},
+		"an identifier resolved to a later same-named declaration": {
+			path: "mint.go",
+			source: `package workcontext
+import (
+	"encoding/json"
+	basev0 "github.com/codefly-dev/core/generated/go/codefly/base/v0"
+)
+func leak(claims *basev0.WorkContextV1) ([]byte, error) {
+	body := claims
+	return json.Marshal(body)
+}
+type mintResponse struct{ WorkContext string }
+func decode() {
+	var body mintResponse
+	_ = body
+}`,
+			says: "on a type it is not allowed to",
+		},
+		"an identifier an ambiguous file cannot resolve": {
+			path: "mint.go",
+			source: `package workcontext
+import "encoding/json"
+type mintRequest struct{ Audience string }
+func one() { body := mintRequest{}; _ = body }
+func two(raw []byte) error {
+	body := map[string]any{}
+	return json.Unmarshal(raw, &body)
+}`,
+			says: "on a type it is not allowed to",
+		},
+		"mime as a base64 decoder": {
+			path: "carrier.go",
+			source: `package workcontext
+import "mime"
+func open(header string) (string, error) {
+	kind, _, err := mime.ParseMediaType(header)
+	return kind, err
+}`,
+			says: "imports \"mime\"",
+		},
+		"sha256 outside the file that hashes": {
+			path: "carrier.go",
+			source: `package workcontext
+import "crypto/sha256"
+func mac(key, message []byte) []byte {
+	inner := sha256.Sum256(append(key, message...))
+	return inner[:]
+}`,
+			says: "imports \"crypto/sha256\"",
+		},
+		"a nested package reaching for the cache partition's base64": {
+			path: "grpctransport/partition.go",
+			source: `package grpctransport
+import "encoding/base64"
+var _ = base64.RawURLEncoding`,
+			says: "imports \"encoding/base64\"",
+		},
 		"a nested file inheriting the mint.go allowance": {
 			path: "grpctransport/mint.go",
 			source: `package grpctransport
@@ -1174,8 +1492,8 @@ func envelopeDecoderReasons() []string {
 //
 // An argument it cannot resolve is NOT permitted. A gate that passed what it
 // could not read would be a gate about what is easy to parse.
-func codecArgumentIsPermitted(file sourceFile, call ast.Node, operation string) bool {
-	permitted := permittedCodecTypes(file.path, operation)
+func codecArgumentIsPermitted(file sourceFile, call ast.Node, codec string, operation string) bool {
+	permitted := permittedCodecTypes(file.path, codec, operation)
 	if len(permitted) == 0 {
 		return false
 	}
@@ -1194,7 +1512,7 @@ func codecArgumentIsPermitted(file sourceFile, call ast.Node, operation string) 
 	if operation == "Unmarshal" || operation == "Decode" {
 		value = arguments[len(arguments)-1]
 	}
-	named := resolveTypeName(file, value)
+	named := resolveTypeName(file, value, value.Pos())
 	return named != "" && slices.Contains(permitted, named)
 }
 
@@ -1226,10 +1544,10 @@ func codecArguments(file sourceFile, target ast.Node) []ast.Expr {
 
 // resolveTypeName names the type of an expression, syntactically, or returns ""
 // when it cannot.
-func resolveTypeName(file sourceFile, expression ast.Expr) string {
+func resolveTypeName(file sourceFile, expression ast.Expr, use token.Pos) string {
 	switch typed := expression.(type) {
 	case *ast.UnaryExpr:
-		return resolveTypeName(file, typed.X)
+		return resolveTypeName(file, typed.X, use)
 	case *ast.CompositeLit:
 		return typeName(typed.Type)
 	case *ast.TypeAssertExpr:
@@ -1242,19 +1560,29 @@ func resolveTypeName(file sourceFile, expression ast.Expr) string {
 		// A conversion: T(x) names T; anything else is unknown.
 		return typeName(typed.Fun)
 	case *ast.Ident:
-		return declaredTypeName(file, typed.Name)
+		return declaredTypeName(file, typed.Name, use)
 	}
 	return ""
 }
 
-// typeName reduces a type expression to its bare name: *pkg.T, pkg.T, []T and
-// map[K]V all answer what a reader would call them.
+// typeName reduces a type expression to its name, KEEPING THE PACKAGE
+// QUALIFIER: *pkg.T and pkg.T are "pkg.T", []T is "[]T", a map is "map".
+//
+// It used to return Sel.Name and drop the qualifier, so basev0.WorkScopeV1 and
+// anything.WorkScopeV1 were the same string — and cache_partition.go's row,
+// which exists for ONE core scope message, permitted a proto.Marshal of any
+// type whose final name happened to be WorkScopeV1, including a local alias to
+// the capability itself.
 func typeName(expression ast.Expr) string {
 	switch typed := expression.(type) {
 	case *ast.StarExpr:
 		return typeName(typed.X)
 	case *ast.SelectorExpr:
-		return typed.Sel.Name
+		qualifier, ok := typed.X.(*ast.Ident)
+		if !ok {
+			return ""
+		}
+		return qualifier.Name + "." + typed.Sel.Name
 	case *ast.Ident:
 		return typed.Name
 	case *ast.ArrayType:
@@ -1268,52 +1596,111 @@ func typeName(expression ast.Expr) string {
 	return ""
 }
 
-// declaredTypeName looks an identifier up among this file's declarations: var
-// specs, short variable declarations, and function parameters and results.
-func declaredTypeName(file sourceFile, name string) string {
-	found := ""
-	ast.Inspect(file.syntax, func(node ast.Node) bool {
-		switch declared := node.(type) {
-		case *ast.ValueSpec:
-			for index, declaredName := range declared.Names {
-				if declaredName.Name != name {
-					continue
+// declaredTypeName looks an identifier up among the declarations that are
+// actually IN SCOPE at the use, and refuses to answer when more than one
+// distinct declaration could be the one.
+//
+// Two defects it used to have, both reported and both reproducible:
+//
+//   - IT RETURNED THE LAST MATCH. ast.Inspect's false return prunes a subtree
+//     and then carries on over the siblings, so `found` was overwritten by
+//     every later declaration of the same name — and a function placed BEFORE
+//     mint.go's credentialFrom could write `body := claims` and have `body`
+//     resolve to the mintResponse declared further down.
+//   - IT IGNORED SCOPE. A name declared in one function resolved a name used
+//     in another.
+//
+// Now the search is restricted to the function enclosing the use (plus
+// file-level declarations), the candidate must be declared BEFORE the use, and
+// two candidates that disagree resolve to "" — which is not permitted, because
+// a gate that guesses between two readings is not a gate.
+func declaredTypeName(file sourceFile, name string, use token.Pos) string {
+	scope := enclosingBody(file, use)
+	var candidates []string
+	consider := func(node ast.Node, resolved string) {
+		if node.Pos() > use || resolved == "" {
+			return
+		}
+		if !slices.Contains(candidates, resolved) {
+			candidates = append(candidates, resolved)
+		}
+	}
+	inspect := func(root ast.Node) {
+		ast.Inspect(root, func(node ast.Node) bool {
+			switch declared := node.(type) {
+			case *ast.ValueSpec:
+				for index, declaredName := range declared.Names {
+					if declaredName.Name != name {
+						continue
+					}
+					if declared.Type != nil {
+						consider(declared, typeName(declared.Type))
+						continue
+					}
+					if index < len(declared.Values) {
+						consider(declared, resolveTypeName(file, declared.Values[index], use))
+					}
 				}
-				if declared.Type != nil {
-					found = typeName(declared.Type)
-					return false
+			case *ast.AssignStmt:
+				if declared.Tok != token.DEFINE {
+					return true
 				}
-				if index < len(declared.Values) {
-					found = resolveTypeName(file, declared.Values[index])
-					return false
+				for index, left := range declared.Lhs {
+					ident, ok := left.(*ast.Ident)
+					if !ok || ident.Name != name || index >= len(declared.Rhs) {
+						continue
+					}
+					consider(declared, resolveTypeName(file, declared.Rhs[index], use))
 				}
-			}
-		case *ast.AssignStmt:
-			if declared.Tok != token.DEFINE {
-				return true
-			}
-			for index, left := range declared.Lhs {
-				ident, ok := left.(*ast.Ident)
-				if !ok || ident.Name != name || index >= len(declared.Rhs) {
-					continue
+			case *ast.FuncDecl:
+				// Parameters and results are in scope only inside their own
+				// function, which is what scope here means.
+				if scope == nil || declared.Body != scope {
+					return true
 				}
-				found = resolveTypeName(file, declared.Rhs[index])
-				return false
-			}
-		case *ast.FuncDecl:
-			for _, list := range fieldLists(declared.Type) {
-				for _, field := range list {
-					for _, declaredName := range field.Names {
-						if declaredName.Name == name {
-							found = typeName(field.Type)
-							return false
+				for _, list := range fieldLists(declared.Type) {
+					for _, field := range list {
+						for _, declaredName := range field.Names {
+							if declaredName.Name == name {
+								consider(field, typeName(field.Type))
+							}
 						}
 					}
 				}
 			}
+			return true
+		})
+	}
+	// File-level declarations, then the enclosing function's own body.
+	for _, declaration := range file.syntax.Decls {
+		if function, ok := declaration.(*ast.FuncDecl); ok {
+			if scope != nil && function.Body == scope {
+				inspect(function)
+			}
+			continue
 		}
-		return true
-	})
+		inspect(declaration)
+	}
+	if len(candidates) != 1 {
+		// Nothing, or an ambiguity. Either way nothing is permitted.
+		return ""
+	}
+	return candidates[0]
+}
+
+// enclosingBody is the body of the function containing pos, or nil at file
+// level. It is what makes the lookup above scoped rather than file-wide.
+func enclosingBody(file sourceFile, pos token.Pos) *ast.BlockStmt {
+	var found *ast.BlockStmt
+	for _, declaration := range file.syntax.Decls {
+		function, ok := declaration.(*ast.FuncDecl)
+		if !ok || function.Body == nil {
+			continue
+		}
+		if function.Body.Pos() <= pos && pos <= function.Body.End() {
+			found = function.Body
+		}
+	}
 	return found
 }
 
