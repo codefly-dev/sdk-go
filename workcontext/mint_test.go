@@ -704,6 +704,9 @@ func TestMintSeparatesARefusalFromAnOutage(t *testing.T) {
 		http.StatusTooManyRequests:     ErrMintUnavailable,
 		http.StatusInternalServerError: ErrMintUnavailable,
 		http.StatusBadGateway:          ErrMintUnavailable,
+		http.StatusRequestTimeout:      ErrMintUnavailable,
+		http.StatusTooEarly:            ErrMintUnavailable,
+		http.StatusNotFound:            ErrMintUnavailable,
 	} {
 		t.Run(fmt.Sprintf("http %d", status), func(t *testing.T) {
 			host := newMintHost(t, now)
@@ -1283,12 +1286,25 @@ func TestOnlyAnOutageServesTheHeldCredential(t *testing.T) {
 		sentinel error
 		serves   bool
 	}{
-		"503 is an outage": {http.StatusServiceUnavailable, ErrMintUnavailable, true},
-		"429 is an outage": {http.StatusTooManyRequests, ErrMintUnavailable, true},
-		"403 is a refusal": {http.StatusForbidden, ErrMintRefused, false},
-		"401 is a refusal": {http.StatusUnauthorized, ErrMintRefused, false},
-		"400 is a refusal": {http.StatusBadRequest, ErrMintRefused, false},
-		"404 is a refusal": {http.StatusNotFound, ErrMintRefused, false},
+		// LATCHING IS THE ENUMERATED CASE, not the default. The rule used to
+		// be inverted — 429 and 5xx retryable, everything else terminal —
+		// which made every status a proxy, ingress or sidecar might invent
+		// into a permanent stop. Measured: a 408 refused, did not serve, and
+		// latched for the life of the process while a valid credential was
+		// held. So the default is retryable and these two are the exceptions.
+		"401 is a refusal: the projected token is not acceptable": {
+			http.StatusUnauthorized, ErrMintRefused, false},
+		"403 is a refusal: the host authenticated this process and refused it": {
+			http.StatusForbidden, ErrMintRefused, false},
+		"503 is an outage":                      {http.StatusServiceUnavailable, ErrMintUnavailable, true},
+		"429 is an outage":                      {http.StatusTooManyRequests, ErrMintUnavailable, true},
+		"408 is an outage: a proxy timed out":   {http.StatusRequestTimeout, ErrMintUnavailable, true},
+		"425 is an outage: too early":           {http.StatusTooEarly, ErrMintUnavailable, true},
+		"404 is an outage: an ingress mid-roll": {http.StatusNotFound, ErrMintUnavailable, true},
+		"400 is an outage: something in the middle rendered it": {
+			http.StatusBadRequest, ErrMintUnavailable, true},
+		"418 is an outage: an unenumerated status is never terminal": {
+			http.StatusTeapot, ErrMintUnavailable, true},
 	} {
 		t.Run(name, func(t *testing.T) {
 			clock := testClock

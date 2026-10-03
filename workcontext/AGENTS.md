@@ -12,10 +12,30 @@ budget. The root file carries the rule; this carries what the gates refuse.
 
 ## What the two gates refuse, and why each rule exists
 
-`TestNoSecondWorkContextImplementation` walks this module's AST.
-`scripts/check-one-implementation.sh` sweeps every tracked Go file in BOTH
-modules, because that test walks from this module's root and the implementation
-this repository deleted lived at the repository root, in package `codefly`.
+**Both gates read BOTH modules.** `TestNoSecondWorkContextImplementation` walks
+the repository's AST; `scripts/check-one-implementation.sh` sweeps every tracked
+Go file by import path, and over every published ref besides.
+
+The AST gate used to walk this module only, which was a hole with nothing behind
+it: the deleted implementation lived at the repository root, in package
+`codefly`, and the sweep bans *imports* rather than reading code. A reviewer
+built the consequence and ran it — a root file with a **hand-written base64url
+decoder**, so no banned import at all, and `proto.Unmarshal` into
+`basev0.WorkContextV1` — and it compiled, linted at 0 issues and passed the
+sweep as `ok working tree (58 Go files)`.
+
+The two modules are held to different rules, deliberately. **In here the
+capability is the subject**, so every codec use is allowlisted by name. **Outside
+it the subject is everything else** — receipts, configuration, runtime documents
+— so enumerating the legitimate types would be noise that rots; the rule there
+is the decisive one on its own: **no codec may be applied to a Work Context
+message**, recognised as a type under core's module whose name begins with
+`Work`. A prefix, so a message core adds later is covered the day it exists.
+
+Type names resolve to the imported **package PATH**, never to the local
+qualifier, because the qualifier is the author's choice: `basev0
+"some/other/pkg"` would otherwise let a foreign type answer to a row written for
+one of core's.
 
 - **By capability, never by name.** A signature, MAC or JOSE/JWT primitive,
   anything under `x/crypto`, `protojson`/`protowire`/`anypb`. The bare `crypto`

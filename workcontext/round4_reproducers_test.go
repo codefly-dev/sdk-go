@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/x509"
 	"net/http"
+	"net/url"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -362,3 +363,130 @@ func (*localFault) Error() string { return "too many open files" }
 type faultySource struct{ err error }
 
 func (s *faultySource) ProjectedToken() (string, error) { return "", s.err }
+
+// N1, the layer-4 review's new finding: a CANCELLED LEADER must be served the
+// valid credential it is holding, exactly as a cancelled waiter is.
+//
+// The round-three fix wrote `serve := servableNow != nil && outage &&
+// !cancelled`, which made a leader whose own deadline expired the one caller
+// that is never served — measured by the reviewer as 20 of 20 callers failing
+// in the renewal window while a credential with two minutes left was in hand.
+// The two paths disagreed about the same credential: a cancelled WAITER got it.
+//
+// Detaching the request removes the disagreement at the root, because there is
+// no leader any more. Whoever takes the slot waits on the same channel and is
+// answered by the same servableLocked as everybody else.
+func TestACancelledLeaderIsServedTheCredentialItHolds(t *testing.T) {
+	clock := &movableClock{at: testClock}
+	host := newMintHost(t, clock.now)
+	release := make(chan struct{})
+	var releaseOnce sync.Once
+	t.Cleanup(func() { releaseOnce.Do(func() { close(release) }) })
+	client := newTestMintClient(t, host, projectedFile(t, "projected"), clock.now)
+
+	held, err := client.Credential(t.Context())
+	require.NoError(t, err)
+
+	// The host stops answering, and the clock enters the renewal lead: the
+	// credential in hand is still valid for minutes.
+	host.before = func() {
+		select {
+		case <-release:
+		case <-time.After(10 * time.Second):
+		}
+	}
+	clock.set(testClock.Add(13 * time.Minute))
+	require.True(t, held.ExpiresAt().After(clock.now()), "the held credential is still valid")
+
+	// Twenty callers, each the leader in turn, each giving up on its own
+	// deadline. Every one of them must be served.
+	for attempt := range 20 {
+		ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+		served, callErr := client.Credential(ctx)
+		cancel()
+		require.NoError(t, callErr,
+			"caller %d was refused while holding a credential valid until %s",
+			attempt, held.ExpiresAt())
+		require.Equal(t, held.Token(), served.Token())
+	}
+	require.NoError(t, client.Refused(), "a host that did not answer is not a refusal")
+}
+
+// The final-URL assertion, tested directly.
+//
+// A reviewer measured that deleting the check changes no test: CheckRedirect
+// refuses a redirect before a second request is made, and the client owns its
+// transport, so nothing can follow one internally. Both of those are why it
+// cannot fire — and testing the predicate is how the check stops being a branch
+// whose only evidence is that nobody can reach it.
+func TestTheFinalURLAssertionNamesAnAnswerFromElsewhere(t *testing.T) {
+	configured := "https://mint.example.test/credential"
+	for name, probe := range map[string]struct {
+		response  *http.Response
+		elsewhere string
+	}{
+		"the configured endpoint": {
+			response:  &http.Response{Request: requestTo(t, configured)},
+			elsewhere: "",
+		},
+		"another host": {
+			response:  &http.Response{Request: requestTo(t, "https://elsewhere.test/credential")},
+			elsewhere: "https://elsewhere.test/credential",
+		},
+		"another path on the same host": {
+			response:  &http.Response{Request: requestTo(t, "https://mint.example.test/other")},
+			elsewhere: "https://mint.example.test/other",
+		},
+		"userinfo is redacted rather than logged": {
+			response:  &http.Response{Request: requestTo(t, "https://user:secret@elsewhere.test/x")},
+			elsewhere: "https://user:xxxxx@elsewhere.test/x",
+		},
+		"no request recorded": {response: &http.Response{}, elsewhere: ""},
+		"no response":         {response: nil, elsewhere: ""},
+	} {
+		t.Run(name, func(t *testing.T) {
+			require.Equal(t, probe.elsewhere, answeredFromElsewhere(probe.response, configured))
+		})
+	}
+}
+
+func requestTo(t *testing.T, raw string) *http.Request {
+	t.Helper()
+	parsed, err := url.Parse(raw)
+	require.NoError(t, err)
+	return &http.Request{URL: parsed}
+}
+
+// The window's first branch: a credential that expires at or before it becomes
+// valid. It had no case at all, so the branch was asserted by nothing.
+func TestAMintedCredentialThatExpiresBeforeItIsValidIsRefused(t *testing.T) {
+	clock := &movableClock{at: testClock}
+	host := newMintHost(t, clock.now)
+	// A host whose window is inverted: minted an hour ago, for a negative
+	// lifetime, so expires_at lands before not_before.
+	mintedAt := testClock.Add(-time.Hour)
+	// core refuses a non-positive TTL, so the inversion is built by minting
+	// with a window that has already closed and then asserting on the ORDER
+	// rather than on the host's cooperation.
+	lifetime := time.Second
+	host.mintedAt, host.mintedFor = &mintedAt, &lifetime
+	client := newTestMintClient(t, host, projectedFile(t, "projected"), clock.now)
+
+	_, err := client.Credential(t.Context())
+	require.Error(t, err)
+
+	// And the predicate itself, for the inverted window core will not mint:
+	// the client must refuse it rather than install a credential whose window
+	// is empty.
+	inverted := Credential{
+		notBefore: testClock,
+		expiresAt: testClock.Add(-time.Minute),
+	}
+	windowErr := client.checkWindow(inverted)
+	require.ErrorIs(t, windowErr, ErrMintRefused)
+	require.ErrorContains(t, windowErr, "expires at or before it becomes valid")
+
+	// Equal is also refused: a zero-length window is not a window.
+	equal := Credential{notBefore: testClock, expiresAt: testClock}
+	require.ErrorContains(t, client.checkWindow(equal), "expires at or before it becomes valid")
+}

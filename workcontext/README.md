@@ -325,14 +325,38 @@ another name, arriving exactly when the host was least able to serve it.
 
 **The request itself is detached from the caller that started it,** bounded by
 `RequestTimeout`. It used to run on the leader's own context, and a cancelled
-leader was then a case of its own — no failure, so no hold-off. Measured: with
-twenty callers whose deadlines were shorter than a degraded host's latency,
-every call became the new leader and the host received **twenty requests**,
-each of which it may complete and audit while this process discards it. A
-refusal arriving just after its caller gave up was discarded too, so the next
-caller presented the projected token again. Detached, the request completes
-once, is classified once, and installs its result for everybody — and the same
-twenty callers produce **one** request.
+leader was then a case of its own — no failure, so no hold-off, and *never
+served the credential it was holding*. Three consequences, all measured:
+
+- one mint request per caller deadline. A reviewer ran a host at 250 ms latency
+  against callers with 20 ms deadlines and counted **94 requests in two
+  seconds, all 94 completed host-side** — single-flight caps concurrency, not
+  rate — each one minted, audited, and discarded. With eight concurrent callers
+  it was 752 calls and the same 94 requests.
+- a refusal arriving just after its caller gave up was discarded, so the next
+  caller presented the projected token to a host that had already refused it.
+- **20 of 20 callers failed in the renewal window while holding a credential
+  with two minutes left.** A cancelled *waiter* was served that credential, so
+  the two paths disagreed about the same credential.
+
+Detached, there is no leader: whoever takes the slot waits on the same channel
+as everybody else and is answered by the same `servableLocked`. The request
+completes once, is classified once, and installs for everybody.
+
+**Latching is the enumerated case, not the default.** `ErrMintRefused` is
+terminal — a process that sees one must stop serving — so the rule for which
+HTTP statuses earn it used to be inverted: 429 and 5xx were retryable and
+*everything else* was a permanent stop. Measured: a **408 from a proxy**, with a
+valid credential in hand, refused, did not serve, and latched for the life of
+the process. A 425, a 404 from an ingress mid-rollout, or a 502 rendered as 400
+by a sidecar would each do the same. Only **401** (the projected token is not
+acceptable) and **403** (the host authenticated this process and refused it)
+latch now; every other status is an outage. The cost of being wrong is
+asymmetric — a wrong "retryable" costs one request per hold-off, and a wrong
+"terminal" costs the process. A refusal this client decides for *itself* — an
+audience that does not match the pin, a seal the host contradicted, a refused
+redirect, a certificate that did not verify — still latches, because those are
+its own verdicts rather than a status somebody in the middle chose.
 
 **`Refresh` has its own rate limit, and it decays.** The generation check does
 not bound it: a receiver whose live state lags refuses each FRESH credential, so

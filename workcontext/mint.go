@@ -13,6 +13,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -1092,32 +1093,31 @@ func (c *MintClient) mintLocked(ctx context.Context, audience string) (Credentia
 	defer func() {
 		_ = response.Body.Close()
 	}()
-	if response.Request != nil && response.Request.URL != nil &&
-		response.Request.URL.String() != c.options.URL {
-		// The redirect refusal above is what prevents a second request, and a
-		// transport that redirects inside itself never calls it. If the answer
-		// came from anywhere other than the configured URL, the projected token
-		// has already been seen by something nothing configured, and stopping
-		// the process is the only safe outcome.
+	if elsewhere := answeredFromElsewhere(response, c.options.URL); elsewhere != "" {
+		// An ASSERTION on the transport-ownership invariant, and deliberately
+		// kept although nothing can currently reach it: CheckRedirect refuses
+		// first, and the client owns its transport so no RoundTripper can
+		// follow a redirect internally. A reviewer measured that deleting it
+		// changes no test, which is true and is not the same as it being
+		// pointless — what it holds is that those two facts stay true. If the
+		// answer came from anywhere but the configured URL, the projected
+		// token has already been seen by something nothing configured, and
+		// stopping the process is the only safe outcome.
+		//
+		// It is a FUNCTION rather than an inline condition so the check itself
+		// is testable without having to manufacture a transport that cannot
+		// exist. A branch that can only be asserted by its own absence is the
+		// ErrUnsealed mistake; a named predicate with a unit test is not.
 		return Credential{}, fmt.Errorf(
 			"%w: the mint response came from %s, not the configured endpoint",
-			ErrMintRefused, response.Request.URL.Redacted(),
+			ErrMintRefused, elsewhere,
 		)
 	}
 	if response.StatusCode != http.StatusOK {
 		_, _ = io.Copy(io.Discard, io.LimitReader(response.Body, 4*1024))
-		sentinel := ErrMintRefused
-		if response.StatusCode == http.StatusTooManyRequests ||
-			response.StatusCode == http.StatusRequestTimeout ||
-			response.StatusCode >= 500 {
-			// 408 belongs with 429 and 5xx: the host is saying it did not get
-			// to the request in time, which is the definition of retryable. It
-			// was classified as a refusal, so one slow moment at the endpoint
-			// latched and permanently stopped a process holding a valid
-			// credential.
-			sentinel = ErrMintUnavailable
-		}
-		return Credential{}, fmt.Errorf("%w: mint returned HTTP %d", sentinel, response.StatusCode)
+		return Credential{}, fmt.Errorf(
+			"%w: mint returned HTTP %d", sentinelForStatus(response.StatusCode), response.StatusCode,
+		)
 	}
 	// Content-Type is REQUIRED, not checked when present. An absent header used
 	// to be accepted, which made "the response is JSON" something the host
@@ -1276,6 +1276,58 @@ func (c *MintClient) checkWindow(credential Credential) error {
 		)
 	}
 	return nil
+}
+
+// answeredFromElsewhere reports the redacted URL a response actually came from
+// when that is not the configured endpoint, and "" when it is.
+func answeredFromElsewhere(response *http.Response, configured string) string {
+	if response == nil || response.Request == nil || response.Request.URL == nil {
+		return ""
+	}
+	if response.Request.URL.String() == configured {
+		return ""
+	}
+	return response.Request.URL.Redacted()
+}
+
+// refusalStatuses are the ONLY statuses that latch this client.
+//
+// The rule used to be the other way round — 429 and 5xx were retryable and
+// EVERYTHING ELSE was a terminal refusal — which made every status a host or
+// anything between it and this process might invent into a permanent stop. It
+// was measured: a 408 from a proxy, with a valid credential in hand, refused,
+// did not serve, and latched for the life of the process. A 425, a 404 from an
+// ingress mid-rollout and a 502 rendered as 400 by a sidecar would each do the
+// same.
+//
+// So the default is now "retryable", and latching is the enumerated case:
+//
+//	401  the projected token is not acceptable. Presenting it again is the
+//	     thing this client must not do.
+//	403  the host authenticated the process and refused it — the build is not
+//	     approved, the installation is not one it may serve.
+//
+// Everything else is an outage: the held credential keeps being served while it
+// is valid, the next attempt is held off, and the process does not stop. That is
+// the right default because the cost of being wrong is asymmetric — a wrong
+// "retryable" costs one request per hold-off, and a wrong "terminal" costs the
+// process.
+//
+// A refusal this client decides for ITSELF — an audience that does not match
+// the pin, a seal the host contradicted, a refused redirect, a certificate that
+// did not verify — still latches, because those are this client's own verdicts
+// and not a status somebody in the middle chose.
+var refusalStatuses = []int{
+	http.StatusUnauthorized,
+	http.StatusForbidden,
+}
+
+// sentinelForStatus classifies the host's status code.
+func sentinelForStatus(status int) error {
+	if slices.Contains(refusalStatuses, status) {
+		return ErrMintRefused
+	}
+	return ErrMintUnavailable
 }
 
 // mintRequest is everything the client tells the host, which is only what it

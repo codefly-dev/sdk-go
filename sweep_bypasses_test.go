@@ -59,6 +59,18 @@ func TestTheRepositorySweepCatchesItsOwnBypasses(t *testing.T) {
 			source: "package x\n\nimport \"crypto/cipher\"\n\nvar _ = cipher.NewGCM\n",
 			says:   "crypto/cipher",
 		},
+		"a raw-string import path": {
+			source: "package x\n\nimport `crypto/ed25519`\n",
+			says:   "crypto/ed25519",
+		},
+		"an alias that is neither ASCII nor a single word": {
+			source: "package x\n\nimport (\n\tédd \"crypto/ed25519\"\n)\n",
+			says:   "crypto/ed25519",
+		},
+		"a comment-prefixed single-line import": {
+			source: "package x\n\nimport /* x */ \"crypto/ed25519\"\n",
+			says:   "crypto/ed25519",
+		},
 		"base32 as an alternative envelope": {
 			source: "package x\n\nimport \"encoding/base32\"\n\nvar _ = base32.StdEncoding\n",
 			says:   "encoding/base32",

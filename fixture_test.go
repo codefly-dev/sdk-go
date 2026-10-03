@@ -116,5 +116,15 @@ func TestFixturePrincipalNamesPinnedModulesItCannotRead(t *testing.T) {
 	_, err := codefly.Fixture().Principal(t.Context(), "super_admin")
 
 	require.ErrorIs(t, err, composition.ErrUnknownFixture)
-	assert.Contains(t, err.Error(), "starter")
+	// The MODULE NAME and the fact that it is pinned, not merely some
+	// substring of the error. When the product names were removed from this
+	// file the assertion went from "saas-starter" to "starter", which is also
+	// a substring of the module's own source "example-org/module-starter" — so
+	// it stopped pinning which name the error has to carry. Generic fixtures
+	// were the point; a weaker assertion was not.
+	assert.Contains(t, err.Error(), "starter",
+		"the error must name the module whose fixtures could not be read")
+	assert.Contains(t, err.Error(), "pinned",
+		"and must say that it is PINNED, which is the diagnosis: an unknown-fixture "+
+			"error here has meant a pinned module the SDK never read, not a wrong name")
 }

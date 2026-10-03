@@ -121,9 +121,12 @@ see the skill below.
   through `Inspect`. Nothing here may sign, check a signature, encode a
   capability **or decide what a capability is** — a local seal rule is a second
   implementation even when it signs nothing, and ours disagreed with core's own
-  fixtures about which sentinel three refusals earn. Two gates hold that:
-  `TestNoSecondWorkContextImplementation` (AST, the leaf module) and
-  `scripts/check-one-implementation.sh` (both modules, every published ref).
+  fixtures about which sentinel three refusals earn. Two gates hold that, and
+  **both read both modules**: `TestNoSecondWorkContextImplementation` (AST) and
+  `scripts/check-one-implementation.sh` (import paths, plus every published
+  ref). The AST gate walked the leaf module only until a reviewer compiled a
+  root-module parser whose base64url decoder was hand-written, so it imported
+  nothing a sweep can ban.
   **`workcontext/AGENTS.md` is what each one refuses and why** — read it before
   touching that module, the gate, or the sweep.
 - **An authority-bearing value is read once.** A principal, binding or audience

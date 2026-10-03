@@ -147,21 +147,40 @@ func TestTheDefaultTransportIsNeverTheOneThatCarriesTheBearer(t *testing.T) {
 // The review's probe is kept in its own right rather than folded into the
 // carrier tests, because what it demonstrates is the SHAPE of the mistake: a
 // pre-check whose strictness depended on what the caller had chosen to attach.
-func TestOmittingBothCarriersDoesNotSkipTheSealCheck(t *testing.T) {
+func TestTheSealCheckIsReachedEvenWhenTheCarriersAreWellFormed(t *testing.T) {
+	// The carriers are PRESENT AND WELL-FORMED, which is the whole point.
+	//
+	// This test used to send the capability with no carriers at all, so every
+	// case failed on carrier CARDINALITY and the structural seal check was
+	// never reached — it passed with the seal check deleted, which a reviewer
+	// measured. Supplying both carriers is what gets past cardinality and puts
+	// the seal check on the only remaining path.
 	for name, token := range map[string]string{
-		"malformed":          "not-a-token",
-		"missing seal":       fixture(t, "missing-seal").Token,
-		"actor with noepoch": fixture(t, "actor-without-epoch").Token,
-		"foreign encoding":   fixture(t, "foreign-encoding").Token,
+		"malformed":           "not-a-token",
+		"missing seal":        fixture(t, "missing-seal").Token,
+		"actor without epoch": fixture(t, "actor-without-epoch").Token,
+		"foreign encoding":    fixture(t, "foreign-encoding").Token,
 	} {
 		t.Run(name, func(t *testing.T) {
-			bare := http.Header{}
-			bare.Set(HeaderName, token)
-			_, err := FromHeaders(bare)
-			require.Error(t, err,
-				"a capability with no carriers beside it is still a capability, and still checked")
+			carried := http.Header{}
+			carried.Set(HeaderName, token)
+			carried.Set(InstallationIDHeaderName, testInstallation)
+			carried.Set(InstallationRevisionHeaderName, "3")
+
+			_, err := FromHeaders(carried)
+			require.Error(t, err, "a structurally broken capability is refused")
+			require.NotContains(t, err.Error(), "requires exactly one value",
+				"this case never reached the seal check: it failed on carrier cardinality, "+
+					"which is what made this test pass with the seal check removed")
 		})
 	}
+
+	// And cardinality is still refused, as its own property rather than as the
+	// thing that hides the one above.
+	bare := http.Header{}
+	bare.Set(HeaderName, fixture(t, "missing-seal").Token)
+	_, err := FromHeaders(bare)
+	require.ErrorContains(t, err, "requires exactly one value")
 }
 
 // D3. Refreshing an old generation returned its replacement even after that

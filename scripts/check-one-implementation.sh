@@ -126,7 +126,13 @@ import_paths() {
     /^[[:space:]]*import[[:space:]]*\(/ { inblock = 1; next }
     inblock && /^[[:space:]]*\)/        { inblock = 0; next }
     inblock || /^[[:space:]]*import[[:space:]]/ {
-      if (match($0, /"[^"]+"/)) { print substr($0, RSTART + 1, RLENGTH - 2) }
+      # Double-quoted, which is every import gofmt produces.
+      if (match($0, /"[^"]+"/)) { print substr($0, RSTART + 1, RLENGTH - 2); next }
+      # And a RAW-STRING path. gofmt rewrites `crypto/ed25519` to the quoted
+      # form, so this cannot survive a formatted tree — but the sweep reads
+      # what is committed, not what gofmt would have written, and a reviewer
+      # confirmed the raw-string form passed.
+      if (match($0, /`[^`]+`/)) { print substr($0, RSTART + 1, RLENGTH - 2) }
     }
   ' "$1"
 }

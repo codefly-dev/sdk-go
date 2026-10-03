@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"reflect"
 	"sync"
 	"testing"
 	"time"
@@ -253,4 +254,93 @@ func TestGuardingIsDecidedPerMethodAndNotPerRequest(t *testing.T) {
 	require.Error(t, second)
 	require.Equal(t, codes.Internal, status.Code(second))
 	require.Contains(t, status.Convert(second).Message(), "property of the method")
+}
+
+// The three survivors the layer-4 mutation pass found in this package: no test
+// sent a header through SendHeader under revoked authority, SetTrailer after
+// Finish could still append, and the shape test survives an Unwrap accessor.
+
+// SendHeader is refused under revoked authority, and nothing reaches the
+// client. The whole suite stayed green with SendHeader's re-check deleted,
+// because every header test went through SetHeader.
+func TestSendHeaderIsRefusedUnderRevokedAuthority(t *testing.T) {
+	authority := &revocableGuard{}
+	authority.revoked.Store(true)
+	faults := &handlerFaults{}
+	connection := serveGuarded(t, authority.guard(t), func(stream grpc.ServerStream) error {
+		if err := stream.SendHeader(metadata.Pairs("sent-header", "leaked")); err == nil {
+			faults.record("SendHeader was accepted under revoked authority")
+		}
+		return nil
+	})
+
+	header, _, err := clientSaw(t, connection)
+	faults.assert(t)
+	require.Error(t, err)
+	require.Empty(t, header.Get("sent-header"))
+	require.Positive(t, int(authority.checks.Load()), "SendHeader performed no re-check")
+}
+
+// A trailer set AFTER Finish is not appended, so it cannot ride out on a
+// subsequent release. Past the last check there is nothing left to authorize
+// against, and the wrapper says so rather than silently keeping it.
+func TestATrailerSetAfterFinishIsRefused(t *testing.T) {
+	guard, err := workcontext.NewStreamGuard(workcontext.StreamGuardOptions{
+		Recheck: func(context.Context) error { return nil },
+	})
+	require.NoError(t, err)
+	underlying := &recordingStream{ctx: context.Background()}
+	guarded, err := Guard(underlying, guard)
+	require.NoError(t, err)
+
+	require.NoError(t, guarded.Finish(nil))
+	released := underlying.trailers
+
+	// After Finish: refused, and nothing more reaches gRPC however many times
+	// it is attempted.
+	for range 3 {
+		guarded.SetTrailer(metadata.Pairs("after-finish", "late"))
+	}
+	require.Equal(t, released, underlying.trailers,
+		"a trailer set after the last check reached gRPC")
+
+	// And the context route reports it rather than dropping it, because
+	// grpc.SetTrailer has somewhere to put an error.
+	require.Error(t, grpc.SetTrailer(guarded.Context(), metadata.Pairs("after-finish", "late")))
+}
+
+// The wrapper exposes no METHOD that returns the underlying stream either.
+//
+// The shape test checked fields and the interface's own methods, so it survived
+// an `Unwrap() any` accessor — which is the embedded field again with one more
+// step. This asserts the property the shape test was reaching for: nothing on
+// this type hands back something that satisfies grpc.ServerStream.
+func TestNoMethodOfTheWrapperReturnsTheRawStream(t *testing.T) {
+	guard, err := workcontext.NewStreamGuard(workcontext.StreamGuardOptions{
+		Recheck: func(context.Context) error { return nil },
+	})
+	require.NoError(t, err)
+	underlying := &recordingStream{ctx: context.Background()}
+	guarded, err := Guard(underlying, guard)
+	require.NoError(t, err)
+
+	streamInterface := reflect.TypeOf((*grpc.ServerStream)(nil)).Elem()
+	wrapper := reflect.TypeOf(guarded)
+	for index := range wrapper.NumMethod() {
+		method := wrapper.Method(index)
+		for result := range method.Type.NumOut() {
+			out := method.Type.Out(result)
+			if out == reflect.TypeOf((*error)(nil)).Elem() {
+				continue
+			}
+			require.False(t, out.Implements(streamInterface),
+				"%s returns %s, which satisfies grpc.ServerStream: that is the embedded field again",
+				method.Name, out)
+			if out.Kind() == reflect.Interface && out.NumMethod() == 0 {
+				require.Failf(t, "an empty interface escapes the wrapper",
+					"%s returns %s; an `any` result can carry the raw stream past every shape check",
+					method.Name, out)
+			}
+		}
+	}
 }

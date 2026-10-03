@@ -70,7 +70,7 @@ var (
 	// envelopeDecoderAllowlist is every file that may reach for one, and what
 	// it does with it — which is never a capability.
 	envelopeDecoderAllowlist = map[string]string{
-		"cache_partition.go": "ENCODES a tenant and installation id into a cache key; it opens no envelope",
+		"workcontext/cache_partition.go": "ENCODES a tenant and installation id into a cache key; it opens no envelope",
 	}
 	bannedImportPrefixes = []string{"golang.org/x/crypto/"}
 	// Any JOSE, JWT or token-library path, whoever publishes it. A capability
@@ -94,7 +94,7 @@ var narrowedImports = map[string]struct {
 	symbols []string
 }{
 	"crypto/tls": {
-		files: []string{"mint.go"},
+		files: []string{"workcontext/mint.go", "tls.go"},
 		// Config and the version floor, plus the two error types the client
 		// classifies on. Reading an error TYPE is not using a primitive, and
 		// the alternative was matching on error text — which is how a
@@ -103,6 +103,11 @@ var narrowedImports = map[string]struct {
 		symbols: []string{
 			"Config", "VersionTLS13",
 			"CertificateVerificationError", "RecordHeaderError",
+			// tls.go's workload leaf certificates, reloaded on rotation.
+			// Measured from the tree, so the list is what is used and no more.
+			"Certificate", "X509KeyPair", "LoadX509KeyPair",
+			"ClientHelloInfo", "CertificateRequestInfo",
+			"RequireAndVerifyClientCert",
 		},
 	},
 	// mime, for one call: the mint response's Content-Type must be declared
@@ -110,26 +115,39 @@ var narrowedImports = map[string]struct {
 	// base64 with no base64 import, so the symbols matter here as much as
 	// anywhere.
 	"mime": {
-		files:   []string{"mint.go"},
+		files:   []string{"workcontext/mint.go"},
 		symbols: []string{"ParseMediaType"},
 	},
 	// crypto/sha256 is not a signature and the cache digest needs it, but a
 	// hand-written HMAC is two hashes and an xor — so the symbols and the
 	// files are named, which bounds that to the one file that hashes.
 	"crypto/sha256": {
-		files:   []string{"cache_partition.go"},
+		files: []string{
+			"workcontext/cache_partition.go",
+			// The root module's two digests: a receipt request's canonical
+			// digest and the store's row digest. Neither is a capability and
+			// neither is a MAC.
+			"receipts/digest.go", "receipts/postgres.go",
+		},
 		symbols: []string{"Sum256", "New", "Size"},
+	},
+	// The receipts digest canonicalises a receipt REQUEST — never a capability
+	// — and protojson is how it reaches a stable field order. The capability
+	// rule is what keeps it off a Work Context message.
+	"google.golang.org/protobuf/encoding/protojson": {
+		files:   []string{"receipts/digest.go"},
+		symbols: []string{"MarshalOptions", "Marshal"},
 	},
 	// encoding/base64 ENCODES a cache key here and must never DECODE: base64
 	// decoding plus proto.Unmarshal is the whole of a second parser, and the
 	// exemption used to be per file, so DecodeString was available in the one
 	// file that had it.
 	"encoding/base64": {
-		files:   []string{"cache_partition.go"},
+		files:   []string{"workcontext/cache_partition.go"},
 		symbols: []string{"RawURLEncoding", "URLEncoding", "StdEncoding"},
 	},
 	"crypto/x509": {
-		files: []string{"mint.go"},
+		files: []string{"workcontext/mint.go", "tls.go"},
 		// CertPool for the caller's roots, and the three verification error
 		// types for the same reason as above. Notably still refused:
 		// ParsePKCS8PrivateKey, which is how a signer gets a key without
@@ -151,14 +169,14 @@ var narrowedImports = map[string]struct {
 // at all. Both were reproduced as AST probes that produced zero findings. A
 // whole-file exemption is an exemption for every type in the file.
 var codecAllowlist = []codecUse{
-	{file: "mint.go", codec: codecJSON, operations: jsonOperations, types: mintEndpointJSONTypes,
+	{file: "workcontext/mint.go", codec: codecJSON, operations: jsonOperations, types: mintEndpointJSONTypes,
 		reason: "the mint endpoint's two HTTP bodies, which carry the capability as an opaque string"},
-	{file: "mint.go", codec: codecJSON, operations: jsonValueOperations,
-		types: append(append([]string{}, mintEndpointJSONTypes...), "json.RawMessage"),
+	{file: "workcontext/mint.go", codec: codecJSON, operations: jsonValueOperations,
+		types: append(append([]string{}, mintEndpointJSONTypes...), "encoding/json#RawMessage"),
 		reason: "the same two bodies, plus a RawMessage the response decoder reads into to " +
 			"require EOF — it holds nothing and is discarded"},
-	{file: "cache_partition.go", codec: codecProto, operations: protoOperations,
-		types:  []string{"basev0.WorkScopeV1"},
+	{file: "workcontext/cache_partition.go", codec: codecProto, operations: protoOperations,
+		types:  []string{basev0Path + "#WorkScopeV1"},
 		reason: "one scope, for the cache digest preimage — never a capability"},
 }
 
@@ -231,7 +249,14 @@ var workContextNameAllowlist = map[string]string{
 // below is what holds that apart, by refusing a json-tagged struct anywhere in
 // the module except that request and that response.
 var jsonAllowlist = map[string]string{
-	"mint.go": "the mint endpoint's HTTP request and response bodies, which carry the capability as an opaque string",
+	"workcontext/mint.go": "the mint endpoint's HTTP request and response bodies, which carry the capability as an opaque string",
+	// The root module's own JSON, named here now that the gate reads both
+	// modules — and MEASURED from the tree, not guessed: these are the only
+	// two files outside the leaf module that import encoding/json. Neither is
+	// a capability, and the capability rule refuses a codec on a Work Context
+	// message in any file whatever this list says.
+	"configuration_document.go": "the runtime's own configuration document, which is not a capability",
+	"receipts/digest.go":        "canonicalising a receipt REQUEST for its digest: protojson, then a stable re-encode",
 }
 
 // mintEndpointJSONTypes are the only structs in this module that may carry
@@ -248,17 +273,34 @@ var jsonAllowlist = map[string]string{
 // failing test rather than a review comment somebody might not leave.
 var (
 	mintEndpointJSONTypes = []string{"mintRequest", "mintResponse"}
-	mintEndpointJSONFile  = "mint.go"
+	mintEndpointJSONFile  = "workcontext/mint.go"
 )
 
 // coreModulePath is the module whose types this one aliases. An alias has to
 // resolve into it, or it is a local type wearing core's name.
 const coreModulePath = "github.com/codefly-dev/core"
 
+// basev0Path is the generated package holding the capability's messages, so an
+// allowlist row can say which package it means.
+const basev0Path = coreModulePath + "/generated/go/codefly/base/v0"
+
+// leafModulePrefix is the leaf module's directory, as repositoryFiles names it.
+// Inside it the capability IS the subject, so every codec use is allowlisted by
+// name; outside it the module's subject is everything else, so the rule is the
+// decisive one instead — no codec on a capability type, whatever else the file
+// legitimately encodes. See codecArgumentIsPermitted.
+const leafModulePrefix = "workcontext/"
+
+// capabilityTypePrefix recognises a Work Context message: a type under core's
+// module whose name begins with "Work". A PREFIX rather than a list, so a
+// message core adds later is covered the day it exists rather than the day
+// somebody remembers it here.
+const capabilityTypePrefix = "Work"
+
 // coreAliasFile is the one file whose job is re-exporting core's surface, so it
 // is the one file where an alias to one of core's types is the point rather
 // than a second local name for a capability.
-const coreAliasFile = "core.go"
+const coreAliasFile = "workcontext/core.go"
 
 // TestNoSecondWorkContextImplementation is the gate.
 //
@@ -292,7 +334,7 @@ const coreAliasFile = "core.go"
 // scripts/check-one-implementation.sh instead. That sweep is a required check
 // and it is green.
 func TestNoSecondWorkContextImplementation(t *testing.T) {
-	files := moduleFiles(t)
+	files := repositoryFiles(t)
 	require.NotEmpty(t, files, "the gate scanned no files, so it would pass for an empty module")
 
 	packages := map[string]bool{}
@@ -882,6 +924,181 @@ func TestTheGateCatchesItsOwnBypasses(t *testing.T) {
 		source string
 		says   string
 	}{
+		// ---- Round four, layer 4: EXECUTED probes, plus every ban entry and
+		// rule the review's mutation pass found had no probe at all.
+		//
+		// THE ROOT MODULE. A reviewer wrote the first of these, compiled it,
+		// ran golangci-lint over it (0 issues) and ran the shell sweep (ok, 58
+		// Go files): a second parser whose base64url decoder is HAND-WRITTEN,
+		// so it imports nothing a sweep can ban. Only reading the code sees
+		// it, which is why this gate now walks both modules.
+		"a root-module parser with a hand-written decoder": {
+			path: "work_context_reader.go",
+			source: `package codefly
+import (
+	basev0 "github.com/codefly-dev/core/generated/go/codefly/base/v0"
+	"google.golang.org/protobuf/proto"
+)
+func decodeBase64URL(text string) []byte { return []byte(text) }
+func ReadWorkContextTenant(token string) (string, error) {
+	claims := &basev0.WorkContextV1{}
+	if err := proto.Unmarshal(decodeBase64URL(token), claims); err != nil {
+		return "", err
+	}
+	return claims.GetTenantId(), nil
+}`,
+			says: "calls proto.Unmarshal",
+		},
+		"a root-module encoder of the capability": {
+			path: "work_context_writer.go",
+			source: `package codefly
+import (
+	basev0 "github.com/codefly-dev/core/generated/go/codefly/base/v0"
+	"google.golang.org/protobuf/proto"
+)
+func encodeClaims(claims *basev0.WorkContextV1) ([]byte, error) {
+	return proto.MarshalOptions{Deterministic: true}.Marshal(claims)
+}`,
+			says: "on a type it is not allowed to",
+		},
+		// THE IMPORT NAME IS THE AUTHOR'S CHOICE, so a row compared against a
+		// LOCAL qualifier is satisfied by aliasing any package to the expected
+		// name. Rows name package PATHS.
+		"a foreign package aliased to core's own local name": {
+			path: "workcontext/cache_partition.go",
+			source: `package workcontext
+import (
+	basev0 "google.golang.org/protobuf/types/known/structpb"
+	"google.golang.org/protobuf/proto"
+)
+func encode() ([]byte, error) {
+	return proto.Marshal(&basev0.WorkScopeV1{})
+}`,
+			says: "on a type it is not allowed to",
+		},
+		// "An argument it cannot resolve is NOT permitted" had no probe, so in
+		// the leaf module the claim was untested.
+		"a codec on a value the gate cannot resolve": {
+			path: "workcontext/mint.go",
+			source: `package workcontext
+import "encoding/json"
+func write(anything any) ([]byte, error) {
+	return json.Marshal(anything)
+}`,
+			says: "on a type it is not allowed to",
+		},
+		// The json-TAG exemption is a property of ONE file's TWO declarations,
+		// never of two identifiers anywhere.
+		"a json-tagged mintRequest in another file": {
+			path: "workcontext/carrier.go",
+			source: `package workcontext
+type mintRequest struct {
+	Audience string "json:\"audience\""
+}`,
+			says: "struct with json tags",
+		},
+		"a nested package declaring the allowlisted json types": {
+			path: "workcontext/grpctransport/bodies.go",
+			source: `package grpctransport
+type mintResponse struct {
+	WorkContext string "json:\"work_context\""
+}`,
+			says: "struct with json tags",
+		},
+		// The thirteen ban entries that had no probe. Each is a complete
+		// second implementation or a second encoding of the message, and each
+		// was previously asserted only by appearing in a list.
+		"crypto/ecdsa": {
+			path: "workcontext/carrier.go",
+			source: `package workcontext
+import "crypto/ecdsa"
+var _ = ecdsa.SignASN1`,
+			says: "imports \"crypto/ecdsa\"",
+		},
+		"crypto/dsa": {
+			path: "workcontext/carrier.go",
+			source: `package workcontext
+import "crypto/dsa"
+var _ = dsa.Sign`,
+			says: "imports \"crypto/dsa\"",
+		},
+		"crypto/ecdh": {
+			path: "workcontext/carrier.go",
+			source: `package workcontext
+import "crypto/ecdh"
+var _ = ecdh.P256`,
+			says: "imports \"crypto/ecdh\"",
+		},
+		"crypto/elliptic": {
+			path: "workcontext/carrier.go",
+			source: `package workcontext
+import "crypto/elliptic"
+var _ = elliptic.P256`,
+			says: "imports \"crypto/elliptic\"",
+		},
+		"crypto/subtle": {
+			path: "workcontext/carrier.go",
+			source: `package workcontext
+import "crypto/subtle"
+var _ = subtle.ConstantTimeCompare`,
+			says: "imports \"crypto/subtle\"",
+		},
+		"encoding/gob": {
+			path: "workcontext/carrier.go",
+			source: `package workcontext
+import "encoding/gob"
+var _ = gob.NewEncoder`,
+			says: "imports \"encoding/gob\"",
+		},
+		"encoding/asn1": {
+			path: "workcontext/carrier.go",
+			source: `package workcontext
+import "encoding/asn1"
+var _ = asn1.Marshal`,
+			says: "imports \"encoding/asn1\"",
+		},
+		"encoding/xml": {
+			path: "workcontext/carrier.go",
+			source: `package workcontext
+import "encoding/xml"
+var _ = xml.Marshal`,
+			says: "imports \"encoding/xml\"",
+		},
+		"a jwt library": {
+			path: "workcontext/carrier.go",
+			source: `package workcontext
+import "github.com/golang-jwt/jwt/v5"
+var _ = jwt.New`,
+			says: "jwt",
+		},
+		"a jwx library": {
+			path: "workcontext/carrier.go",
+			source: `package workcontext
+import "github.com/lestrrat-go/jwx/v2/jws"
+var _ = jws.Sign`,
+			says: "jwx",
+		},
+		"a paseto library": {
+			path: "workcontext/carrier.go",
+			source: `package workcontext
+import "aidanwoods.dev/go-paseto"
+var _ = paseto.NewToken`,
+			says: "paseto",
+		},
+		"a macaroon library": {
+			path: "workcontext/carrier.go",
+			source: `package workcontext
+import "gopkg.in/macaroon.v2"
+var _ = macaroon.New`,
+			says: "macaroon",
+		},
+		"a branca library": {
+			path: "workcontext/carrier.go",
+			source: `package workcontext
+import "github.com/essentialkaos/branca"
+var _ = branca.NewBranca`,
+			says: "branca",
+		},
 		// ---- Round four: the shapes the review found this gate blind to.
 		//
 		// Each is a complete second parser or encoder that COMPILED and
@@ -890,7 +1107,7 @@ func TestTheGateCatchesItsOwnBypasses(t *testing.T) {
 		// an identifier resolved to whichever same-named declaration came
 		// last, and a row keyed on an operation name shared by every codec.
 		"a local alias giving a capability an allowlisted type name": {
-			path: "cache_partition.go",
+			path: "workcontext/cache_partition.go",
 			source: `package workcontext
 import (
 	basev0 "github.com/codefly-dev/core/generated/go/codefly/base/v0"
@@ -903,7 +1120,7 @@ func encode(wc *basev0.WorkContextV1) ([]byte, error) {
 			says: "inside a function",
 		},
 		"a file-level alias giving a capability an allowlisted type name": {
-			path: "cache_partition.go",
+			path: "workcontext/cache_partition.go",
 			source: `package workcontext
 import (
 	basev0 "github.com/codefly-dev/core/generated/go/codefly/base/v0"
@@ -919,7 +1136,7 @@ func encode(wc *WorkScopeV1) ([]byte, error) {
 		// core message, and the resolver used to answer "WorkScopeV1" for
 		// every type whose final name was that, from any package.
 		"a marshal of a foreign package's WorkScopeV1": {
-			path: "cache_partition.go",
+			path: "workcontext/cache_partition.go",
 			source: `package workcontext
 import (
 	"google.golang.org/protobuf/proto"
@@ -931,7 +1148,7 @@ func encode(scope *elsewhere.WorkScopeV1) ([]byte, error) {
 			says: "on a type it is not allowed to",
 		},
 		"a marshal of another package's identically named type": {
-			path: "cache_partition.go",
+			path: "workcontext/cache_partition.go",
 			source: `package workcontext
 import (
 	"google.golang.org/protobuf/proto"
@@ -944,7 +1161,7 @@ func encode() ([]byte, error) {
 			says: "on a type it is not allowed to",
 		},
 		"base64 DECODING in the file allowed to encode": {
-			path: "cache_partition.go",
+			path: "workcontext/cache_partition.go",
 			source: `package workcontext
 import "encoding/base64"
 func open(token string) ([]byte, error) {
@@ -953,7 +1170,7 @@ func open(token string) ([]byte, error) {
 			says: "may never DECODE",
 		},
 		"a proto codec riding mint.go's encoding/json row": {
-			path: "mint.go",
+			path: "workcontext/mint.go",
 			source: `package workcontext
 import "google.golang.org/protobuf/proto"
 type mintResponse struct{ WorkContext string }
@@ -964,7 +1181,7 @@ func read(raw []byte) error {
 			says: "calls proto.Unmarshal",
 		},
 		"an identifier resolved to a later same-named declaration": {
-			path: "mint.go",
+			path: "workcontext/mint.go",
 			source: `package workcontext
 import (
 	"encoding/json"
@@ -982,7 +1199,7 @@ func decode() {
 			says: "on a type it is not allowed to",
 		},
 		"an identifier an ambiguous file cannot resolve": {
-			path: "mint.go",
+			path: "workcontext/mint.go",
 			source: `package workcontext
 import "encoding/json"
 type mintRequest struct{ Audience string }
@@ -994,7 +1211,7 @@ func two(raw []byte) error {
 			says: "on a type it is not allowed to",
 		},
 		"mime as a base64 decoder": {
-			path: "carrier.go",
+			path: "workcontext/carrier.go",
 			source: `package workcontext
 import "mime"
 func open(header string) (string, error) {
@@ -1004,7 +1221,7 @@ func open(header string) (string, error) {
 			says: "imports \"mime\"",
 		},
 		"sha256 outside the file that hashes": {
-			path: "carrier.go",
+			path: "workcontext/carrier.go",
 			source: `package workcontext
 import "crypto/sha256"
 func mac(key, message []byte) []byte {
@@ -1014,21 +1231,21 @@ func mac(key, message []byte) []byte {
 			says: "imports \"crypto/sha256\"",
 		},
 		"a nested package reaching for the cache partition's base64": {
-			path: "grpctransport/partition.go",
+			path: "workcontext/grpctransport/partition.go",
 			source: `package grpctransport
 import "encoding/base64"
 var _ = base64.RawURLEncoding`,
 			says: "imports \"encoding/base64\"",
 		},
 		"a nested file inheriting the mint.go allowance": {
-			path: "grpctransport/mint.go",
+			path: "workcontext/grpctransport/mint.go",
 			source: `package grpctransport
 import "encoding/json"
 var _ = json.Marshal`,
 			says: "imports encoding/json",
 		},
 		"an anonymous struct carrying json tags": {
-			path: "carrier.go",
+			path: "workcontext/carrier.go",
 			source: `package workcontext
 func payload() any {
 	return struct {
@@ -1038,7 +1255,7 @@ func payload() any {
 			says: "struct with json tags",
 		},
 		"a json-tagged type declared inside a function": {
-			path: "carrier.go",
+			path: "workcontext/carrier.go",
 			source: `package workcontext
 func payload() any {
 	type sealedClaims struct {
@@ -1049,7 +1266,7 @@ func payload() any {
 			says: "struct with json tags",
 		},
 		"a WorkContext type declared inside a function": {
-			path: "carrier.go",
+			path: "workcontext/carrier.go",
 			source: `package workcontext
 func build() any {
 	type WorkContextToken struct{ Payload string }
@@ -1058,27 +1275,27 @@ func build() any {
 			says: "is not an alias of core's",
 		},
 		"a WorkContext function declared below the imports": {
-			path: "carrier.go",
+			path: "workcontext/carrier.go",
 			source: `package workcontext
 func WorkContextSign(payload []byte) []byte { return payload }`,
 			says: "declares func WorkContextSign",
 		},
 		"an alias of a type that is not core's": {
-			path: "core.go",
+			path: "workcontext/core.go",
 			source: `package workcontext
 import local "github.com/codefly-dev/sdk-go/workcontext/internal/legacy"
 type WorkContextVerifier = local.Verifier`,
 			says: "alias of something that is not core's",
 		},
 		"an alias of a bare local type": {
-			path: "core.go",
+			path: "workcontext/core.go",
 			source: `package workcontext
 type verifier struct{}
 type WorkContextVerifier = verifier`,
 			says: "alias of something that is not core's",
 		},
 		"a signing primitive": {
-			path: "carrier.go",
+			path: "workcontext/carrier.go",
 			source: `package workcontext
 import "crypto/ed25519"
 var _ = ed25519.Sign`,
@@ -1089,28 +1306,28 @@ var _ = ed25519.Sign`,
 		// implementation that the previous gate — a list of two package paths
 		// and a case-sensitive name prefix — reported as green.
 		"the same primitive from x/crypto": {
-			path: "carrier.go",
+			path: "workcontext/carrier.go",
 			source: `package workcontext
 import "golang.org/x/crypto/ed25519"
 var _ = ed25519.Sign`,
 			says: `imports "golang.org/x/crypto/ed25519"`,
 		},
 		"a different algorithm": {
-			path: "carrier.go",
+			path: "workcontext/carrier.go",
 			source: `package workcontext
 import "crypto/rsa"
 var _ = rsa.SignPKCS1v15`,
 			says: `imports "crypto/rsa"`,
 		},
 		"a MAC instead of a signature": {
-			path: "carrier.go",
+			path: "workcontext/carrier.go",
 			source: `package workcontext
 import "crypto/hmac"
 var _ = hmac.New`,
 			says: `imports "crypto/hmac"`,
 		},
 		"the bare crypto package, whose Signer needs no algorithm import": {
-			path: "carrier.go",
+			path: "workcontext/carrier.go",
 			source: `package workcontext
 import "crypto"
 func sign(key crypto.Signer, payload []byte) ([]byte, error) {
@@ -1119,28 +1336,28 @@ func sign(key crypto.Signer, payload []byte) ([]byte, error) {
 			says: `imports "crypto"`,
 		},
 		"a key parsed out of PKCS#8 through an allowed import": {
-			path: "mint.go",
+			path: "workcontext/mint.go",
 			source: `package workcontext
 import "crypto/x509"
 func key(der []byte) (any, error) { return x509.ParsePKCS8PrivateKey(der) }`,
 			says: "uses x509.ParsePKCS8PrivateKey",
 		},
 		"the TLS plumbing imported somewhere that is not the mint client": {
-			path: "carrier.go",
+			path: "workcontext/carrier.go",
 			source: `package workcontext
 import "crypto/tls"
 var _ = tls.Config{}`,
 			says: `imports "crypto/tls", which only`,
 		},
 		"a second encoding of the message, in JSON, without encoding/json": {
-			path: "carrier.go",
+			path: "workcontext/carrier.go",
 			source: `package workcontext
 import "google.golang.org/protobuf/encoding/protojson"
 var _ = protojson.Marshal`,
 			says: "protobuf/encoding/protojson",
 		},
 		"core's own signing encoding, reproduced": {
-			path: "carrier.go",
+			path: "workcontext/carrier.go",
 			source: `package workcontext
 import "google.golang.org/protobuf/proto"
 func encode(claims *Claims) ([]byte, error) {
@@ -1149,14 +1366,14 @@ func encode(claims *Claims) ([]byte, error) {
 			says: "calls proto.MarshalOptions",
 		},
 		"a JOSE library": {
-			path: "carrier.go",
+			path: "workcontext/carrier.go",
 			source: `package workcontext
 import "github.com/go-jose/go-jose/v4"
 var _ = jose.NewSigner`,
 			says: "go-jose",
 		},
 		"the deleted implementation's own type name, uncapitalised": {
-			path: "carrier.go",
+			path: "workcontext/carrier.go",
 			source: `package workcontext
 type workContextPayload struct {
 	Audience string
@@ -1164,7 +1381,7 @@ type workContextPayload struct {
 			says: "declares type workContextPayload",
 		},
 		"a WorkContext method rather than a free function": {
-			path: "carrier.go",
+			path: "workcontext/carrier.go",
 			source: `package workcontext
 type thing struct{}
 func (thing) WorkContextSign(payload []byte) []byte { return payload }`,
@@ -1175,7 +1392,7 @@ func (thing) WorkContextSign(payload []byte) []byte { return payload }`,
 		// round the gate was tightened, and every round the next reviewer
 		// found the thing the tightening did not reach.
 		"a dot-import collision hiding a signing primitive": {
-			path: "carrier.go",
+			path: "workcontext/carrier.go",
 			source: `package workcontext
 import (
 	. "crypto/ed25519"
@@ -1186,14 +1403,14 @@ var _ = TrimSpace`,
 			says: `dot-imports "crypto/ed25519"`,
 		},
 		"a single dot import": {
-			path: "carrier.go",
+			path: "workcontext/carrier.go",
 			source: `package workcontext
 import . "crypto/ed25519"
 var _ = Sign`,
 			says: "dot-imports",
 		},
 		"an ALIASED protobuf marshal": {
-			path: "carrier.go",
+			path: "workcontext/carrier.go",
 			source: `package workcontext
 import pb "google.golang.org/protobuf/proto"
 func encode(claims *Claims) ([]byte, error) {
@@ -1202,7 +1419,7 @@ func encode(claims *Claims) ([]byte, error) {
 			says: "calls pb.MarshalOptions",
 		},
 		"a hand parser: base64 plus Unmarshal": {
-			path: "carrier.go",
+			path: "workcontext/carrier.go",
 			source: `package workcontext
 import (
 	"encoding/base64"
@@ -1219,7 +1436,7 @@ func parse(encoded string) (*Claims, error) {
 			says: `imports "encoding/base64"`,
 		},
 		"proto.Unmarshal on its own": {
-			path: "carrier.go",
+			path: "workcontext/carrier.go",
 			source: `package workcontext
 import "google.golang.org/protobuf/proto"
 func read(raw []byte) (*Claims, error) {
@@ -1229,14 +1446,14 @@ func read(raw []byte) (*Claims, error) {
 			says: "calls proto.Unmarshal",
 		},
 		"the wire encoder": {
-			path: "carrier.go",
+			path: "workcontext/carrier.go",
 			source: `package workcontext
 import "google.golang.org/protobuf/encoding/protowire"
 var _ = protowire.AppendTag`,
 			says: "encoding/protowire",
 		},
 		"anypb, which marshals anything": {
-			path: "carrier.go",
+			path: "workcontext/carrier.go",
 			source: `package workcontext
 import "google.golang.org/protobuf/types/known/anypb"
 var _ = anypb.New`,
@@ -1246,7 +1463,7 @@ var _ = anypb.New`,
 		// the codec exemptions were per FILE. A whole-file exemption is an
 		// exemption for every type in the file.
 		"a capability JSON-encoded as a map, needing no tags": {
-			path: "mint.go",
+			path: "workcontext/mint.go",
 			source: `package workcontext
 import "encoding/json"
 func leak(c *Claims) ([]byte, error) {
@@ -1258,7 +1475,7 @@ func leak(c *Claims) ([]byte, error) {
 			says: "calls json.Marshal on a type it is not allowed to",
 		},
 		"a capability decoded into, in the file allowed JSON": {
-			path: "mint.go",
+			path: "workcontext/mint.go",
 			source: `package workcontext
 import (
 	"bytes"
@@ -1271,7 +1488,7 @@ func parse(raw []byte) (*Claims, error) {
 			says: "calls Decode on a type it is not allowed to",
 		},
 		"a capability proto-marshalled through the scope exemption": {
-			path: "cache_partition.go",
+			path: "workcontext/cache_partition.go",
 			source: `package workcontext
 import "google.golang.org/protobuf/proto"
 func sign(c *Claims) ([]byte, error) {
@@ -1280,7 +1497,7 @@ func sign(c *Claims) ([]byte, error) {
 			says: "on a type it is not allowed to",
 		},
 		"a WorkContext func bound to a var": {
-			path: "carrier.go",
+			path: "workcontext/carrier.go",
 			source: `package workcontext
 var WorkContextSign = func(payload []byte) []byte { return payload }`,
 			says: "declares var/const WorkContextSign",
@@ -1300,7 +1517,7 @@ var WorkContextSign = func(payload []byte) []byte { return payload }`,
 		source string
 	}{
 		"the mint endpoint's own bodies": {
-			path: "mint.go",
+			path: "workcontext/mint.go",
 			source: `package workcontext
 import "encoding/json"
 type mintRequest struct {
@@ -1318,7 +1535,7 @@ func decode(raw []byte) (mintResponse, error) {
 }`,
 		},
 		"an alias of core's type": {
-			path: "core.go",
+			path: "workcontext/core.go",
 			source: `package workcontext
 import corework "github.com/codefly-dev/core/workcontext"
 type WorkContextVerifier = corework.Verifier`,
@@ -1405,6 +1622,53 @@ type sourceFile struct {
 // beside grpctransport is scanned without anyone remembering to list it. Paths
 // are slash-separated and relative to that root, which is what the allowlist is
 // keyed by.
+// repositoryFiles parses every non-test Go file in the WHOLE REPOSITORY, both
+// modules, naming each by its path relative to the repository root.
+//
+// It used to walk only this module, which was a hole with nothing behind it:
+// the implementation this repository deleted lived at the repository ROOT, in
+// package codefly, and the shell sweep — the root's only gate — bans imports
+// rather than reading code. A reviewer built the consequence and ran it: a root
+// file with a HAND-WRITTEN base64url decoder, so no banned import at all, and
+// proto.Unmarshal into basev0.WorkContextV1, compiled, passed golangci-lint
+// with zero issues and passed the sweep as "ok working tree (58 Go files)".
+// Reading the AST is what sees that, so the AST gate reads both modules.
+func repositoryFiles(t *testing.T) []sourceFile {
+	t.Helper()
+	root, err := filepath.Abs("..")
+	require.NoError(t, err)
+	var files []sourceFile
+	fileSet := token.NewFileSet()
+	require.NoError(t, filepath.WalkDir(root, func(absolute string, entry fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		path, relErr := filepath.Rel(root, absolute)
+		if relErr != nil {
+			return relErr
+		}
+		path = filepath.ToSlash(path)
+		if entry.IsDir() {
+			switch entry.Name() {
+			case "testdata", ".git", ".github", ".claude":
+				return fs.SkipDir
+			}
+			return nil
+		}
+		if !strings.HasSuffix(path, ".go") || strings.HasSuffix(path, "_test.go") {
+			return nil
+		}
+		syntax, parseErr := parser.ParseFile(fileSet, absolute, nil, parser.SkipObjectResolution)
+		if parseErr != nil {
+			return parseErr
+		}
+		files = append(files, sourceFile{path: path, syntax: syntax})
+		return nil
+	}))
+	return files
+}
+
+// moduleFiles is the same walk restricted to this module.
 func moduleFiles(t *testing.T) []sourceFile {
 	t.Helper()
 	var files []sourceFile
@@ -1477,6 +1741,21 @@ func envelopeDecoderReasons() []string {
 	return reasons
 }
 
+// isCapabilityType reports whether a resolved type name is one of core's Work
+// Context messages. The name is package-PATH qualified, so neither a local
+// alias nor an import aliased to core's own local name can answer yes by
+// spelling.
+func isCapabilityType(resolved string) bool {
+	path, bare, found := strings.Cut(resolved, "#")
+	if !found {
+		return false
+	}
+	if path != coreModulePath && !strings.HasPrefix(path, coreModulePath+"/") {
+		return false
+	}
+	return strings.HasPrefix(bare, capabilityTypePrefix)
+}
+
 // codecArgumentIsPermitted reports whether this codec call is applied to a
 // type the file is allowed to apply it to.
 //
@@ -1494,7 +1773,11 @@ func envelopeDecoderReasons() []string {
 // could not read would be a gate about what is easy to parse.
 func codecArgumentIsPermitted(file sourceFile, call ast.Node, codec string, operation string) bool {
 	permitted := permittedCodecTypes(file.path, codec, operation)
-	if len(permitted) == 0 {
+	inLeaf := strings.HasPrefix(file.path, leafModulePrefix)
+	if len(permitted) == 0 && inLeaf {
+		// Inside the leaf module an unlisted codec use is a finding on its
+		// own: the capability is that module's subject, so every codec it
+		// performs is named.
 		return false
 	}
 	arguments := codecArguments(file, call)
@@ -1513,7 +1796,26 @@ func codecArgumentIsPermitted(file sourceFile, call ast.Node, codec string, oper
 		value = arguments[len(arguments)-1]
 	}
 	named := resolveTypeName(file, value, value.Pos())
-	return named != "" && slices.Contains(permitted, named)
+	if named == "" {
+		// Unresolvable. Refused in the leaf module, where the gate must not
+		// pass what it cannot read; allowed outside it, where the decisive
+		// check below is what this gate is for and the root module encodes
+		// receipts, configuration and runtime documents all day.
+		return !inLeaf
+	}
+	if isCapabilityType(named) {
+		// THE DECISIVE RULE, and it holds in BOTH modules: a Work Context
+		// message passes through a codec only where a row names it. This is
+		// the whole of the root module's rule, and it is why the gate reading
+		// that module closes a bypass the shell sweep cannot — a hand-written
+		// base64url decoder imports nothing, so only reading the code sees
+		// proto.Unmarshal into basev0.WorkContextV1.
+		return slices.Contains(permitted, named)
+	}
+	if !inLeaf {
+		return true
+	}
+	return slices.Contains(permitted, named)
 }
 
 // codecArguments finds the call this codec selector belongs to and returns the
@@ -1549,16 +1851,16 @@ func resolveTypeName(file sourceFile, expression ast.Expr, use token.Pos) string
 	case *ast.UnaryExpr:
 		return resolveTypeName(file, typed.X, use)
 	case *ast.CompositeLit:
-		return typeName(typed.Type)
+		return typeName(file, typed.Type)
 	case *ast.TypeAssertExpr:
-		return typeName(typed.Type)
+		return typeName(file, typed.Type)
 	case *ast.CallExpr:
 		// new(T) names T, not "new".
 		if function, ok := typed.Fun.(*ast.Ident); ok && function.Name == "new" && len(typed.Args) == 1 {
-			return typeName(typed.Args[0])
+			return typeName(file, typed.Args[0])
 		}
 		// A conversion: T(x) names T; anything else is unknown.
-		return typeName(typed.Fun)
+		return typeName(file, typed.Fun)
 	case *ast.Ident:
 		return declaredTypeName(file, typed.Name, use)
 	}
@@ -1573,20 +1875,28 @@ func resolveTypeName(file sourceFile, expression ast.Expr, use token.Pos) string
 // which exists for ONE core scope message, permitted a proto.Marshal of any
 // type whose final name happened to be WorkScopeV1, including a local alias to
 // the capability itself.
-func typeName(expression ast.Expr) string {
+func typeName(file sourceFile, expression ast.Expr) string {
 	switch typed := expression.(type) {
 	case *ast.StarExpr:
-		return typeName(typed.X)
+		return typeName(file, typed.X)
 	case *ast.SelectorExpr:
 		qualifier, ok := typed.X.(*ast.Ident)
 		if !ok {
 			return ""
 		}
-		return qualifier.Name + "." + typed.Sel.Name
+		// Resolved to the imported PACKAGE PATH, never to the local name. The
+		// local name is the author's choice, so `basev0 "some/other/pkg"`
+		// would otherwise let a foreign type answer to a row written for one
+		// of core's — the same defect as dropping the qualifier altogether.
+		path := importPathOf(file, qualifier.Name)
+		if path == "" {
+			return ""
+		}
+		return path + "#" + typed.Sel.Name
 	case *ast.Ident:
 		return typed.Name
 	case *ast.ArrayType:
-		return "[]" + typeName(typed.Elt)
+		return "[]" + typeName(file, typed.Elt)
 	case *ast.MapType:
 		// Deliberately not reduced to its value type: a map is never an
 		// allowlisted codec type, and naming it as one is how the json probe
@@ -1634,7 +1944,7 @@ func declaredTypeName(file sourceFile, name string, use token.Pos) string {
 						continue
 					}
 					if declared.Type != nil {
-						consider(declared, typeName(declared.Type))
+						consider(declared, typeName(file, declared.Type))
 						continue
 					}
 					if index < len(declared.Values) {
@@ -1662,7 +1972,7 @@ func declaredTypeName(file sourceFile, name string, use token.Pos) string {
 					for _, field := range list {
 						for _, declaredName := range field.Names {
 							if declaredName.Name == name {
-								consider(field, typeName(field.Type))
+								consider(field, typeName(file, field.Type))
 							}
 						}
 					}
@@ -1722,4 +2032,20 @@ func allowedJSONFiles() []string {
 	}
 	slices.Sort(names)
 	return names
+}
+
+// importPathOf resolves a file-local package name to the path it was imported
+// from, or "" when nothing imported it.
+//
+// It is what makes a type name mean a type rather than a spelling: the local
+// name in `basev0 "…/base/v0"` is chosen by whoever wrote the import, so an
+// allowlist compared against local names is one anybody satisfies by aliasing
+// a different package to the expected name.
+func importPathOf(file sourceFile, local string) string {
+	for _, imported := range importsOf(file.syntax) {
+		if imported.name == local {
+			return imported.path
+		}
+	}
+	return ""
 }
