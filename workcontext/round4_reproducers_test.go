@@ -366,9 +366,12 @@ type localFault struct{}
 func (*localFault) Error() string { return "too many open files" }
 
 // faultySource is a caller's own ProjectedTokenSource failing.
-type faultySource struct{ err error }
+type faultySource struct {
+	err   error
+	token string
+}
 
-func (s *faultySource) ProjectedToken() (string, error) { return "", s.err }
+func (s *faultySource) ProjectedToken() (string, error) { return s.token, s.err }
 
 // N1, the layer-4 review's new finding: a CANCELLED LEADER must be served the
 // valid credential it is holding, exactly as a cancelled waiter is.
@@ -574,4 +577,118 @@ func TestAnEchoedIncarnationStillCrossChecksByValue(t *testing.T) {
 	_, err := client.Credential(context.Background())
 	require.ErrorIs(t, err, ErrMintRefused)
 	require.ErrorContains(t, err, "sealed 11")
+}
+
+// Round five's mutation survivors, one test each. Every one of these passed
+// with the behaviour its name claims removed.
+
+// The ceiling-above-core refusal (mint.go:481) had no test: a configured
+// MaxCredentialLifetime above core's absolute ceiling is refused at
+// construction rather than silently clamped, so a deployment that asked for a
+// window nothing will mint finds out now instead of at the first mint.
+func TestAConfiguredCeilingAboveCoresIsRefusedAtConstruction(t *testing.T) {
+	clock := &movableClock{at: testClock}
+	host := newMintHost(t, clock.now)
+
+	_, err := NewMintClient(MintOptions{
+		URL:                   host.server.URL,
+		Authority:             host.pin,
+		Audience:              testAudienceName,
+		ProjectedToken:        ProjectedTokenFile(projectedFile(t, "projected")),
+		ProjectionAudience:    "projection-audience",
+		Now:                   clock.now,
+		RootCAs:               certPoolOf(host.server),
+		MaxCredentialLifetime: corework.MaxTTLCeiling + time.Second,
+	})
+	require.ErrorIs(t, err, ErrInvalid)
+	require.ErrorContains(t, err, "above core's absolute ceiling")
+
+	// Exactly at it is accepted, which is the boundary that matters because
+	// the DEFAULT is that constant.
+	_, err = NewMintClient(MintOptions{
+		URL:                   host.server.URL,
+		Authority:             host.pin,
+		Audience:              testAudienceName,
+		ProjectedToken:        ProjectedTokenFile(projectedFile(t, "projected")),
+		ProjectionAudience:    "projection-audience",
+		Now:                   clock.now,
+		RootCAs:               certPoolOf(host.server),
+		MaxCredentialLifetime: corework.MaxTTLCeiling,
+	})
+	require.NoError(t, err)
+}
+
+// A LATCHED REFUSAL BEATS A CANCELLATION (mint.go:871). A caller that gave up
+// while the host was refusing must be told it is refused, not told it was
+// cancelled: the refusal is terminal and the cancellation is not, and a caller
+// that reads only its own ctx error retries forever against a host that has
+// already said no.
+func TestALatchedRefusalIsReportedEvenToACallerThatGaveUp(t *testing.T) {
+	clock := &movableClock{at: testClock}
+	host := newMintHost(t, clock.now)
+	host.refuseWith = http.StatusForbidden
+	release := make(chan struct{})
+	host.before = func() {
+		select {
+		case <-release:
+		case <-time.After(5 * time.Second):
+		}
+	}
+	client := newTestMintClient(t, host, projectedFile(t, "projected"), clock.now)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	_, err := client.Credential(ctx)
+	require.Error(t, err)
+	close(release)
+
+	require.Eventually(t, func() bool { return client.Refused() != nil },
+		5*time.Second, time.Millisecond)
+
+	// The next caller cancels too, and still learns it is REFUSED rather than
+	// only that it cancelled. This one is answered at the top of the loop.
+	cancelled, stop := context.WithCancel(context.Background())
+	stop()
+	_, err = client.Credential(cancelled)
+	require.ErrorIs(t, err, ErrMintRefused,
+		"a cancelled caller was told it was cancelled by a client that is permanently refused")
+	require.NotErrorIs(t, err, ErrMintUnavailable)
+
+	// AND THE RACE, tested at the predicate because it cannot be forced
+	// through the public API.
+	//
+	// answerCancelled runs when a caller's ctx fires while it is WAITING on
+	// the in-flight mint. If the refusal latched during that wait, both select
+	// branches are ready at once and which one wins is the scheduler's
+	// business — so driving this through Credential would be a test that
+	// passes for whichever branch it happened to take. Calling the predicate
+	// is how the branch gets asserted instead of hoped for, the same way the
+	// final-URL assertion is.
+	ctxDone, done := context.WithCancel(context.Background())
+	done()
+	_, raced := client.answerCancelled(ctxDone, mintReasonRenewal, nil)
+	require.ErrorIs(t, raced, ErrMintRefused,
+		"a refusal that landed while this caller waited was reported as a cancellation")
+}
+
+// The EIO READ CLASS: a projected-token read that fails partway is an outage,
+// distinct from a file that is absent. Both recover; neither latches.
+func TestAProjectedTokenReadFailureIsAnOutageAndRecovers(t *testing.T) {
+	clock := &movableClock{at: testClock}
+	host := newMintHost(t, clock.now)
+	source := &faultySource{err: errSyntheticLocalFault}
+	client := newTestMintClient(t, host, projectedFile(t, "projected"), clock.now,
+		func(options *MintOptions) { options.ProjectedToken = source })
+
+	_, err := client.Credential(context.Background())
+	require.ErrorIs(t, err, ErrMintUnavailable)
+	require.NoError(t, client.Refused())
+
+	// The fault clears and the clock passes the hold-off: the client mints.
+	source.err = nil
+	source.token = "projected"
+	clock.set(clock.at.Add(time.Minute))
+	credential, err := client.Credential(context.Background())
+	require.NoError(t, err, "a local read failure permanently stopped the client")
+	require.NotEmpty(t, credential.Token())
 }

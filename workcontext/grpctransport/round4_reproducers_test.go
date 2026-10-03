@@ -412,3 +412,61 @@ func TestARecheckThatWritesToTheStreamIsRefusedRatherThanDeadlocking(t *testing.
 	require.NoError(t, reader.SendMsg("x"))
 	require.Empty(t, seen, "a bare recordingStream carries no transport stream, so there is no method to read")
 }
+
+// Round five's two survivors in this package.
+
+// The UNAVAILABLE mapping (guarded_stream.go). "Mutation-verified both ways"
+// did not hold for this branch: a termination whose re-check SOURCE failed —
+// neither revoked nor replayed nor malformed, just unreachable — must reach the
+// client as codes.Unavailable, because that is the one case where retrying the
+// same capability is the right answer. Mapped to Unknown, a client cannot tell
+// it from a server bug.
+func TestARecheckSourceFailureReachesTheClientAsUnavailable(t *testing.T) {
+	unreachable := errors.New("the seal source did not answer")
+	guard, err := workcontext.NewStreamGuard(workcontext.StreamGuardOptions{
+		Recheck: func(context.Context) error { return unreachable },
+	})
+	require.NoError(t, err)
+
+	connection := serveWith(t, StreamServerInterceptor(
+		[]string{streamMethod},
+		func(context.Context, *grpc.StreamServerInfo) (*workcontext.StreamGuard, error) {
+			return guard, nil
+		}), func(stream grpc.ServerStream) error {
+		return stream.SendMsg(wrapperspb.String("never"))
+	})
+
+	_, _, err = clientSaw(t, connection)
+	require.Error(t, err)
+	require.Equal(t, codes.Unavailable, status.Code(err),
+		"a re-check source that could not be reached is the one retryable termination")
+}
+
+// SendHeader must CARRY what SetHeader queued, not drop it. The wrapper holds
+// queued headers, so a SendHeader that sent only its own argument would
+// silently discard everything a handler had set — and no test noticed.
+func TestSendHeaderCarriesWhatSetHeaderQueued(t *testing.T) {
+	authority := &revocableGuard{}
+	faults := &handlerFaults{}
+	connection := serveGuarded(t, authority.guard(t), func(stream grpc.ServerStream) error {
+		if err := stream.SetHeader(metadata.Pairs("queued", "one")); err != nil {
+			faults.record("SetHeader: %v", err)
+		}
+		if err := stream.SetHeader(metadata.Pairs("queued-two", "two")); err != nil {
+			faults.record("SetHeader: %v", err)
+		}
+		// SendHeader flushes, and must include both of the above.
+		if err := stream.SendHeader(metadata.Pairs("sent", "three")); err != nil {
+			faults.record("SendHeader: %v", err)
+		}
+		return nil
+	})
+
+	header, _, err := clientSaw(t, connection)
+	faults.assert(t)
+	require.NoError(t, err)
+	require.Equal(t, []string{"one"}, header.Get("queued"),
+		"SendHeader dropped a header SetHeader had queued")
+	require.Equal(t, []string{"two"}, header.Get("queued-two"))
+	require.Equal(t, []string{"three"}, header.Get("sent"))
+}

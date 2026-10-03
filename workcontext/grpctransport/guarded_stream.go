@@ -56,6 +56,15 @@ import (
 // ORIGINAL stream from outside the interceptor, and SendHeader's own flush —
 // once a header frame is on the wire no later revocation recalls it, which is
 // what SendHeader means.
+//
+// # What does not work inside a guarded stream
+//
+// grpc.SetSendCompressor and grpc.ClientSupportedCompressors type-assert the
+// context's transport stream to gRPC's own unexported implementation, so they
+// FAIL here rather than being guarded. That is a real limitation and not a
+// safety property: nothing leaks, a handler that needs per-call compression
+// cannot have it. Fixing it means implementing an interface gRPC does not
+// export, so it is written down instead.
 type GuardedServerStream struct {
 	stream grpc.ServerStream
 	guard  *workcontext.StreamGuard

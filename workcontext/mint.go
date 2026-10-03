@@ -776,7 +776,7 @@ func (c *MintClient) obtain(
 			c.refreshWanted = true
 		}
 		c.mu.Unlock()
-		go c.mintInto(done)
+		go c.mintInto(ctx, done)
 
 		select {
 		case <-done:
@@ -795,9 +795,15 @@ func (c *MintClient) obtain(
 // what makes the request terminate, and detached from the caller that started
 // it, which is what makes the result arrive whether or not that caller is still
 // interested.
-func (c *MintClient) mintInto(done chan struct{}) {
+func (c *MintClient) mintInto(caller context.Context, done chan struct{}) {
+	// WithoutCancel(caller), not Background(). Detaching from the caller's
+	// CANCELLATION is the whole point; detaching from its VALUES throws away
+	// anything the caller put there for the request to carry — a trace span, a
+	// request id, whatever an http.RoundTripper in the caller's stack reads.
+	// Background() dropped all of it silently, which is a different thing from
+	// what the comment said this was doing.
 	ctx, cancel := context.WithTimeout(
-		context.WithoutCancel(context.Background()), c.options.RequestTimeout,
+		context.WithoutCancel(caller), c.options.RequestTimeout,
 	)
 	defer cancel()
 	credential, err := c.mintOnce(ctx)

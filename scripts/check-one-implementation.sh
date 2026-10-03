@@ -63,7 +63,7 @@ set -euo pipefail
 # included: crypto.Signer signs Ed25519 with no ed25519 import anywhere.
 # crypto/cipher and the block ciphers are here because a GMAC or a CMAC is a
 # MAC assembled from a cipher, which names no MAC.
-primitives='^crypto$|^crypto/ed25519$|^crypto/ecdsa$|^crypto/rsa$|^crypto/dsa$|^crypto/hmac$|^crypto/ecdh$|^crypto/elliptic$|^crypto/subtle$|^crypto/cipher$|^crypto/aes$|^crypto/des$|^crypto/rc4$|^crypto/sha3$|x/crypto/|jose|jwt|jwx|paseto|macaroon|branca'
+primitives='^crypto$|^crypto/hkdf$|^crypto/pbkdf2$|^crypto/sha512$|^crypto/sha1$|^crypto/sha3$|^crypto/md5$|^crypto/ed25519$|^crypto/ecdsa$|^crypto/rsa$|^crypto/dsa$|^crypto/hmac$|^crypto/ecdh$|^crypto/elliptic$|^crypto/subtle$|^crypto/cipher$|^crypto/aes$|^crypto/des$|^crypto/rc4$|^crypto/sha3$|x/crypto/|jose|jwt|jwx|paseto|macaroon|branca'
 # Second encodings of the message. protojson is a complete JSON encoding of a
 # protobuf message on its own, which is how the deleted implementation's payload
 # would come back without an encoding/json import.
@@ -108,6 +108,11 @@ allowed() {
     # application/json. mime is banned otherwise because WordDecoder decodes
     # base64 with no base64 import.
     'workcontext/mint.go|mime') return 0 ;;
+    # The two digests, and the receipts store's row digest. A hash is not a
+    # signature; a hand-rolled HMAC over one is the residue named in the header.
+    'workcontext/cache_partition.go|crypto/sha256') return 0 ;;
+    'receipts/digest.go|crypto/sha256') return 0 ;;
+    'receipts/postgres.go|crypto/sha256') return 0 ;;
     # Effect receipts, whose rows are JSON and are not capabilities.
     'receipts/'*'|encoding/json') return 0 ;;
   esac
@@ -123,15 +128,19 @@ allowed() {
 # complete bypass.
 import_paths() {
   awk '
-    # An import block opens wherever `import` is followed by `(` on the line,
-    # not only when the line IS `import (`. `import /* x */ (` and
-    # `import ("crypto/ed25519")` both opened a block the previous version did
-    # not recognise.
-    /^[[:space:]]*import/ && /\(/ { inblock = 1 }
-    /^[[:space:]]*import/ && !/\(/ { line = 1 }
+    # Comments are STRIPPED FIRST, so a comment before or inside the keyword
+    # cannot hide it: `/* x */ import "crypto/ed25519"` anchored nothing when
+    # the match required `import` at the start of the line.
+    { stripped = $0
+      gsub(/\/\*[^*]*\*\//, " ", stripped)
+      sub(/\/\/.*$/, "", stripped) }
+    # An import block opens wherever `import` is followed by `(`, not only when
+    # the line IS `import (`.
+    stripped ~ /(^|[^[:alnum:]_])import([^[:alnum:]_]|$)/ && stripped ~ /\(/ { inblock = 1 }
+    stripped ~ /(^|[^[:alnum:]_])import([^[:alnum:]_]|$)/ && stripped !~ /\(/ { line = 1 }
     inblock && /\)/ { closing = 1 }
     (inblock || line) {
-      rest = $0
+      rest = stripped
       # EVERY quoted string on the line, not the first. The previous version
       # read one, so `/* "fmt" */ "crypto/ed25519"` reported fmt and stopped —
       # and `;`-joined specs on one line hid everything after the first.
@@ -163,9 +172,17 @@ offending_imports() {
         allowed "$path" "$imported" || printf '%s\n' "$imported"
         continue
         ;;
-      'crypto/sha256'|'crypto/md5'|'crypto/sha1'|'crypto/sha512'|'crypto/rand')
-        # A hash is not a signature and randomness is not a key. The residue —
-        # a hand-written HMAC over an allowed hash — is named in the header.
+      'crypto/rand')
+        # Randomness is not a key.
+        continue
+        ;;
+      'crypto/sha256')
+        # The ONE hash with uses here — two digests — and held to them by the
+        # AST gate's file and symbol rule. The others are not waved through:
+        # hkdf.Extract(sha512.New, …) and pbkdf2.Key(sha512.New, …) are HMAC,
+        # and both passed this script while `crypto/sha512` sat in the "a hash
+        # is not a signature" list beside it.
+        allowed "$path" "$imported" || printf '%s\n' "$imported"
         continue
         ;;
     esac

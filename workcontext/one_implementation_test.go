@@ -65,6 +65,9 @@ var (
 		// inspected. Nothing here has any use for them.
 		"google.golang.org/protobuf/runtime/protoiface",
 		"google.golang.org/protobuf/runtime/protoimpl",
+		// dynamicpb and protoregistry are NOT here: the receipts replay path
+		// genuinely resolves a response type at runtime. They are held to
+		// files and symbols in narrowedImports instead.
 		// The LEGACY protobuf module, whose proto.Marshal and proto.Unmarshal
 		// are the same capability under a different path. Uncovered by every
 		// rule that named the new one.
@@ -74,8 +77,11 @@ var (
 		// symbols; these have no use at all, so they are simply refused rather
 		// than left "not a signature, therefore fine".
 		"crypto/sha512", "crypto/sha1", "crypto/sha3", "crypto/md5",
-		// HKDF is HMAC with a label on it.
-		"crypto/hkdf",
+		// HKDF is HMAC with a label on it, and PBKDF2 is HMAC in a loop. Both
+		// were reproduced taking sha512.New as the hash, which is why the
+		// sha* family is refused rather than waved through as "not a
+		// signature".
+		"crypto/hkdf", "crypto/pbkdf2",
 	}
 
 	// envelopeDecoders are banned EXCEPT where a file is allowlisted below. A
@@ -154,6 +160,34 @@ var narrowedImports = map[string]struct {
 			"receipts/digest.go", "receipts/postgres.go",
 		},
 		symbols: []string{"Sum256", "New", "Size"},
+	},
+	// DYNAMIC MESSAGES AND THE TYPE REGISTRY, which the receipts replay path
+	// genuinely needs: a recorded response is decoded into whatever type the
+	// method answers with, resolved at runtime.
+	//
+	// They are also how a capability is decoded with its Go type appearing
+	// nowhere. dynamicpb.NewMessage(desc) builds a message from a descriptor,
+	// and protoregistry resolves one by NAME — and the name can be assembled
+	// from pieces ("codefly.base.v0.Work" + "ContextV1"), so no string
+	// matches either. Both were reproduced against a real WorkContextV1 in
+	// the root module.
+	//
+	// So: the receipts files may resolve DESCRIPTORS and the method's own
+	// type, and nothing may build a message from a name it chose. The symbols
+	// are measured from the tree.
+	"google.golang.org/protobuf/reflect/protoregistry": {
+		files: []string{
+			"receipts/interceptor.go",
+			"receipts/internal/fixture/fixture.go",
+		},
+		symbols: []string{"Files", "GlobalFiles", "Types", "GlobalTypes"},
+	},
+	"google.golang.org/protobuf/types/dynamicpb": {
+		// One file, and only NewMessageType — which needs a descriptor the
+		// caller already holds. NewMessage, the route the probe used, is
+		// refused everywhere.
+		files:   []string{"receipts/internal/fixture/fixture.go"},
+		symbols: []string{"NewMessageType"},
 	},
 	// The receipts digest canonicalises a receipt REQUEST — never a capability
 	// — and protojson is how it reaches a stable field order. The capability
@@ -384,6 +418,8 @@ func TestNoSecondWorkContextImplementation(t *testing.T) {
 		require.True(t, paths[allowed],
 			"the json allowlist names %q, which is not a file in this module", allowed)
 	}
+	assertFrozenStructShapes(t, files)
+
 	require.Contains(t, jsonAllowlist, mintEndpointJSONFile,
 		"the file allowed to carry json TAGS must be the file allowed to IMPORT encoding/json; "+
 			"two lists that can drift are two lists")
@@ -435,7 +471,120 @@ func inspectForSecondImplementation(file sourceFile) []string {
 	findings = append(findings, inspectCoreAliases(file, coreImports)...)
 	findings = append(findings, inspectEnvelopeDecoding(file, base64Names)...)
 	findings = append(findings, inspectProtoMethodsRoute(file)...)
+	findings = append(findings, inspectCapabilityFields(file)...)
 	return findings
+}
+
+// frozenStructFields is the EXACT field set of each struct a codec is allowed
+// to touch, by file and type name.
+//
+// The codec rule checks the TOP-LEVEL type only, which is the original defect
+// class coming back one level down: adding
+//
+//	Echo *Claims `json:"echo,omitempty"`
+//
+// to mintRequest made json.Marshal(mintRequest{Echo: claims}) encode a whole
+// capability through the row that exists for two strings — reproduced, and
+// green. The same went for a *Claims field on mintResponse.
+//
+// Freezing the field sets is stronger than chasing field types, and it is
+// honest about what these two structs are: an HTTP wire contract with a host.
+// A field added to either is a change to that contract and belongs in a
+// reviewed diff, not in a struct literal.
+var frozenStructFields = map[string]map[string][]string{
+	"workcontext/mint.go": {
+		"mintRequest":  {"Audience string", "ProjectionAudience string"},
+		"mintResponse": {"WorkContext string", "InstallationID string", "BuildIncarnation string"},
+	},
+}
+
+// inspectCapabilityFields refuses any struct carrying a field whose type is
+// one of core's Work messages.
+//
+// A codec reaching the struct then reaches the capability through it, whatever
+// the allowlist said about the outer type — which is the hand-enumerated
+// payload this module deleted, one level down.
+func inspectCapabilityFields(file sourceFile) []string {
+	var findings []string
+	ast.Inspect(file.syntax, func(node ast.Node) bool {
+		spec, ok := node.(*ast.TypeSpec)
+		if !ok {
+			return true
+		}
+		structure, ok := spec.Type.(*ast.StructType)
+		if !ok || structure.Fields == nil {
+			return true
+		}
+		// THE GENERAL RULE: no struct anywhere in this module carries a
+		// capability as a field. A codec reaching the struct then reaches the
+		// capability, whatever the allowlist said about the outer type.
+		for _, field := range structure.Fields.List {
+			named := typeName(file, field.Type)
+			if isCapabilityType(named) {
+				findings = append(findings, fmt.Sprintf(
+					"%s declares %s with a field of type %s.\n"+
+						"A struct carrying one of core's Work messages is a capability wearing another\n"+
+						"type's name: a codec allowed to touch the struct reaches the capability through\n"+
+						"it, which is the hand-enumerated payload this module deleted, one level down.",
+					file.path, spec.Name.Name, named))
+			}
+		}
+		return true
+	})
+	return findings
+}
+
+// assertFrozenStructShapes holds this repository's two codec-allowed structs to
+// their exact field sets.
+//
+// It is a claim about THIS TREE rather than a rule for arbitrary source, so it
+// runs over the repository's own files and not inside the per-file inspector
+// the bypass probes drive — a synthetic probe naming itself mintRequest is not
+// a change to the wire contract.
+func assertFrozenStructShapes(t *testing.T, files []sourceFile) {
+	t.Helper()
+	seen := map[string]map[string][]string{}
+	for _, file := range files {
+		frozen, ok := frozenStructFields[file.path]
+		if !ok {
+			continue
+		}
+		seen[file.path] = map[string][]string{}
+		ast.Inspect(file.syntax, func(node ast.Node) bool {
+			spec, ok := node.(*ast.TypeSpec)
+			if !ok {
+				return true
+			}
+			structure, ok := spec.Type.(*ast.StructType)
+			if !ok || structure.Fields == nil {
+				return true
+			}
+			if _, isFrozen := frozen[spec.Name.Name]; !isFrozen {
+				return true
+			}
+			var actual []string
+			for _, field := range structure.Fields.List {
+				for _, name := range field.Names {
+					actual = append(actual, name.Name+" "+typeName(file, field.Type))
+				}
+			}
+			seen[file.path][spec.Name.Name] = actual
+			return true
+		})
+	}
+	for path, frozen := range frozenStructFields {
+		for name, expected := range frozen {
+			require.Equal(t, expected, seen[path][name],
+				"%s: %s is a codec-allowed struct and its field set is FROZEN.\n"+
+					"The codec rule names the TYPE, so a new field is a new thing encoded through a\n"+
+					"row that exists for the fields listed — adding `Echo *Claims` to mintRequest\n"+
+					"encoded a whole capability through a row for two strings, and was green. These\n"+
+					"two structs are an HTTP wire contract with the mint host: a change to them is a\n"+
+					"change to that contract, and belongs in a reviewed diff with\n"+
+					"frozenStructFields updated in it.",
+				path, name)
+		}
+	}
 }
 
 // inspectProtoMethodsRoute refuses a message's own marshal and unmarshal
@@ -2015,8 +2164,19 @@ func resolveTypeName(file sourceFile, expression ast.Expr, use token.Pos) string
 		if function, ok := typed.Fun.(*ast.Ident); ok && function.Name == "new" && len(typed.Args) == 1 {
 			return typeName(file, typed.Args[0])
 		}
-		// A conversion: T(x) names T; anything else is unknown.
-		return typeName(file, typed.Fun)
+		// EVERY OTHER CALL IS UNKNOWN, and this used to return the function's
+		// own name as though it were a type.
+		//
+		// That lie was a bypass: dynamicpb.NewMessage(desc) resolved to
+		// "…/dynamicpb#NewMessage", which is neither a capability nor an
+		// interface nor empty, so the root module's check said yes — and a
+		// reviewer unmarshalled a real WorkContextV1 through it. The same went
+		// for protoregistry.GlobalTypes.FindMessageByName(...).New().
+		//
+		// A conversion T(x) is lost with it. That is the right trade: a
+		// conversion at a codec call site now needs the indirection
+		// allowlist, and there are none in this repository.
+		return ""
 	case *ast.Ident:
 		return declaredTypeName(file, typed.Name, use)
 	}
