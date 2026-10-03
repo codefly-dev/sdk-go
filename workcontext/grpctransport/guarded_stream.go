@@ -64,6 +64,10 @@ type GuardedServerStream struct {
 	// instead of reaching around them.
 	ctx context.Context
 
+	// transport is this wrapper as the context's transport stream, kept so the
+	// re-check's own context can answer the method without being able to write.
+	transport *guardedTransportStream
+
 	mu       sync.Mutex
 	headers  metadata.MD
 	trailers metadata.MD
@@ -97,13 +101,11 @@ func Guard(stream grpc.ServerStream, guard *workcontext.StreamGuard) (*GuardedSe
 	// The handler's context carries this wrapper as its transport stream. The
 	// inherited one is kept for Method(), which is the one thing a transport
 	// stream answers that is not a write.
-	guarded.ctx = grpc.NewContextWithServerTransportStream(
-		stream.Context(),
-		&guardedTransportStream{
-			guarded:   guarded,
-			inherited: grpc.ServerTransportStreamFromContext(stream.Context()),
-		},
-	)
+	guarded.transport = &guardedTransportStream{
+		guarded:   guarded,
+		inherited: grpc.ServerTransportStreamFromContext(stream.Context()),
+	}
+	guarded.ctx = grpc.NewContextWithServerTransportStream(stream.Context(), guarded.transport)
 	return guarded, nil
 }
 
@@ -278,8 +280,52 @@ func (s *GuardedServerStream) recheck() error {
 	if s == nil || s.guard == nil || s.stream == nil {
 		return fmt.Errorf("%w: unguarded stream", workcontext.ErrInvalid)
 	}
-	return s.guard.BeforeSend(s.Context())
+	// THE RE-CHECK'S CONTEXT REFUSES WRITES, and that is what stops a
+	// deadlock rather than a convention asking people not to.
+	//
+	// Measured: a Recheck that emitted an audit header with
+	// grpc.SetHeader(ctx, …) hung the handler FOREVER. The write resolved this
+	// wrapper out of the context, called SetHeader, which called recheck,
+	// which called BeforeSend — and BeforeSend holds the guard's mutex across
+	// the re-check, so the nested call blocked on a sync.Mutex its own
+	// goroutine held. SendMsg never returned.
+	//
+	// Releasing that mutex would turn the hang into unbounded recursion, which
+	// is not better. The honest fix is that a liveness check must not write to
+	// the stream whose liveness it is deciding — that is circular — so the
+	// context it runs under answers every write with a refusal naming why.
+	return s.guard.BeforeSend(grpc.NewContextWithServerTransportStream(
+		s.Context(), refusingTransportStream{method: s.method()},
+	))
 }
+
+// method is the full method name, for the refusing transport stream's answer.
+func (s *GuardedServerStream) method() string {
+	if s == nil || s.transport == nil {
+		return ""
+	}
+	return s.transport.Method()
+}
+
+// refusingTransportStream is what a re-check's context answers with: it reads
+// the method and refuses every write.
+//
+// A re-check deciding whether the stream may still emit must not emit, and a
+// re-check that tries gets an error saying so instead of a deadlock.
+type refusingTransportStream struct{ method string }
+
+func (t refusingTransportStream) Method() string { return t.method }
+
+func (t refusingTransportStream) SetHeader(metadata.MD) error { return errRecheckMustNotWrite }
+
+func (t refusingTransportStream) SendHeader(metadata.MD) error { return errRecheckMustNotWrite }
+
+func (t refusingTransportStream) SetTrailer(metadata.MD) error { return errRecheckMustNotWrite }
+
+var errRecheckMustNotWrite = fmt.Errorf(
+	"%w: a Work Context liveness re-check must not write to the stream whose liveness it is deciding",
+	workcontext.ErrInvalid,
+)
 
 // releaseHeaders hands held headers to the real stream. The caller has just
 // re-checked, and a SendMsg flushes whatever is queued there, so this is the
@@ -346,12 +392,24 @@ func statusFor(err error) error {
 		return nil
 	case errors.Is(err, workcontext.ErrRevoked),
 		errors.Is(err, workcontext.ErrReplayed),
-		errors.Is(err, workcontext.ErrInvalid),
 		errors.Is(err, workcontext.ErrNotACoreToken):
 		// The capability no longer authenticates. Unauthenticated is the code
 		// a client answers by presenting a new one, which is exactly the
 		// README's "mint again".
 		code = codes.Unauthenticated
+	case errors.Is(err, workcontext.ErrInvalid):
+		// NOT Unauthenticated. ErrInvalid is this package's sentinel for
+		// MISUSE as well as for a structurally broken capability — a nil
+		// guard, a finished stream, an unguarded wrapper — so mapping it to
+		// Unauthenticated told a client "mint again" about a server bug, and
+		// minting again cannot fix a server bug. Internal is the honest code:
+		// the client did nothing it can correct.
+		//
+		// The cost is that a genuinely malformed capability also arrives as
+		// Internal. That is the right side to err on: a client told to mint
+		// again when it should not loops, and a client told Internal when it
+		// could have minted retries once and sees the same answer.
+		code = codes.Internal
 	case errors.Is(err, context.Canceled):
 		code = codes.Canceled
 	case errors.Is(err, context.DeadlineExceeded):
@@ -409,22 +467,33 @@ func (e statusError) GRPCStatus() *status.Status {
 // guard with a nil error means this METHOD carries no capability and needs
 // none.
 //
-// # Unguarded is a property of a method, not of a request
+// # The capability-bearing method set is DECLARED, not learned
 //
-// That decision is remembered per info.FullMethod and the FIRST answer is
-// binding: a later disagreement about the same method refuses the stream. A
-// per-request (nil, nil) is the optional-carrier shape this module deleted —
-// "guarded wherever the callback felt like it", where one buggy branch, or one
-// request whose own metadata was missing, hands a handler the unguarded stream.
-// Whether a method is capability-bearing is static; if a server needs it to
-// vary, that is two methods.
+// capabilityBearing names every method whose streams carry a capability. It is
+// fixed at construction, and guardFor is asked only about those — so a method
+// in the set always gets a guard, and a method outside it never does.
+//
+// The previous revision learned it instead: guardFor was asked per request and
+// the FIRST answer for a method was binding. That is trust on first use, and
+// it fails the way trust on first use always fails. If the first request to a
+// capability-bearing method arrived without a capability — a client mid-deploy,
+// a health probe, a retry that lost its metadata — guardFor answered
+// (nil, nil), THAT REQUEST GOT THE RAW STREAM, the method was recorded
+// unguarded, and every later legitimate request was refused codes.Internal
+// until the process restarted. One early request could both bypass the guard
+// and disable the method.
+//
+// Declaring the set removes the learning. A server that cannot enumerate its
+// capability-bearing methods does not know which of its streams carry
+// authority, which is the thing to fix before installing an interceptor.
 func StreamServerInterceptor(
+	capabilityBearing []string,
 	guardFor func(ctx context.Context, info *grpc.StreamServerInfo) (*workcontext.StreamGuard, error),
 ) grpc.StreamServerInterceptor {
-	var (
-		mu      sync.Mutex
-		decided = map[string]bool{}
-	)
+	guarded := make(map[string]bool, len(capabilityBearing))
+	for _, method := range capabilityBearing {
+		guarded[method] = true
+	}
 	return func(
 		server any,
 		stream grpc.ServerStream,
@@ -437,33 +506,28 @@ func StreamServerInterceptor(
 				workcontext.ErrInvalid,
 			)
 		}
-		guard, err := guardFor(stream.Context(), info)
-		if err != nil {
-			return statusFor(err)
-		}
 		method := ""
 		if info != nil {
 			method = info.FullMethod
 		}
-		mu.Lock()
-		wasGuarded, seen := decided[method]
-		if !seen {
-			decided[method] = guard != nil
+		if !guarded[method] {
+			// Declared as carrying no capability. The decision was made at
+			// construction, where a reviewer can read it, rather than inferred
+			// from whichever request happened to arrive first.
+			return handler(server, stream)
 		}
-		mu.Unlock()
-		if seen && wasGuarded != (guard != nil) {
-			// The method's own answer changed under us. Refusing is the only
-			// safe reading: if it was guarded once it is capability-bearing,
-			// and if it was not, something now thinks it is.
-			return status.Errorf(codes.Internal,
-				"%s: whether this method is Work Context guarded changed between requests; that is a property of the method",
-				method,
-			)
+		guard, err := guardFor(stream.Context(), info)
+		if err != nil {
+			return statusFor(err)
 		}
 		if guard == nil {
-			// Explicitly unguarded, for this METHOD, by the server's own
-			// decision, at the server rather than inside a handler.
-			return handler(server, stream)
+			// The method IS declared capability-bearing and guardFor produced
+			// no guard. That is a refusal, not a passthrough: the previous
+			// revision handed this request the raw stream.
+			return status.Errorf(codes.Unauthenticated,
+				"%s carries a Work Context and no guard could be built for this stream",
+				method,
+			)
 		}
 		guarded, err := Guard(stream, guard)
 		if err != nil {

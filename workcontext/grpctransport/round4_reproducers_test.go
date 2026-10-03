@@ -220,40 +220,57 @@ func TestRevocationReachesTheClientAsUnauthenticated(t *testing.T) {
 		"a client cannot tell 'mint again' from 'the server broke' out of codes.Unknown")
 }
 
-// Whether a method is guarded is a property of the METHOD. A guardFor that
-// answers (nil, nil) for a method it guarded before is refused rather than
-// handing that request the raw stream.
-func TestGuardingIsDecidedPerMethodAndNotPerRequest(t *testing.T) {
-	authority := &revocableGuard{}
-	var calls int
+// N-C: the capability-bearing method set is DECLARED, so a first request
+// without a capability never gets the raw stream and never disables the method.
+//
+// The previous revision learned the set: guardFor was asked per request and the
+// FIRST answer for a method was binding. That is trust on first use. If the
+// first request to a capability-bearing method arrived without a capability — a
+// client mid-deploy, a health probe, a retry that lost its metadata —
+// guardFor answered (nil, nil), THAT request was handed the raw stream, the
+// method was recorded unguarded, and every later legitimate request was
+// refused codes.Internal until the process restarted. One early request both
+// bypassed the guard and took the method down.
+func TestAFirstRequestWithoutACapabilityNeitherBypassesNorDisablesTheMethod(t *testing.T) {
+	var asked int
 	var mu sync.Mutex
+	var handedRaw bool
 	interceptor := StreamServerInterceptor(
+		// DECLARED: this method carries a capability, whatever any one request
+		// looks like.
+		[]string{streamMethod},
 		func(context.Context, *grpc.StreamServerInfo) (*workcontext.StreamGuard, error) {
 			mu.Lock()
 			defer mu.Unlock()
-			calls++
-			if calls == 1 {
-				return authority.guard(t), nil
+			asked++
+			if asked == 1 {
+				// The first request has no capability.
+				return nil, nil
 			}
-			// The optional-carrier shape: this request happens to have found
-			// no capability, so the handler would get the unguarded stream.
-			return nil, nil
+			return (&revocableGuard{}).guard(t), nil
 		})
 
 	connection := serveWith(t, interceptor, func(stream grpc.ServerStream) error {
 		if _, ok := stream.(*GuardedServerStream); !ok {
-			return errors.New("the handler was handed a stream that is not the wrapper")
+			mu.Lock()
+			handedRaw = true
+			mu.Unlock()
 		}
 		return nil
 	})
 
+	// The first request is REFUSED rather than handed the raw stream.
 	_, _, first := clientSaw(t, connection)
-	require.NoError(t, first, "the first request establishes the method as guarded")
+	require.Error(t, first, "a capability-bearing method ran with no guard")
+	require.Equal(t, codes.Unauthenticated, status.Code(first))
+	mu.Lock()
+	require.False(t, handedRaw, "the handler was handed the raw stream")
+	mu.Unlock()
 
+	// And the method still WORKS afterwards: nothing was learned, so nothing
+	// is stuck. This is the half that used to be codes.Internal until restart.
 	_, _, second := clientSaw(t, connection)
-	require.Error(t, second)
-	require.Equal(t, codes.Internal, status.Code(second))
-	require.Contains(t, status.Convert(second).Message(), "property of the method")
+	require.NoError(t, second, "one early request without a capability disabled the method")
 }
 
 // The three survivors the layer-4 mutation pass found in this package: no test
@@ -296,8 +313,6 @@ func TestATrailerSetAfterFinishIsRefused(t *testing.T) {
 	require.NoError(t, guarded.Finish(nil))
 	released := underlying.trailers
 
-	// After Finish: refused, and nothing more reaches gRPC however many times
-	// it is attempted.
 	for range 3 {
 		guarded.SetTrailer(metadata.Pairs("after-finish", "late"))
 	}
@@ -312,9 +327,10 @@ func TestATrailerSetAfterFinishIsRefused(t *testing.T) {
 // The wrapper exposes no METHOD that returns the underlying stream either.
 //
 // The shape test checked fields and the interface's own methods, so it survived
-// an `Unwrap() any` accessor — which is the embedded field again with one more
-// step. This asserts the property the shape test was reaching for: nothing on
-// this type hands back something that satisfies grpc.ServerStream.
+// an `Unwrap() any` accessor — the embedded field with one more step. This
+// asserts the property the shape test was reaching for: nothing on this type
+// hands back something satisfying grpc.ServerStream, and nothing returns a
+// bare `any`, which would carry the raw stream past every shape check.
 func TestNoMethodOfTheWrapperReturnsTheRawStream(t *testing.T) {
 	guard, err := workcontext.NewStreamGuard(workcontext.StreamGuardOptions{
 		Recheck: func(context.Context) error { return nil },
@@ -343,4 +359,56 @@ func TestNoMethodOfTheWrapperReturnsTheRawStream(t *testing.T) {
 			}
 		}
 	}
+}
+
+// N-P: a Recheck that writes to the stream must get an ERROR, not a deadlock.
+//
+// Measured before the fix: a Recheck emitting an audit header with
+// grpc.SetHeader(ctx, …) hung the handler FOREVER. The write resolved the
+// wrapper out of the context, called SetHeader, which called recheck, which
+// called BeforeSend — and BeforeSend holds the guard's mutex across the
+// re-check, so the nested call blocked on a sync.Mutex its own goroutine held.
+// SendMsg never returned.
+//
+// Releasing that mutex would turn the hang into unbounded recursion. A liveness
+// check deciding whether the stream may emit must not emit, so the context it
+// runs under refuses every write and names why.
+func TestARecheckThatWritesToTheStreamIsRefusedRatherThanDeadlocking(t *testing.T) {
+	var wrote error
+	guard, err := workcontext.NewStreamGuard(workcontext.StreamGuardOptions{
+		Recheck: func(ctx context.Context) error {
+			wrote = grpc.SetHeader(ctx, metadata.Pairs("audited", "yes"))
+			return nil
+		},
+	})
+	require.NoError(t, err)
+	guarded, err := Guard(&recordingStream{ctx: context.Background()}, guard)
+	require.NoError(t, err)
+
+	sent := make(chan error, 1)
+	go func() { sent <- guarded.SendMsg("x") }()
+	select {
+	case sendErr := <-sent:
+		require.NoError(t, sendErr, "the send itself is fine; the write inside the re-check is not")
+	case <-time.After(10 * time.Second):
+		t.Fatal("SendMsg never returned: the re-check re-entered BeforeSend under its own mutex")
+	}
+
+	require.ErrorIs(t, wrote, workcontext.ErrInvalid)
+	require.ErrorContains(t, wrote, "must not write to the stream whose liveness it is deciding")
+
+	// And the method is still readable from inside a re-check, because reading
+	// is not writing.
+	var seen string
+	readOnly, err := workcontext.NewStreamGuard(workcontext.StreamGuardOptions{
+		Recheck: func(ctx context.Context) error {
+			seen, _ = grpc.Method(ctx)
+			return nil
+		},
+	})
+	require.NoError(t, err)
+	reader, err := Guard(&recordingStream{ctx: context.Background()}, readOnly)
+	require.NoError(t, err)
+	require.NoError(t, reader.SendMsg("x"))
+	require.Empty(t, seen, "a bare recordingStream carries no transport stream, so there is no method to read")
 }

@@ -147,8 +147,11 @@ func (path ProjectedTokenFile) ProjectedToken() (string, error) {
 		return "", fmt.Errorf("%w: read projected token: %w", ErrMintUnavailable, err)
 	}
 	if len(raw) > maxProjectedTokenBytes {
-		// Not transient: the file is there and is the wrong thing.
-		return "", fmt.Errorf("%w: projected token exceeds %d bytes", ErrMintRefused, maxProjectedTokenBytes)
+		// Retryable. "The file is there and is the wrong thing" was the reason
+		// for latching this, and it is not a reason: latching buys nothing
+		// here — the host would refuse an oversized bearer anyway — while a
+		// projection caught mid-write is exactly the shape that produces it.
+		return "", fmt.Errorf("%w: projected token exceeds %d bytes", ErrMintUnavailable, maxProjectedTokenBytes)
 	}
 	token := strings.TrimSpace(string(raw))
 	if token == "" {
@@ -228,8 +231,11 @@ type MintOptions struct {
 	// bypasses TLSClientConfig entirely — and a caller holding the same
 	// *http.Transport pointer can turn verification off after construction,
 	// because a copied http.Client shares it. Inspecting a supplied client
-	// could not close any of that. So the client builds and owns its transport:
-	// TLS 1.2 minimum, verification on, no custom dialer, redirects refused.
+	// could not close any of that. So the client builds and owns its transport.
+	// What that transport is, is stated once, at mintHTTPClient — not restated
+	// here, because a field comment and a constructor comment saying the same
+	// thing is how this one came to claim a TLS 1.2 floor for three revisions
+	// after the floor became 1.3.
 	RootCAs *x509.CertPool
 
 	// RequestTimeout bounds one mint request.
@@ -239,16 +245,16 @@ type MintOptions struct {
 	// renewal is attempted. Zero takes the default.
 	RenewalLead float64
 
-	// MaxCredentialLifetime refuses a credential the host minted for longer
-	// than this process will hold one. Zero takes
-	// defaultMaxCredentialLifetime.
+	// MaxCredentialLifetime refuses a credential valid for longer than this
+	// process will hold one. Zero takes defaultMaxCredentialLifetime, which is
+	// core's own MaxTTLCeiling.
 	//
-	// Core caps what an authority will mint (Authority.MaxTTL, one hour by
-	// default), so in a correctly configured deployment this never fires. It is
-	// here for the one that is not: MaxTTL is configurable with no ceiling and
-	// nothing verifies a lifetime at use, so this is the only thing standing
-	// between a misconfigured host and a process holding a month-long
-	// credential.
+	// It is a DEPLOYMENT POLICY below core's absolute ceiling, and what that
+	// means is argued once at defaultMaxCredentialLifetime rather than again
+	// here. This comment claimed to be the only thing between a misconfigured
+	// host and a month-long credential, which stopped being true when core put
+	// the bound in its one decode path — and it went on claiming it because
+	// the argument was written down twice.
 	MaxCredentialLifetime time.Duration
 
 	// Now is the clock, for tests.
@@ -436,7 +442,7 @@ func NewMintClient(options MintOptions) (*MintClient, error) {
 	if options.Authority == nil {
 		return nil, fmt.Errorf(
 			"%w: a mint client needs the process's boot-read authority; the audience is read from it",
-			ErrMintRefused,
+			ErrInvalid,
 		)
 	}
 	audience := AuthorityValue{
@@ -445,14 +451,14 @@ func NewMintClient(options MintOptions) (*MintClient, error) {
 	}
 	if audience.Name == "" || audience.Key == "" {
 		return nil, fmt.Errorf(
-			"%w: name the pinned value the audience is read from", ErrMintRefused,
+			"%w: name the pinned value the audience is read from", ErrInvalid,
 		)
 	}
 	if options.ProjectedToken == nil {
-		return nil, fmt.Errorf("%w: no projected token source", ErrMintRefused)
+		return nil, fmt.Errorf("%w: no projected token source", ErrInvalid)
 	}
 	if strings.TrimSpace(options.ProjectionAudience) == "" {
-		return nil, fmt.Errorf("%w: no projection audience", ErrMintRefused)
+		return nil, fmt.Errorf("%w: no projection audience", ErrInvalid)
 	}
 	timeout := options.RequestTimeout
 	if timeout == 0 {
@@ -461,7 +467,7 @@ func NewMintClient(options MintOptions) (*MintClient, error) {
 	if timeout < time.Millisecond || timeout > maxMintRequestTimeout {
 		return nil, fmt.Errorf(
 			"%w: mint request timeout must be between 1ms and %s",
-			ErrMintRefused, maxMintRequestTimeout,
+			ErrInvalid, maxMintRequestTimeout,
 		)
 	}
 	lead := options.RenewalLead
@@ -469,7 +475,7 @@ func NewMintClient(options MintOptions) (*MintClient, error) {
 		lead = defaultRenewalLead
 	}
 	if lead <= 0 || lead >= 1 {
-		return nil, fmt.Errorf("%w: renewal lead must be between zero and one", ErrMintRefused)
+		return nil, fmt.Errorf("%w: renewal lead must be between zero and one", ErrInvalid)
 	}
 	ceiling := options.MaxCredentialLifetime
 	if ceiling == 0 {
@@ -806,17 +812,28 @@ func (c *MintClient) mintInto(done chan struct{}) {
 	c.refreshWanted = false
 	renewal := c.credential != nil
 	if err != nil {
-		if errors.Is(err, ErrMintUnavailable) {
-			c.failures++
-			c.backoffUntil = c.now().UTC().Add(mintBackoff(c.failures))
-			c.lastFailure = err
+		// ONE LATCH RULE: only ErrMintRefused is terminal, and nothing else is.
+		//
+		// It used to be the negation — anything that was not an outage latched
+		// — which made every error this client had not thought about into a
+		// permanent stop. An ErrInvalid from a caller's own token source
+		// latched while Refused() reported something errors.Is(…,
+		// ErrMintRefused) said false about, so the two ways of asking "is this
+		// client refused" disagreed; and the misconfiguration sentinels said
+		// in their own comments that they were NOT latched, while this branch
+		// latched them.
+		//
+		// Everything that is not an enumerated refusal is held off and
+		// retried, with the error kept so a caller can see it. The asymmetry
+		// is the whole argument: a wrong "retryable" costs one request per
+		// hold-off, and a wrong "terminal" costs the process.
+		if errors.Is(err, ErrMintRefused) {
+			c.refused = err
 			return
 		}
-		// A refusal, which includes an authority drift, a TLS verification
-		// failure and the final-URL disclosure check. Latch it: the host will
-		// say the same thing again, and this package's contract is that a
-		// process seeing one must stop serving.
-		c.refused = err
+		c.failures++
+		c.backoffUntil = c.now().UTC().Add(mintBackoff(c.failures))
+		c.lastFailure = err
 		return
 	}
 	if renewal && credential.token == c.credential.token {
@@ -1081,17 +1098,24 @@ func (c *MintClient) mintLocked(ctx context.Context, audience string) (Credentia
 			return Credential{}, err
 		}
 		if reason := tlsVerificationFailure(err); reason != "" {
-			// NOT an outage. Every other transport error means "the endpoint
-			// is not answering"; this one means "something answered and could
-			// not prove it is the endpoint", which is the single case this
-			// whole transport exists to refuse. Treated as an outage it was
-			// retried on a hold-off while the held credential kept being
-			// served, with nothing anywhere saying that the channel carrying
-			// the projected service-account token had stopped being
-			// authenticated.
+			// AN OUTAGE, and the previous revision had this backwards for a
+			// reason that does not survive being stated precisely.
+			//
+			// It latched, on the argument that "the projected token is not
+			// presented to an endpoint that cannot prove who it is". But the
+			// HANDSHAKE FAILS BEFORE ANY REQUEST BYTES LEAVE: the token was
+			// never sent and a retry would not send it either, so latching
+			// buys no confidentiality at all. What it does buy is a permanent
+			// stop on a certificate ROTATION — the endpoint's new leaf not yet
+			// trusted, a root pool updated a minute later — which is the most
+			// ordinary cause of this error in a running system.
+			//
+			// So it is retryable, and named distinctly in the message because
+			// a certificate that does not verify is still the thing an
+			// operator must look at first.
 			return Credential{}, fmt.Errorf(
-				"%w: the mint endpoint's certificate did not verify (%s); the projected token is not presented to an endpoint that cannot prove who it is",
-				ErrMintRefused, reason,
+				"%w: the mint endpoint's certificate did not verify (%s); nothing was sent, and this retries",
+				ErrMintUnavailable, reason,
 			)
 		}
 		return Credential{}, fmt.Errorf("%w: %w", ErrMintUnavailable, err)
@@ -1131,8 +1155,14 @@ func (c *MintClient) mintLocked(ctx context.Context, audience string) (Credentia
 	// whole life.
 	mediaType, _, parseErr := mime.ParseMediaType(response.Header.Get("Content-Type"))
 	if parseErr != nil || mediaType != "application/json" {
+		// RETRYABLE. A 200 carrying text/html is an ingress or a service mesh
+		// answering instead of the host — a default page, a captive error
+		// page, a misrouted rollout — and every one of those is a moment
+		// rather than a verdict. Latched, one of them stopped the process for
+		// good.
 		return Credential{}, fmt.Errorf(
-			"%w: mint response must declare Content-Type: application/json", ErrMintRefused,
+			"%w: mint response must declare Content-Type: application/json and declared %q",
+			ErrMintUnavailable, response.Header.Get("Content-Type"),
 		)
 	}
 	payload, err := io.ReadAll(io.LimitReader(response.Body, maxMintResponseBytes+1))
@@ -1152,8 +1182,10 @@ func (c *MintClient) mintLocked(ctx context.Context, audience string) (Credentia
 		// Terminal, unlike the read failure above: the host answered, and
 		// answered with something this client will not accept. Retrying gets
 		// the same answer.
+		// Retryable for the same reason: an oversized body on a 200 is
+		// something in the middle answering, not the host refusing.
 		return Credential{}, fmt.Errorf(
-			"%w: mint response exceeds %d bytes", ErrMintRefused, maxMintResponseBytes,
+			"%w: mint response exceeds %d bytes", ErrMintUnavailable, maxMintResponseBytes,
 		)
 	}
 	return c.credentialFrom(payload, audience)
@@ -1168,7 +1200,9 @@ func (c *MintClient) credentialFrom(payload []byte, audience string) (Credential
 	decoder := json.NewDecoder(bytes.NewReader(payload))
 	decoder.DisallowUnknownFields()
 	if err := decoder.Decode(&body); err != nil {
-		return Credential{}, fmt.Errorf("%w: decode mint response: %v", ErrMintRefused, err)
+		// Retryable: an undecodable body on a 200 is the same class as a wrong
+		// Content-Type — something answered that is not the host.
+		return Credential{}, fmt.Errorf("%w: decode mint response: %v", ErrMintUnavailable, err)
 	}
 	// DisallowUnknownFields applies to the value just decoded and says nothing
 	// about what follows it, so a valid response with a second JSON value
@@ -1176,7 +1210,7 @@ func (c *MintClient) credentialFrom(payload []byte, audience string) (Credential
 	// The response is ONE object and nothing after it.
 	if err := decoder.Decode(new(json.RawMessage)); !errors.Is(err, io.EOF) {
 		return Credential{}, fmt.Errorf(
-			"%w: mint response carries more than one JSON value", ErrMintRefused,
+			"%w: mint response carries more than one JSON value", ErrMintUnavailable,
 		)
 	}
 	token := body.WorkContext
@@ -1272,11 +1306,13 @@ func (c *MintClient) checkWindow(credential Credential) error {
 	}
 	now := c.now().UTC()
 	if now.Before(credential.notBefore.Add(-corework.DefaultSkew)) {
-		// Not yet valid. A clock this far apart is a configuration error on one
-		// side or the other and will not fix itself, so it is a refusal.
+		// Not yet valid: the clocks are further apart than core's own skew.
+		// RETRYABLE, because the thing that most often causes it does fix
+		// itself — ntpd stepping a clock that drifted, a VM resuming. Latched,
+		// a process that happened to boot inside that window never recovered.
 		return fmt.Errorf(
 			"%w: the minted credential is not valid until %s, and it is %s",
-			ErrMintRefused, credential.notBefore, now,
+			ErrMintUnavailable, credential.notBefore, now,
 		)
 	}
 	if !now.Before(credential.expiresAt) {
@@ -1378,6 +1414,11 @@ type mintResponse struct {
 
 // validateMintURL requires absolute HTTPS with no userinfo, query or fragment.
 //
+// Its refusal is ErrInvalid, like every other construction-time check: nothing
+// has been asked of a host, so "the mint refused you" is the wrong thing to
+// tell a caller — and ErrMintRefused is the sentinel this package documents as
+// meaning a process must stop serving.
+//
 // Plaintext HTTP used to be accepted here, which made the strongest reason this
 // endpoint exists — that the projected service-account token is presented to it
 // and nothing else — contingent on a configuration value. A credential request
@@ -1388,7 +1429,7 @@ func validateMintURL(raw string) (string, error) {
 		parsed.Fragment != "" || parsed.RawQuery != "" || parsed.Scheme != "https" {
 		return "", fmt.Errorf(
 			"%w: mint URL must be an absolute https URL without credentials, query, or fragment",
-			ErrMintRefused,
+			ErrInvalid,
 		)
 	}
 	return parsed.String(), nil

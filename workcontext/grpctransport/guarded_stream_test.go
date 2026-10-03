@@ -8,7 +8,9 @@ import (
 
 	"github.com/stretchr/testify/require"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/metadata"
+	"google.golang.org/grpc/status"
 
 	"github.com/codefly-dev/sdk-go/workcontext"
 )
@@ -250,12 +252,13 @@ func TestTheStreamInterceptorHandsTheHandlerAGuardedStream(t *testing.T) {
 
 	underlying := &recordingStream{ctx: context.Background()}
 	interceptor := StreamServerInterceptor(
+		[]string{streamMethod},
 		func(context.Context, *grpc.StreamServerInfo) (*workcontext.StreamGuard, error) {
 			return guard, nil
 		})
 
 	var handed grpc.ServerStream
-	err = interceptor(nil, underlying, &grpc.StreamServerInfo{FullMethod: "/x/Y"},
+	err = interceptor(nil, underlying, &grpc.StreamServerInfo{FullMethod: streamMethod},
 		func(_ any, stream grpc.ServerStream) error {
 			handed = stream
 			require.NoError(t, stream.SendMsg("first"))
@@ -269,35 +272,59 @@ func TestTheStreamInterceptorHandsTheHandlerAGuardedStream(t *testing.T) {
 	require.NotImplements(t, (*interface{ ServerStream() grpc.ServerStream })(nil), handed)
 }
 
-// A server may declare a stream unguarded, but it does so AT THE SERVER where
-// a reviewer sees it, not inside a handler.
+// The capability-bearing method set is DECLARED at construction, and a method
+// in it is guarded or the stream is refused — never passed through.
+//
+// The previous revision learned the set from the first request, which is trust
+// on first use: a first request without a capability got the RAW STREAM, the
+// method was recorded unguarded, and every later legitimate request was
+// refused until restart. One early request both bypassed the guard and
+// disabled the method.
 func TestTheStreamInterceptorRefusesWhenItCannotBuildAGuard(t *testing.T) {
 	underlying := &recordingStream{ctx: context.Background()}
 	refused := errors.New("this capability did not verify")
+	bearing := &grpc.StreamServerInfo{FullMethod: streamMethod}
 
 	err := StreamServerInterceptor(
+		[]string{streamMethod},
 		func(context.Context, *grpc.StreamServerInfo) (*workcontext.StreamGuard, error) {
 			return nil, refused
-		})(nil, underlying, &grpc.StreamServerInfo{}, func(any, grpc.ServerStream) error {
+		})(nil, underlying, bearing, func(any, grpc.ServerStream) error {
 		t.Fatal("the handler must not run when the stream could not be guarded")
 		return nil
 	})
 	require.ErrorIs(t, err, refused)
 
-	// Explicitly unguarded: allowed, and the handler gets the raw stream.
-	var handed grpc.ServerStream
+	// A DECLARED capability-bearing method whose guard could not be built is
+	// REFUSED. This used to be the passthrough that handed out the raw stream.
 	err = StreamServerInterceptor(
+		[]string{streamMethod},
 		func(context.Context, *grpc.StreamServerInfo) (*workcontext.StreamGuard, error) {
 			return nil, nil
-		})(nil, underlying, &grpc.StreamServerInfo{}, func(_ any, stream grpc.ServerStream) error {
-		handed = stream
+		})(nil, underlying, bearing, func(any, grpc.ServerStream) error {
+		t.Fatal("a capability-bearing method must not run unguarded")
 		return nil
 	})
+	require.Equal(t, codes.Unauthenticated, status.Code(err))
+
+	// A method OUTSIDE the declared set is not guarded and never asks: the
+	// decision is in the construction, where a reviewer reads it.
+	var handed grpc.ServerStream
+	err = StreamServerInterceptor(
+		[]string{streamMethod},
+		func(context.Context, *grpc.StreamServerInfo) (*workcontext.StreamGuard, error) {
+			t.Fatal("guardFor must not be asked about a method outside the declared set")
+			return nil, nil
+		})(nil, underlying, &grpc.StreamServerInfo{FullMethod: "/other.Service/Ping"},
+		func(_ any, stream grpc.ServerStream) error {
+			handed = stream
+			return nil
+		})
 	require.NoError(t, err)
 	require.Same(t, underlying, handed)
 
 	// And no guard-builder at all is a configuration error, not a pass.
-	err = StreamServerInterceptor(nil)(nil, underlying, &grpc.StreamServerInfo{},
-		func(any, grpc.ServerStream) error { return nil })
+	err = StreamServerInterceptor([]string{streamMethod}, nil)(
+		nil, underlying, bearing, func(any, grpc.ServerStream) error { return nil })
 	require.ErrorIs(t, err, workcontext.ErrInvalid)
 }

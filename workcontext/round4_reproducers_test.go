@@ -312,21 +312,26 @@ func TestEveryMintFaultIsClassifiedByWhatRecoveryItNeeds(t *testing.T) {
 			"the source's own error must stay in the chain")
 	})
 
-	t.Run("a TLS verification failure is a refusal, not an outage", func(t *testing.T) {
+	t.Run("a TLS verification failure is an outage: nothing was sent", func(t *testing.T) {
 		clock := &movableClock{at: testClock}
 		host := newMintHost(t, clock.now)
 		// A client pointed at the host with a root pool that does not contain
-		// the host's certificate: something answers, and cannot prove it is
-		// the endpoint.
+		// the host's certificate.
 		client := newTestMintClient(t, host, projectedFile(t, "projected"), clock.now,
 			func(options *MintOptions) { options.RootCAs = x509.NewCertPool() })
 
 		_, err := client.Credential(context.Background())
-		require.ErrorIs(t, err, ErrMintRefused,
-			"served the held credential and retried while the channel carrying the projection stopped being authenticated")
-		require.NotErrorIs(t, err, ErrMintUnavailable)
-		require.ErrorContains(t, err, "cannot prove who it is")
-		require.ErrorIs(t, client.Refused(), ErrMintRefused, "and it is terminal")
+		// This LATCHED for one revision, on the argument that the projected
+		// token must not be presented to an endpoint that cannot prove who it
+		// is. The argument does not survive being stated precisely: the
+		// handshake fails before any request bytes leave, so nothing was sent
+		// and a retry sends nothing either. Latching bought no
+		// confidentiality and turned a certificate ROTATION — the most
+		// ordinary cause of this in a running system — into a permanent stop.
+		require.ErrorIs(t, err, ErrMintUnavailable)
+		require.NotErrorIs(t, err, ErrMintRefused)
+		require.ErrorContains(t, err, "nothing was sent")
+		require.NoError(t, client.Refused(), "a certificate rotation is not a verdict about this process")
 	})
 
 	t.Run("408 is an outage", func(t *testing.T) {

@@ -625,9 +625,12 @@ func TestMintRefusesACredentialThatIsUnusableOnArrival(t *testing.T) {
 			mintedAt: testClock.Add(-time.Hour), mintedFor: 15 * time.Minute,
 			sentinel: ErrMintUnavailable, says: "expired at",
 		},
-		"not yet valid, which is a clock that will not fix itself": {
+		// RETRYABLE: ntpd stepping a drifted clock, or a VM resuming, fixes
+		// this. Latched, a process that booted inside the window never
+		// recovered.
+		"not yet valid, which a clock correction fixes": {
 			mintedAt: testClock.Add(time.Hour), mintedFor: 15 * time.Minute,
-			sentinel: ErrMintRefused, says: "not valid until",
+			sentinel: ErrMintUnavailable, says: "not valid until",
 		},
 		"whole remaining lifetime inside the renewal lead": {
 			mintedAt: testClock, mintedFor: 4 * time.Second,
@@ -764,11 +767,15 @@ func TestProjectedTokenFileRefusesWhatIsNotAToken(t *testing.T) {
 		})
 	}
 
-	// A file that is there and is the wrong thing IS a refusal: the host would
-	// refuse it, and the next read returns the same bytes.
+	// Nothing a local read produces is a refusal: every one of them is a
+	// moment in the life of a file that is mounted and rotated under a running
+	// process.
+	// Oversized is RETRYABLE too. Latching bought nothing — the host would
+	// refuse an oversized bearer anyway — and a projection caught mid-write is
+	// exactly the shape that produces it.
 	oversized := strings.Repeat("x", maxProjectedTokenBytes+1)
 	_, err := ProjectedTokenFile(projectedFile(t, oversized)).ProjectedToken()
-	require.ErrorIs(t, err, ErrMintRefused)
+	require.ErrorIs(t, err, ErrMintUnavailable)
 
 	token, err := ProjectedTokenFile(projectedFile(t, "  projected-with-trailing-newline\n")).ProjectedToken()
 	require.NoError(t, err)
@@ -951,7 +958,13 @@ func TestNewMintClientValidatesItsConfiguration(t *testing.T) {
 			options := valid
 			mutate(&options)
 			_, err := NewMintClient(options)
-			require.ErrorIs(t, err, ErrMintRefused)
+			// ErrInvalid, not ErrMintRefused. Nothing has been asked of a
+			// host at construction, so "the mint refused you" is the wrong
+			// thing to tell a caller — and ErrMintRefused is the sentinel this
+			// package documents as meaning a process must stop serving.
+			require.ErrorIs(t, err, ErrInvalid)
+			require.NotErrorIs(t, err, ErrMintRefused,
+				"a misconfiguration must not read as a host's verdict")
 		})
 	}
 }

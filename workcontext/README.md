@@ -178,15 +178,32 @@ implementation this repository deleted lived at the REPOSITORY root, in package
 modules, as a job in `go.yml` — the workflow that builds every ref this
 repository publishes — and it is **required on `main` by an active ruleset**.
 
-It sweeps the **published release lines too**, and that step **fails today**.
-Three refs (`compat/v0.1.65`, `compat/v0.1.65-tls`, `feat/file-carriers-compat`)
-still carry the deleted implementation. Running the sweep with no arguments made
-a green check mean only that the working tree was clean, which is the weakest
-thing it could have meant; passing it the refs makes the rule true of the
-repository or red. **Retiring those refs is a merge precondition**, not a
-runbook item: under "legacy means delete" a release line that cannot meet the
-rule is deleted by the owner, and `main` does not move while the rule is false
-of something this repository publishes.
+It sweeps **every other ref this repository publishes** too, through
+`scripts/sweep-published-refs.sh` — a script rather than inline shell because
+the inline version was wrong for weeks and nothing could test it. It listed
+refs with `git for-each-ref 'refs/remotes/origin/*'`, and **`*` does not cross
+a slash**, so every namespaced branch was silently dropped. CI printed
+`sweeping 1 other published ref(s)` / `ok origin/badges` and the required check
+went green while `origin/dependabot/go_modules/gomod-06d3dc2861` published
+`workcontext/work_context.go` importing `crypto/ed25519`.
+
+Two things follow, and the second matters more. Refs are listed **by prefix**,
+so a namespaced ref is included. And **swept is asserted against what the
+remote publishes**: a gate that sweeps a subset and reports success is worse
+than no gate, because the green is the evidence somebody acts on. A mismatch
+fails. Both properties have tests —
+`TestTheRefSweepSeesNamespacedBranches` and
+`TestTheRefSweepRefusesWhenItCanSeeFewerRefsThanExist` — because listing
+correctly is a property somebody can break again.
+
+**That step fails today**, on `origin/dependabot/go_modules/gomod-06d3dc2861`,
+which still carries the deleted implementation. Under "legacy means delete" a
+published ref that cannot meet the rule is **deleted by the owner**, and `main`
+does not move while the rule is false of something this repository publishes.
+The base ref and the ref under review are excluded: sweeping the branch a pull
+request merges into is circular, since `main` carries the implementation until
+this change deletes it, and `main` is covered by the working-tree sweep of its
+own push build.
 
 ## The model: mint once, sealed, verified exactly
 
@@ -585,12 +602,11 @@ guard, err := workcontext.NewStreamGuard(workcontext.StreamGuardOptions{
 // And let the SERVER enforce it, rather than each handler remembering to.
 server := grpc.NewServer(grpc.StreamInterceptor(
     grpctransport.StreamServerInterceptor(
+        // DECLARED at construction: every method whose streams carry a
+        // capability. A method in this list is guarded or its stream is
+        // refused; a method outside it is never asked about.
+        []string{"/codefly.example.Streamer/Emit"},
         func(ctx context.Context, info *grpc.StreamServerInfo) (*workcontext.StreamGuard, error) {
-            // Whether a method is capability-bearing is static, and the FIRST
-            // answer for a method is binding.
-            if !capabilityBearing[info.FullMethod] {
-                return nil, nil
-            }
             verified := verifiedFor(ctx) // from the server's own stream setup
             return workcontext.NewStreamGuard(workcontext.StreamGuardOptions{
                 Recheck: workcontext.RecheckWith(verifier, verified),
@@ -609,6 +625,17 @@ func (s *server) Emit(_ *pb.Request, stream pb.Streamer_EmitServer) error {
     return nil
 }
 ```
+
+**The method set is declared, not learned.** The previous revision asked
+`guardFor` per request and took the FIRST answer for a method as binding —
+trust on first use, and it failed the way trust on first use always fails. A
+first request arriving without a capability (a client mid-deploy, a health
+probe, a retry that lost its metadata) got `(nil, nil)`, **was handed the raw
+stream**, recorded the method as unguarded, and every later legitimate request
+was refused `codes.Internal` until the process restarted. One early request
+both bypassed the guard and took the method down. A server that cannot
+enumerate its capability-bearing methods does not know which of its streams
+carry authority, which is the thing to fix before installing an interceptor.
 
 **Use the interceptor, not `Guard` directly.** This README's previous recipe
 called `Guard` in the handler, which leaves the original stream in scope, never

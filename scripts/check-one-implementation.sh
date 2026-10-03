@@ -123,17 +123,32 @@ allowed() {
 # complete bypass.
 import_paths() {
   awk '
-    /^[[:space:]]*import[[:space:]]*\(/ { inblock = 1; next }
-    inblock && /^[[:space:]]*\)/        { inblock = 0; next }
-    inblock || /^[[:space:]]*import[[:space:]]/ {
-      # Double-quoted, which is every import gofmt produces.
-      if (match($0, /"[^"]+"/)) { print substr($0, RSTART + 1, RLENGTH - 2); next }
-      # And a RAW-STRING path. gofmt rewrites `crypto/ed25519` to the quoted
-      # form, so this cannot survive a formatted tree — but the sweep reads
-      # what is committed, not what gofmt would have written, and a reviewer
-      # confirmed the raw-string form passed.
-      if (match($0, /`[^`]+`/)) { print substr($0, RSTART + 1, RLENGTH - 2) }
+    # An import block opens wherever `import` is followed by `(` on the line,
+    # not only when the line IS `import (`. `import /* x */ (` and
+    # `import ("crypto/ed25519")` both opened a block the previous version did
+    # not recognise.
+    /^[[:space:]]*import/ && /\(/ { inblock = 1 }
+    /^[[:space:]]*import/ && !/\(/ { line = 1 }
+    inblock && /\)/ { closing = 1 }
+    (inblock || line) {
+      rest = $0
+      # EVERY quoted string on the line, not the first. The previous version
+      # read one, so `/* "fmt" */ "crypto/ed25519"` reported fmt and stopped —
+      # and `;`-joined specs on one line hid everything after the first.
+      while (match(rest, /"[^"]+"/)) {
+        print substr(rest, RSTART + 1, RLENGTH - 2)
+        rest = substr(rest, RSTART + RLENGTH)
+      }
+      # Raw-string paths too. gofmt rewrites them, and CI enforces no gofmt,
+      # so the sweep reads what is committed rather than what gofmt would have
+      # written.
+      while (match(rest, /`[^`]+`/)) {
+        print substr(rest, RSTART + 1, RLENGTH - 2)
+        rest = substr(rest, RSTART + RLENGTH)
+      }
+      line = 0
     }
+    closing { inblock = 0; closing = 0 }
   ' "$1"
 }
 

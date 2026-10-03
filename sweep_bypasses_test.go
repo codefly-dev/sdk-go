@@ -4,6 +4,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -119,4 +120,133 @@ func sweepOf(t *testing.T, script string, name string, source string) (string, e
 	sweep.Dir = repository
 	output, err := sweep.CombinedOutput()
 	return string(output), err
+}
+
+// The REF-LISTING step itself, which was wrong for weeks because nothing could
+// test it.
+//
+// go.yml listed refs with `git for-each-ref 'refs/remotes/origin/*'`. That
+// glob does not cross a slash, so every namespaced branch — compat/*, feat/*,
+// dependabot/* — was silently dropped. CI printed "sweeping 1 other published
+// ref(s)" and "ok origin/badges" and the required check went GREEN while a
+// dependabot branch published workcontext/work_context.go importing
+// crypto/ed25519.
+//
+// The step is a script now so these cases exist. The second one is the point:
+// listing correctly is a property somebody can break again, and a sweep over a
+// subset that reports success is worse than no sweep, because the green is
+// what a reader acts on.
+func TestTheRefSweepSeesNamespacedBranches(t *testing.T) {
+	script, err := filepath.Abs("scripts/sweep-published-refs.sh")
+	require.NoError(t, err)
+	checker, err := filepath.Abs("scripts/check-one-implementation.sh")
+	require.NoError(t, err)
+
+	// A throwaway "remote" with namespaced branches, cloned so the clone has
+	// real remote-tracking refs to list.
+	remote := t.TempDir()
+	runIn(t, remote, "git", "init", "--quiet", "--bare")
+
+	seed := t.TempDir()
+	runIn(t, seed, "git", "init", "--quiet")
+	require.NoError(t, os.WriteFile(filepath.Join(seed, "ordinary.go"),
+		[]byte("package x\n\nimport \"fmt\"\n\nvar _ = fmt.Sprint\n"), 0o600))
+	runIn(t, seed, "git", "add", ".")
+	runIn(t, seed, "git", "-c", "user.email=t@t", "-c", "user.name=t", "commit", "--quiet", "-m", "seed")
+	runIn(t, seed, "git", "branch", "-M", "main")
+	runIn(t, seed, "git", "remote", "add", "origin", remote)
+	runIn(t, seed, "git", "push", "--quiet", "origin", "main")
+	// Namespaced, exactly the shape the glob dropped.
+	for _, branch := range []string{"badges", "connectory/welcome", "dependabot/go_modules/gomod-abc"} {
+		runIn(t, seed, "git", "push", "--quiet", "origin", "main:refs/heads/"+branch)
+	}
+
+	clone := t.TempDir()
+	runIn(t, clone, "git", "clone", "--quiet", remote, ".")
+	runIn(t, clone, "git", "fetch", "--prune", "--quiet", "origin", "+refs/heads/*:refs/remotes/origin/*")
+	require.NoError(t, os.MkdirAll(filepath.Join(clone, "scripts"), 0o755))
+	copyFile(t, script, filepath.Join(clone, "scripts", "sweep-published-refs.sh"))
+	copyFile(t, checker, filepath.Join(clone, "scripts", "check-one-implementation.sh"))
+
+	listed := listRefs(t, clone, "main", "")
+	require.Contains(t, listed, "origin/connectory/welcome",
+		"a namespaced branch was dropped: this is the defect the glob had")
+	require.Contains(t, listed, "origin/dependabot/go_modules/gomod-abc",
+		"a doubly namespaced branch was dropped")
+	require.Contains(t, listed, "origin/badges")
+	require.NotContains(t, listed, "origin/main", "the base ref is swept by its own push build")
+
+	// And the head ref is excluded while everything else stays.
+	withHead := listRefs(t, clone, "main", "badges")
+	require.NotContains(t, withHead, "origin/badges")
+	require.Contains(t, withHead, "origin/connectory/welcome")
+}
+
+// And the sweep REFUSES when it can see fewer refs than the remote publishes,
+// which is what turns "I swept a subset" from a silent pass into a failure.
+func TestTheRefSweepRefusesWhenItCanSeeFewerRefsThanExist(t *testing.T) {
+	script, err := filepath.Abs("scripts/sweep-published-refs.sh")
+	require.NoError(t, err)
+	checker, err := filepath.Abs("scripts/check-one-implementation.sh")
+	require.NoError(t, err)
+
+	remote := t.TempDir()
+	runIn(t, remote, "git", "init", "--quiet", "--bare")
+	seed := t.TempDir()
+	runIn(t, seed, "git", "init", "--quiet")
+	require.NoError(t, os.WriteFile(filepath.Join(seed, "ordinary.go"),
+		[]byte("package x\n\nimport \"fmt\"\n\nvar _ = fmt.Sprint\n"), 0o600))
+	runIn(t, seed, "git", "add", ".")
+	runIn(t, seed, "git", "-c", "user.email=t@t", "-c", "user.name=t", "commit", "--quiet", "-m", "seed")
+	runIn(t, seed, "git", "branch", "-M", "main")
+	runIn(t, seed, "git", "remote", "add", "origin", remote)
+	runIn(t, seed, "git", "push", "--quiet", "origin", "main")
+	runIn(t, seed, "git", "push", "--quiet", "origin", "main:refs/heads/kept")
+
+	clone := t.TempDir()
+	runIn(t, clone, "git", "clone", "--quiet", remote, ".")
+	require.NoError(t, os.MkdirAll(filepath.Join(clone, "scripts"), 0o755))
+	copyFile(t, script, filepath.Join(clone, "scripts", "sweep-published-refs.sh"))
+	copyFile(t, checker, filepath.Join(clone, "scripts", "check-one-implementation.sh"))
+	// A branch appears on the remote AFTER the clone, so the local view is a
+	// strict subset — the shallow/stale-fetch case.
+	runIn(t, seed, "git", "push", "--quiet", "origin", "main:refs/heads/appeared/later")
+
+	run := exec.Command("bash", "scripts/sweep-published-refs.sh")
+	run.Dir = clone
+	run.Env = append(os.Environ(), "SWEEP_BASE=main", "SWEEP_HEAD=")
+	output, err := run.CombinedOutput()
+	require.Error(t, err, "a sweep that can see fewer refs than exist must fail:\n%s", output)
+	require.Contains(t, string(output), "worse than no sweep")
+}
+
+func listRefs(t *testing.T, dir string, base string, head string) []string {
+	t.Helper()
+	run := exec.Command("bash", "scripts/sweep-published-refs.sh")
+	run.Dir = dir
+	run.Env = append(os.Environ(), "SWEEP_LIST_ONLY=1", "SWEEP_BASE="+base, "SWEEP_HEAD="+head)
+	output, err := run.CombinedOutput()
+	require.NoError(t, err, "%s", output)
+	var refs []string
+	for _, line := range strings.Split(strings.TrimSpace(string(output)), "\n") {
+		if line != "" {
+			refs = append(refs, line)
+		}
+	}
+	return refs
+}
+
+func runIn(t *testing.T, dir string, command string, args ...string) {
+	t.Helper()
+	run := exec.Command(command, args...)
+	run.Dir = dir
+	output, err := run.CombinedOutput()
+	require.NoError(t, err, "%s %v: %s", command, args, output)
+}
+
+func copyFile(t *testing.T, from string, to string) {
+	t.Helper()
+	content, err := os.ReadFile(from)
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(to, content, 0o755))
 }

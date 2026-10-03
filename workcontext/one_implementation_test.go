@@ -58,6 +58,24 @@ var (
 		"google.golang.org/protobuf/encoding/protowire",
 		"google.golang.org/protobuf/types/known/anypb",
 		"encoding/gob", "encoding/asn1", "encoding/xml",
+		// The LOW-LEVEL protobuf runtime. protoiface and protoimpl expose a
+		// message's own marshal and unmarshal methods, so
+		// c.ProtoReflect().ProtoMethods().Unmarshal(...) is a complete decode
+		// that mentions no codec package at all — a route neither gate
+		// inspected. Nothing here has any use for them.
+		"google.golang.org/protobuf/runtime/protoiface",
+		"google.golang.org/protobuf/runtime/protoimpl",
+		// The LEGACY protobuf module, whose proto.Marshal and proto.Unmarshal
+		// are the same capability under a different path. Uncovered by every
+		// rule that named the new one.
+		"github.com/golang/protobuf/proto",
+		// Hashes that nothing here uses, and that a hand-rolled HMAC needs one
+		// of. crypto/sha256 is the exception and is held to named files and
+		// symbols; these have no use at all, so they are simply refused rather
+		// than left "not a signature, therefore fine".
+		"crypto/sha512", "crypto/sha1", "crypto/sha3", "crypto/md5",
+		// HKDF is HMAC with a label on it.
+		"crypto/hkdf",
 	}
 
 	// envelopeDecoders are banned EXCEPT where a file is allowlisted below. A
@@ -76,7 +94,13 @@ var (
 	// Any JOSE, JWT or token-library path, whoever publishes it. A capability
 	// here is core's protobuf envelope; a library that mints bearer tokens has
 	// no honest use in this module.
-	bannedImportSubstrings = []string{"jose", "jwt", "jwx", "paseto", "macaroon", "branca"}
+	// Any path CONTAINING one of these. ed25519 is here as well as in the
+	// exact list because a third-party path ending /ed25519 — a vendored
+	// copy, a re-export, a fork — passed both gates while naming the one
+	// primitive this module must never reach for.
+	bannedImportSubstrings = []string{
+		"jose", "jwt", "jwx", "paseto", "macaroon", "branca", "ed25519",
+	}
 )
 
 // narrowedImports are the imports some file here genuinely needs, held to the
@@ -410,6 +434,35 @@ func inspectForSecondImplementation(file sourceFile) []string {
 	findings = append(findings, inspectLocalTypes(file)...)
 	findings = append(findings, inspectCoreAliases(file, coreImports)...)
 	findings = append(findings, inspectEnvelopeDecoding(file, base64Names)...)
+	findings = append(findings, inspectProtoMethodsRoute(file)...)
+	return findings
+}
+
+// inspectProtoMethodsRoute refuses a message's own marshal and unmarshal
+// methods, reached through protobuf reflection.
+//
+// c.ProtoReflect().ProtoMethods().Unmarshal(...) is a complete decode of a
+// capability that names no codec package, no banned import and no allowlisted
+// type — so the import ban could not see it and the codec rule had nothing to
+// key on. Banning the protoiface and protoimpl imports closes the typed route;
+// this closes the reflective one, which needs no import at all because
+// ProtoReflect is a method on every generated message.
+func inspectProtoMethodsRoute(file sourceFile) []string {
+	var findings []string
+	ast.Inspect(file.syntax, func(node ast.Node) bool {
+		selector, ok := node.(*ast.SelectorExpr)
+		if !ok || selector.Sel.Name != "ProtoMethods" {
+			return true
+		}
+		findings = append(findings, fmt.Sprintf(
+			"%s reaches ProtoMethods.\n"+
+				"A message's own marshal and unmarshal methods are a complete codec that names no\n"+
+				"codec package: ProtoReflect().ProtoMethods().Unmarshal(...) decodes a capability\n"+
+				"with no banned import and no type for an allowlist to key on. Reading a capability\n"+
+				"off the wire is corework.Inspect's job.",
+			file.path))
+		return true
+	})
 	return findings
 }
 
@@ -1797,11 +1850,31 @@ func codecArgumentIsPermitted(file sourceFile, call ast.Node, codec string, oper
 	}
 	named := resolveTypeName(file, value, value.Pos())
 	if named == "" {
-		// Unresolvable. Refused in the leaf module, where the gate must not
-		// pass what it cannot read; allowed outside it, where the decisive
-		// check below is what this gate is for and the root module encodes
-		// receipts, configuration and runtime documents all day.
-		return !inLeaf
+		// UNRESOLVABLE IS A FINDING EVERYWHERE NOW, with the root module's
+		// genuine indirections named one by one.
+		//
+		// "Allowed outside the leaf module" was a hatch wide enough to drive
+		// the whole gate through, and it was exercised: a reviewer wrote
+		//
+		//	func into(raw []byte, m proto.Message) error {
+		//	    return proto.Unmarshal(raw, m)
+		//	}
+		//
+		// in the root module, called it with &basev0.WorkContextV1{}, and the
+		// gate was green. One interface-typed parameter defeated the decisive
+		// rule, because the codec's argument is then an interface and names no
+		// type at all.
+		//
+		// Closing it needs the legitimate indirections enumerated, which they
+		// now are — there are three, all in receipts, all taking a
+		// proto.Message by design. A new one is a finding and has to be argued
+		// here, which is the point.
+		//
+		// WHAT THIS STILL DOES NOT CATCH, stated rather than implied: a
+		// capability passed INTO one of those three allowlisted functions.
+		// Following a value across a call needs go/types, and this gate is
+		// syntactic by choice — see the limit stated on codecArgumentIsPermitted.
+		return codecIndirectionIsPermitted(file, call)
 	}
 	if isCapabilityType(named) {
 		// THE DECISIVE RULE, and it holds in BOTH modules: a Work Context
@@ -1812,10 +1885,93 @@ func codecArgumentIsPermitted(file sourceFile, call ast.Node, codec string, oper
 		// proto.Unmarshal into basev0.WorkContextV1.
 		return slices.Contains(permitted, named)
 	}
+	if isCodecInterfaceType(named) {
+		// AN INTERFACE CAN CARRY A CAPABILITY, so resolving the argument's
+		// type is not enough when the type is one of the codec's own
+		// interfaces. This is the hatch a reviewer drove the whole gate
+		// through:
+		//
+		//	func into(raw []byte, m proto.Message) error {
+		//	    return proto.Unmarshal(raw, m)
+		//	}
+		//
+		// called with &basev0.WorkContextV1{}. The argument resolves perfectly
+		// — to proto.Message — which is neither a capability nor unresolvable,
+		// so both of the checks above said yes. One interface-typed parameter,
+		// and the decisive rule was gone.
+		//
+		// The legitimate indirections are enumerated instead. A new one is a
+		// finding and has to be argued in codecIndirections.
+		return codecIndirectionIsPermitted(file, call)
+	}
 	if !inLeaf {
 		return true
 	}
 	return slices.Contains(permitted, named)
+}
+
+// codecInterfaceTypes are the interface types a codec takes, through which a
+// capability can reach it without ever being named.
+//
+// A list of names, and deliberately a short closed one: these are the
+// parameter types of the codecs themselves, so an indirection has to go
+// through one of them. `any` and a literal `interface{}` are here for
+// encoding/json, whose Marshal takes one.
+var codecInterfaceTypes = []string{
+	"google.golang.org/protobuf/proto#Message",
+	"google.golang.org/protobuf/reflect/protoreflect#ProtoMessage",
+	"google.golang.org/protobuf/runtime/protoiface#MessageV1",
+	"github.com/golang/protobuf/proto#Message",
+	"any",
+	"interface{}",
+}
+
+func isCodecInterfaceType(resolved string) bool {
+	return slices.Contains(codecInterfaceTypes, resolved)
+}
+
+// codecIndirections are the functions that legitimately apply a codec to an
+// interface-typed parameter, by file and by function name.
+//
+// Three, all in receipts, all taking a proto.Message because that is what the
+// receipts contract is about: a caller's own request and response messages,
+// never a capability. Keyed on the enclosing function rather than the file,
+// because a file-wide exemption is what let the type rule be bypassed twice
+// already.
+var codecIndirections = map[string][]string{
+	"receipts/digest.go":      {"RequestDigest"},
+	"receipts/effect.go":      {"Record"},
+	"receipts/interceptor.go": {"Handle"},
+	// The runtime's own documents, decoded into a caller's destination. The
+	// destination is the CALLER's type and the content is a configuration
+	// document, never a capability — a capability arrives as an opaque string
+	// and is read with corework.Inspect.
+	"configuration_document.go": {"decodeDocument"},
+}
+
+// codecIndirectionIsPermitted reports whether an unresolvable codec argument is
+// one of the named indirections.
+func codecIndirectionIsPermitted(file sourceFile, call ast.Node) bool {
+	permitted, named := codecIndirections[file.path]
+	if !named {
+		return false
+	}
+	enclosing := enclosingFuncName(file, call.Pos())
+	return enclosing != "" && slices.Contains(permitted, enclosing)
+}
+
+// enclosingFuncName names the function containing pos, or "" at file level.
+func enclosingFuncName(file sourceFile, pos token.Pos) string {
+	for _, declaration := range file.syntax.Decls {
+		function, ok := declaration.(*ast.FuncDecl)
+		if !ok || function.Body == nil {
+			continue
+		}
+		if function.Body.Pos() <= pos && pos <= function.Body.End() {
+			return function.Name.Name
+		}
+	}
+	return ""
 }
 
 // codecArguments finds the call this codec selector belongs to and returns the

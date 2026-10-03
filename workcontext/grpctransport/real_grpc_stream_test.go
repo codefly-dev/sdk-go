@@ -64,6 +64,7 @@ func serveGuarded(
 ) *grpc.ClientConn {
 	t.Helper()
 	return serveWith(t, StreamServerInterceptor(
+		[]string{streamMethod},
 		func(context.Context, *grpc.StreamServerInfo) (*workcontext.StreamGuard, error) {
 			return guard, nil
 		}), handler)

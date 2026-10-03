@@ -442,7 +442,7 @@ func (interruptedBody) Read(p []byte) (int, error) {
 
 // An oversized or malformed COMPLETE response stays terminal, because the host
 // answered and answered wrongly: retrying gets the same answer.
-func TestACompleteButUnacceptableResponseStaysTerminal(t *testing.T) {
+func TestACompleteButUnacceptableResponseIsRetryable(t *testing.T) {
 	now := func() time.Time { return testClock }
 	host := newMintHost(t, now)
 	client := newTestMintClient(t, host, projectedFile(t, "projected"), now)
@@ -457,9 +457,13 @@ func TestACompleteButUnacceptableResponseStaysTerminal(t *testing.T) {
 	})
 
 	_, err := client.Credential(t.Context())
-	require.ErrorIs(t, err, ErrMintRefused)
+	// RETRYABLE, not terminal. An oversized body on a 200 is something in the
+	// middle answering — an ingress default page, a captive error page, a
+	// misrouted rollout — rather than the host refusing this process. Latched,
+	// any one of those stopped it for good.
+	require.ErrorIs(t, err, ErrMintUnavailable)
 	require.ErrorContains(t, err, "exceeds")
-	require.ErrorIs(t, client.Refused(), ErrMintRefused)
+	require.NoError(t, client.Refused(), "nothing on the response path latches but an enumerated refusal")
 }
 
 // D4 (round three). A cancelled waiter must not be handed an EXPIRED credential.
@@ -550,7 +554,7 @@ func TestAMintResponseCarryingTrailingJSONIsRefused(t *testing.T) {
 			})
 
 			_, err := client.Credential(t.Context())
-			require.ErrorIs(t, err, ErrMintRefused)
+			require.ErrorIs(t, err, ErrMintUnavailable)
 			require.ErrorContains(t, err, "more than one JSON value")
 		})
 	}
