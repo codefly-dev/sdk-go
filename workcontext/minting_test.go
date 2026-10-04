@@ -83,10 +83,19 @@ func newAuthority(t *testing.T) *authority {
 	// installation seal.
 	require.NoError(t, seals.PutApprovedBuild(
 		testPrincipal, testApprovedBuild.digest, testApprovedBuild.incarnation))
-	// The human principal gets a seal and an epoch and DELIBERATELY NO
-	// approved build, which is what ErrNoApprovedBuild answers.
+	// The human principal gets a seal, an epoch, and an EXPLICIT declaration
+	// that it bears no execution.
+	//
+	// Declared rather than left absent, because core stopped treating those as
+	// the same answer and was right to: "bears none" mints a capability
+	// carrying no execution that every verifier accepts, so answering it for a
+	// principal the issuer simply has no record of hands a service principal a
+	// credential nothing can revoke by replacing its build. Nothing recorded is
+	// the most permissive answer ApprovedBuild can give, so it is asserted
+	// instead of defaulted — and this harness relied on the default.
 	require.NoError(t, seals.Put(testHumanPrincipal, testSeal))
 	require.NoError(t, seals.PutEpoch(testHumanPrincipal, testPrincipalEpoch))
+	require.NoError(t, seals.PutBearsNoExecution(testHumanPrincipal))
 	// The owner's epoch is recorded through PutEpoch like any other
 	// principal's. Seal no longer carries it: it had two sources, and
 	// revocation could be UNDONE — advancing the epoch left stored seals
