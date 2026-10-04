@@ -593,11 +593,14 @@ func indirectionKeyAt(loaded *packages.Package, file *ast.File, pos token.Pos) (
 	return "", ""
 }
 
-// TestTheCodecRuleAnswersAboutKindsNotSpellings drives each probe shape at the
-// predicate, because the whole-gate route is satisfied by any one rule.
-func TestTheCodecRuleAnswersAboutKindsNotSpellings(t *testing.T) {
-	require.True(t, isCapabilityType("github.com/codefly-dev/core/generated/go/codefly/base/v0#WorkContextV1"))
-}
+// DELETED: TestTheCodecRuleAnswersAboutKindsNotSpellings.
+//
+// Its name said it drove each probe shape at the predicate and its body
+// asserted one call to isCapabilityType — a grand name over a tautology, which
+// a review doubted and was right to. What it claimed is done by
+// TestTheCodecRuleRefusesEveryShapeThatPassedBefore, which drives every shape
+// against type-checked source, and by the per-rule tests beside it. A stub kept
+// for its name is worse than no test: it reads as coverage.
 
 // typeCheckedProbe type-checks a probe against the REAL dependency types.
 //

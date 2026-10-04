@@ -40,10 +40,27 @@ require (
 //
 // A RANGE OF PSEUDO-VERSIONS, because this module has never been tagged: every
 // version of it that a consumer can resolve is a pseudo-version of a commit,
-// and every commit before this change carries the implementation. The high
-// bound is a timestamp later than any of them and earlier than any release that
-// could carry this file, so it covers all of them and none of what comes after.
+// and every commit before this change carries the implementation.
+//
+// THE LOW BOUND IS A PSEUDO-VERSION, NOT v0.0.0, and that is the whole of a
+// correction. The first attempt wrote
+//
+//	retract [v0.0.0, v0.0.0-20261004000000-zzzzzzzzzzzz]
+//
+// which covers NOTHING: under semver a prerelease sorts BELOW its release, so
+// `v0.0.0-2026…` < `v0.0.0`, the interval has low > high, and it is empty.
+// Checked with Go's own implementation — semver.Compare("v0.0.0",
+// "v0.0.0-20261004000000-zzzzzzzzzzzz") is 1 — which is also what the review
+// that found it checked against. Every published version sat outside an
+// interval that read as though it covered all of them, which is the
+// fail-open shape this repository keeps producing: a declaration that looks
+// like a gate and is not one.
+//
+// So both bounds are pseudo-versions of v0.0.0, and the interval is asserted
+// NON-EMPTY and COVERING by workcontext's own test — a string comparison in the
+// root module is what failed to notice this, so the question is now answered by
+// the library that defines the ordering.
 //
 // Effective only once workcontext/vX.Y.Z is tagged carrying this go.mod, which
 // is the owner's release step.
-retract [v0.0.0, v0.0.0-20261004000000-zzzzzzzzzzzz]
+retract [v0.0.0-00000000000000-000000000000, v0.0.0-20261004000000-zzzzzzzzzzzz]

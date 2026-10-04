@@ -454,7 +454,7 @@ type MintClient struct {
 	// concurrent calls. A separate mutex from c.mu because a read must not be
 	// held across the client's own lock.
 	readMu          sync.Mutex
-	outstandingRead chan projectedRead
+	outstandingRead *pendingRead
 
 	// id distinguishes this client from any other in the process, so a
 	// Credential can say which one issued it.
@@ -1121,12 +1121,17 @@ func (c *MintClient) Counts() MintCounts {
 	return c.counts
 }
 
-// projectedRead is one answer from a token source, at file level because the
-// gate refuses a function-local type — a local declaration is invisible to every
-// rule that reads a file's declarations, and that is true of this one too.
-type projectedRead struct {
-	token string
-	err   error
+// pendingRead is the ONE outstanding read of the token source, with WHEN it
+// started — which is what makes "is this answer still fresh" answerable.
+//
+// At file level because the gate refuses a function-local type: a local
+// declaration is invisible to every rule that reads a file's declarations, and
+// that is true of this one too.
+type pendingRead struct {
+	started time.Time
+	done    chan struct{}
+	token   string
+	err     error
 }
 
 // projectedToken reads the token source UNDER THE DEADLINE.
@@ -1148,41 +1153,59 @@ type projectedRead struct {
 // goroutine per attempt and attempts are single-flighted and held off; a
 // permanently wedged client is not.
 func (c *MintClient) projectedToken(ctx context.Context) (string, error) {
+	started := c.now().UTC()
+
 	c.readMu.Lock()
-	if c.outstandingRead == nil {
-		// ONE OUTSTANDING READ, NOT ONE PER ATTEMPT. The previous revision
-		// started a goroutine per attempt and left it blocked on timeout, so a
-		// permanently blocked source accumulated readers indefinitely — at the
-		// maximum-backoff rate, forever — and exposed a source that
-		// single-flight had been protecting to concurrent calls. "One goroutine
-		// per attempt" is not a bound on outstanding goroutines, and the test
-		// that proved one caller returns promptly said nothing about the
-		// second.
+	pending := c.outstandingRead
+	if pending != nil && started.Sub(pending.started) > c.options.RequestTimeout {
+		// AN OLD READ'S ANSWER IS A STALE BEARER, so this attempt does not take
+		// it and does not start a second reader either.
 		//
-		// The channel is buffered and is never closed: whichever attempt is
-		// waiting takes the value, and if none is, it sits in the buffer until
-		// the next attempt reads it. A stale token cannot be served from it
-		// because the next attempt that finds no outstanding read starts a
-		// fresh one.
-		answers := make(chan projectedRead, 1)
-		c.outstandingRead = answers
+		// The bound added for the accumulating-goroutines finding introduced
+		// this: the value from a timed-out read sat in a buffered channel and
+		// the NEXT attempt took it. The projection is rotated under the running
+		// process — that is why ProjectedToken is called again before every
+		// renewal rather than cached — so a token read minutes ago is expired,
+		// the host answers 401, and 401 LATCHES. A fix for a leak that
+		// permanently stops the process is worse than the leak.
+		//
+		// Refusing here keeps the bound (no second goroutine) and serves
+		// nothing stale: a wedged source makes every attempt an outage, which
+		// is the truth about a wedged source.
+		c.readMu.Unlock()
+		return "", fmt.Errorf(
+			"%w: a projected-token read started %s ago has not finished; its answer would be a "+
+				"token read before the last rotation, and a stale bearer earns a 401 that latches",
+			ErrMintUnavailable, started.Sub(pending.started).Round(time.Millisecond),
+		)
+	}
+	if pending == nil {
+		// ONE OUTSTANDING READ, NOT ONE PER ATTEMPT. ProjectedTokenSource takes
+		// no context, so a read cannot be cancelled and a blocked source leaves
+		// its goroutine blocked; starting one per attempt accumulated them
+		// without limit at the maximum-backoff rate, and handed a source that
+		// single-flight had been protecting concurrent calls.
+		pending = &pendingRead{started: started, done: make(chan struct{})}
+		c.outstandingRead = pending
 		go func() {
 			token, err := c.options.ProjectedToken.ProjectedToken()
-			answers <- projectedRead{token: token, err: err}
-			// The read finished, so the slot is free for the next attempt.
 			c.readMu.Lock()
-			if c.outstandingRead == answers {
+			pending.token, pending.err = token, err
+			if c.outstandingRead == pending {
 				c.outstandingRead = nil
 			}
 			c.readMu.Unlock()
+			close(pending.done)
 		}()
 	}
-	answers := c.outstandingRead
 	c.readMu.Unlock()
 
 	select {
-	case answer := <-answers:
-		return answer.token, answer.err
+	case <-pending.done:
+		c.readMu.Lock()
+		token, err := pending.token, pending.err
+		c.readMu.Unlock()
+		return token, err
 	case <-ctx.Done():
 		// AN OUTAGE, under the one latch rule: a projection that is slow is a
 		// mount under load or a source holding a lock, and both clear.

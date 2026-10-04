@@ -610,3 +610,117 @@ func (s *countingBlockedSource) ProjectedToken() (string, error) {
 	<-s.released
 	return "projected", nil
 }
+
+// ROUND EIGHT: THE BOUND I ADDED COULD TRANSFER AN EXPIRED PROJECTION, and
+// then latch the client for good.
+//
+// Bounding the reads to one outstanding left the value from a TIMED-OUT read in
+// a buffered channel, and the next attempt took it. The projection is rotated
+// under the running process — that is why ProjectedToken is called again before
+// every renewal instead of being cached — so a token read minutes earlier is
+// expired, the host answers 401, and 401 latches. A fix for a goroutine leak
+// that permanently stops the process is worse than the leak.
+//
+// Two properties, because the fix has two halves.
+func TestATimedOutReadNeverHandsItsTokenToALaterAttempt(t *testing.T) {
+	// (a) A read still in flight and OLDER than one attempt's budget is
+	// refused, and no second reader is started. The bound holds and the answer
+	// that would have been stale is never waited for.
+	t.Run("an attempt refuses an old in-flight read", func(t *testing.T) {
+		clock := &movableClock{at: testClock}
+		host := newMintHost(t, clock.now)
+		source := &countingBlockedSource{released: make(chan struct{})}
+		t.Cleanup(func() { close(source.released) })
+		client := newTestMintClient(t, host, projectedFile(t, "projected"), clock.now,
+			func(options *MintOptions) {
+				options.ProjectedToken = source
+				options.RequestTimeout = 50 * time.Millisecond
+			})
+
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		_, err := client.Credential(ctx)
+		cancel()
+		require.ErrorIs(t, err, ErrMintUnavailable)
+
+		// Past the hold-off and far past the read's freshness budget.
+		clock.set(clock.at.Add(10 * time.Minute))
+		later, cancelLater := context.WithTimeout(context.Background(), 2*time.Second)
+		_, err = client.Credential(later)
+		cancelLater()
+
+		require.ErrorIs(t, err, ErrMintUnavailable)
+		require.ErrorContains(t, err, "would be a token read before the last rotation")
+		require.NoError(t, client.Refused(), "and none of this latches")
+		require.EqualValues(t, 1, source.calls.Load(),
+			"no second reader: the bound from the previous round still holds")
+		require.Zero(t, host.requests.Load(), "nothing stale reached the host")
+	})
+
+	// (b) Once the read finishes, a later attempt gets a FRESH one. This is the
+	// transfer itself: with the value parked in a buffered channel, the later
+	// attempt took the token read before the rotation.
+	t.Run("a later attempt reads the projection again", func(t *testing.T) {
+		clock := &movableClock{at: testClock}
+		host := newMintHost(t, clock.now)
+		source := &rotatingSource{released: make(chan struct{})}
+		client := newTestMintClient(t, host, projectedFile(t, "projected"), clock.now,
+			func(options *MintOptions) {
+				options.ProjectedToken = source
+				options.RequestTimeout = 50 * time.Millisecond
+			})
+
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		_, err := client.Credential(ctx)
+		cancel()
+		require.ErrorIs(t, err, ErrMintUnavailable, "the first attempt times out")
+
+		// The read completes with the token as it was BEFORE the rotation.
+		close(source.released)
+		clock.set(clock.at.Add(10 * time.Minute))
+
+		// WAITED FOR, not assumed. The read is detached, so its own
+		// bookkeeping — storing the answer and freeing the slot — happens after
+		// the attempt that started it has already returned. Asserting straight
+		// away raced it and got the staleness refusal, which is the right
+		// answer to the wrong question.
+		// The clock moves with each try, because every failed attempt extends
+		// the hold-off and a frozen clock never gets past it.
+		require.Eventually(t, func() bool {
+			clock.set(clock.at.Add(time.Minute))
+			attempt, cancelAttempt := context.WithTimeout(context.Background(), 2*time.Second)
+			defer cancelAttempt()
+			_, attemptErr := client.Credential(attempt)
+			return attemptErr == nil
+		}, 3*time.Second, 10*time.Millisecond,
+			"the client never minted after the blocked read finished")
+
+		// THE PROPERTY IS THAT rotation-1 NEVER REACHES THE HOST — the exact
+		// later token is not the point and asserting it made this fail on
+		// rotation-3, because each try in the loop above takes a read.
+		presented, _ := host.presented.Load().(string)
+		require.NotContains(t, presented, "rotation-1",
+			"the host was shown %q: the token from the TIMED-OUT read was transferred to a "+
+				"later attempt, and a projection read before the last rotation earns a 401 "+
+				"that latches", presented)
+		require.Contains(t, presented, "rotation-",
+			"the host was shown %q, which is not a token from this source at all", presented)
+		require.Greater(t, source.calls.Load(), int64(1),
+			"the projection is read AGAIN rather than remembered from the attempt that gave up")
+		require.NoError(t, client.Refused(), "and nothing in this latched")
+	})
+}
+
+// rotatingSource blocks on its first read and answers with a different token
+// each time, which is what a projection rotated under a running process does.
+type rotatingSource struct {
+	calls    atomic.Int64
+	released chan struct{}
+}
+
+func (s *rotatingSource) ProjectedToken() (string, error) {
+	call := s.calls.Add(1)
+	if call == 1 {
+		<-s.released
+	}
+	return fmt.Sprintf("rotation-%d", call), nil
+}
