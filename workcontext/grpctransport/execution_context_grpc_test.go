@@ -2,23 +2,43 @@ package grpctransport
 
 import (
 	"context"
-	"encoding/base64"
+	"strconv"
 	"strings"
 	"testing"
+	"time"
 
+	corework "github.com/codefly-dev/core/workcontext"
 	"github.com/stretchr/testify/require"
 	"google.golang.org/grpc/metadata"
 
 	"github.com/codefly-dev/sdk-go/workcontext"
 )
 
-func opaqueTestWorkContext(t *testing.T) workcontext.WorkContextToken {
+// opaqueTestCapability is a real sealed capability rather than a shaped
+// placeholder. It has to be: the transport reads the installation out of the
+// capability so every call carries it, so one with no seal cannot be attached
+// at all — which is the behaviour, and a placeholder here would hide it.
+//
+// It comes from core's conformance kit, which is the only minter. A test that
+// assembled a token here would be asserting against a format nothing issues.
+func opaqueTestCapability(t *testing.T) string {
 	t.Helper()
-	signature := base64.RawURLEncoding.EncodeToString(make([]byte, 64))
-	token, err := workcontext.ParseWorkContextToken("e30." + signature)
+	fixtures, err := corework.Fixtures(time.Now())
 	require.NoError(t, err)
-	return token
+	for _, fixture := range fixtures {
+		if fixture.Form == corework.FormSession && fixture.Outcome == corework.OutcomeAccepted {
+			return fixture.Token
+		}
+	}
+	t.Fatalf("core's conformance kit offered no accepted session capability")
+	return ""
 }
+
+// The installation every capability above is sealed to, as the kit holds it.
+var (
+	sealedInstallationID       = corework.FixtureInstallation
+	sealedInstallationRevision = strconv.Itoa(corework.FixtureInstallationRevision)
+)
 
 func TestGRPCExecutionContextRoundTripPreservesOtherMetadata(t *testing.T) {
 	original := metadata.NewOutgoingContext(
@@ -26,7 +46,7 @@ func TestGRPCExecutionContextRoundTripPreservesOtherMetadata(t *testing.T) {
 		metadata.Pairs("authorization", "Bearer gateway-token"),
 	)
 	execution, err := NewExecutionContext(
-		opaqueTestWorkContext(t),
+		opaqueTestCapability(t),
 		"operation-019f8fc1",
 	)
 	require.NoError(t, err)
@@ -40,17 +60,17 @@ func TestGRPCExecutionContextRoundTripPreservesOtherMetadata(t *testing.T) {
 	incoming := metadata.NewIncomingContext(context.Background(), outgoingMetadata)
 	received, err := GRPCExecutionContextFromIncoming(incoming)
 	require.NoError(t, err)
-	require.Equal(t, execution.WorkContext().Encoded(), received.WorkContext().Encoded())
+	require.Equal(t, execution.Capability(), received.Capability())
 	require.Equal(t, execution.OperationID(), received.OperationID())
 }
 
 func TestGRPCExecutionContextRejectsExistingOrDuplicateCarriers(t *testing.T) {
-	execution, err := NewExecutionContext(opaqueTestWorkContext(t), "operation-1")
+	execution, err := NewExecutionContext(opaqueTestCapability(t), "operation-1")
 	require.NoError(t, err)
 
 	outgoing := metadata.NewOutgoingContext(
 		context.Background(),
-		metadata.Pairs(workContextGRPCMetadataName, execution.WorkContext().Encoded()),
+		metadata.Pairs(workContextGRPCMetadataName, execution.Capability()),
 	)
 	_, err = WithGRPCExecutionContext(outgoing, execution)
 	require.ErrorContains(t, err, "already set")
@@ -59,9 +79,9 @@ func TestGRPCExecutionContextRejectsExistingOrDuplicateCarriers(t *testing.T) {
 		context.Background(),
 		metadata.Pairs(
 			workContextGRPCMetadataName,
-			execution.WorkContext().Encoded(),
+			execution.Capability(),
 			workContextGRPCMetadataName,
-			execution.WorkContext().Encoded(),
+			execution.Capability(),
 			operationIDGRPCMetadataName,
 			execution.OperationID(),
 		),
@@ -71,7 +91,7 @@ func TestGRPCExecutionContextRejectsExistingOrDuplicateCarriers(t *testing.T) {
 }
 
 func TestGRPCExecutionContextRejectsMissingOrNonCanonicalOperationID(t *testing.T) {
-	workContext := opaqueTestWorkContext(t)
+	workContext := opaqueTestCapability(t)
 	for _, operationID := range []string{
 		"",
 		" operation-1",
@@ -85,23 +105,87 @@ func TestGRPCExecutionContextRejectsMissingOrNonCanonicalOperationID(t *testing.
 
 	incoming := metadata.NewIncomingContext(
 		context.Background(),
-		metadata.Pairs(workContextGRPCMetadataName, workContext.Encoded()),
+		metadata.Pairs(workContextGRPCMetadataName, workContext),
 	)
 	_, err := GRPCExecutionContextFromIncoming(incoming)
 	require.ErrorContains(t, err, "operation ID requires exactly one value")
 }
 
-func TestGRPCExecutionContextOptionalExtractionDistinguishesAbsentFromPartial(t *testing.T) {
-	execution, present, err := GRPCExecutionContextFromIncomingIfPresent(context.Background())
+// Deliverable 3 on the gRPC side: the sealed installation travels beside the
+// capability on every call, under the same names HTTP uses, so a callee can
+// refuse before it decodes anything.
+func TestGRPCCallsCarryTheSealedInstallation(t *testing.T) {
+	execution, err := NewExecutionContext(opaqueTestCapability(t), "operation-019f8fc1")
 	require.NoError(t, err)
-	require.False(t, present)
-	require.Empty(t, execution.OperationID())
+	outgoing, err := WithGRPCExecutionContext(context.Background(), execution)
+	require.NoError(t, err)
+	carried, ok := metadata.FromOutgoingContext(outgoing)
+	require.True(t, ok)
 
-	partial := metadata.NewIncomingContext(
-		context.Background(),
-		metadata.Pairs(operationIDGRPCMetadataName, "operation-1"),
-	)
-	_, present, err = GRPCExecutionContextFromIncomingIfPresent(partial)
-	require.ErrorContains(t, err, "Work Context requires exactly one value")
-	require.False(t, present)
+	require.Equal(t, []string{sealedInstallationID}, carried.Get(workcontext.InstallationIDHeaderName))
+	require.Equal(t, []string{sealedInstallationRevision}, carried.Get(workcontext.InstallationRevisionHeaderName))
+}
+
+// The carriers are caller-controlled, so the only two acceptable outcomes are
+// "they agree with the seal" and "the call is refused". Preferring the carrier
+// would let a caller name any installation it liked; ignoring a disagreement
+// would make them decoration that a reader would nonetheless log and believe.
+func TestIncomingInstallationCarriersAreHeldToTheSeal(t *testing.T) {
+	execution, err := NewExecutionContext(opaqueTestCapability(t), "operation-019f8fc1")
+	require.NoError(t, err)
+	outgoing, err := WithGRPCExecutionContext(context.Background(), execution)
+	require.NoError(t, err)
+	honest, ok := metadata.FromOutgoingContext(outgoing)
+	require.True(t, ok)
+
+	_, err = GRPCExecutionContextFromIncoming(metadata.NewIncomingContext(context.Background(), honest))
+	require.NoError(t, err)
+
+	for name, mutate := range map[string]func(metadata.MD){
+		"another installation": func(values metadata.MD) {
+			values.Set(workcontext.InstallationIDHeaderName, "installation-somebody-elses")
+		},
+		"another revision": func(values metadata.MD) {
+			values.Set(workcontext.InstallationRevisionHeaderName, "6")
+		},
+		"installation removed": func(values metadata.MD) {
+			values.Delete(workcontext.InstallationIDHeaderName)
+		},
+		"revision removed": func(values metadata.MD) {
+			values.Delete(workcontext.InstallationRevisionHeaderName)
+		},
+		"duplicate revision": func(values metadata.MD) {
+			values.Append(workcontext.InstallationRevisionHeaderName, sealedInstallationRevision)
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			tampered := honest.Copy()
+			mutate(tampered)
+			_, err := GRPCExecutionContextFromIncoming(metadata.NewIncomingContext(context.Background(), tampered))
+			require.ErrorIs(t, err, workcontext.ErrInvalid)
+		})
+	}
+}
+
+// There is no optional extractor any more. A capability-bearing path requires
+// the capability, so a call carrying no carriers at all is refused exactly like
+// one carrying half of them — the compatibility boundary that returned
+// present=false is deleted, and a consumer that relied on it now fails to
+// compile rather than silently keeping its old path.
+func TestExtractionRefusesACallThatCarriesNothing(t *testing.T) {
+	for name, incoming := range map[string]context.Context{
+		"no metadata at all": context.Background(),
+		"empty metadata": metadata.NewIncomingContext(
+			context.Background(), metadata.MD{},
+		),
+		"installation only": metadata.NewIncomingContext(
+			context.Background(),
+			metadata.Pairs(workcontext.InstallationIDHeaderName, sealedInstallationID),
+		),
+	} {
+		t.Run(name, func(t *testing.T) {
+			_, err := GRPCExecutionContextFromIncoming(incoming)
+			require.ErrorIs(t, err, workcontext.ErrInvalid)
+		})
+	}
 }

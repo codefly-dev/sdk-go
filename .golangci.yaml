@@ -17,9 +17,11 @@ linters:
   exclusions:
     generated: lax
     rules:
+      # ST1005 forbids a capitalized error string, which it cannot tell from a
+      # proper noun: every sentinel in these files begins with "Codefly".
       - linters:
           - staticcheck
-        path: (^|/)(runtime_environment_file|work_context)\.go$
+        path: (^|/)(runtime_environment_file|mint|stream)\.go$
         text: "ST1005:"
     paths:
       - .*\.pb\.go

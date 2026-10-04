@@ -13,7 +13,7 @@ import (
 
 const devAdminPackage = `kind: module-package
 schema: codefly/module-package/v2
-id: codefly/saas-starter
+id: example/starter
 version: 0.1.0
 minimum-codefly-version: ">=0.3.32"
 artifact-roots:
@@ -42,9 +42,9 @@ func composingWorkspace(t *testing.T) {
 	t.Helper()
 	root := t.TempDir()
 	writeFile(t, filepath.Join(root, "workspace.codefly.yaml"),
-		"name: solution\nlayout: modules\nmodules:\n  - name: saas-starter\n  - name: plain\n")
-	writeFile(t, filepath.Join(root, "modules", "saas-starter", composition.PackageManifestFileName), devAdminPackage)
-	writeFile(t, filepath.Join(root, "modules", "saas-starter", "services", ".keep"), "")
+		"name: solution\nlayout: modules\nmodules:\n  - name: starter\n  - name: plain\n")
+	writeFile(t, filepath.Join(root, "modules", "starter", composition.PackageManifestFileName), devAdminPackage)
+	writeFile(t, filepath.Join(root, "modules", "starter", "services", ".keep"), "")
 	writeFile(t, filepath.Join(root, "modules", "plain", "services", ".keep"), "")
 	t.Chdir(root)
 }
@@ -94,9 +94,9 @@ func TestFixturePrincipalWithoutSelectedFixture(t *testing.T) {
 func TestFixturePrincipalResolvesWhenOneDirectoryIsReferencedTwice(t *testing.T) {
 	root := t.TempDir()
 	writeFile(t, filepath.Join(root, "workspace.codefly.yaml"),
-		"name: solution\nlayout: modules\nmodules:\n  - name: saas-starter\n  - name: alias\n    path: modules/saas-starter\n")
-	writeFile(t, filepath.Join(root, "modules", "saas-starter", composition.PackageManifestFileName), devAdminPackage)
-	writeFile(t, filepath.Join(root, "modules", "saas-starter", "services", ".keep"), "")
+		"name: solution\nlayout: modules\nmodules:\n  - name: starter\n  - name: alias\n    path: modules/starter\n")
+	writeFile(t, filepath.Join(root, "modules", "starter", composition.PackageManifestFileName), devAdminPackage)
+	writeFile(t, filepath.Join(root, "modules", "starter", "services", ".keep"), "")
 	t.Chdir(root)
 	t.Setenv(resources.FixturePrefix, "dev-admin")
 
@@ -109,12 +109,24 @@ func TestFixturePrincipalResolvesWhenOneDirectoryIsReferencedTwice(t *testing.T)
 func TestFixturePrincipalNamesPinnedModulesItCannotRead(t *testing.T) {
 	root := t.TempDir()
 	writeFile(t, filepath.Join(root, "workspace.codefly.yaml"),
-		"name: solution\nlayout: modules\nmodules:\n  - name: saas-starter\n    source: codefly-dev/module-saas-starter\n    version: 0.1.0\n")
+		"name: solution\nlayout: modules\nmodules:\n  - name: starter\n    source: example-org/module-starter\n    version: 0.1.0\n")
 	t.Chdir(root)
 	t.Setenv(resources.FixturePrefix, "dev-admin")
 
 	_, err := codefly.Fixture().Principal(t.Context(), "super_admin")
 
 	require.ErrorIs(t, err, composition.ErrUnknownFixture)
-	assert.Contains(t, err.Error(), "saas-starter")
+	// The MODULE NAME and the fact that it is pinned, not merely some
+	// substring of the error. Making this file generic shortened the expected
+	// name to "starter", which is also a substring of the module's own source
+	// "example-org/module-starter" — so the assertion stopped pinning WHICH
+	// name the error has to carry, and would have passed on the source alone.
+	// Generic fixtures were the point; a weaker assertion was not. The name
+	// that was here before is deliberately not quoted: a cleanup that explains
+	// itself by repeating what it removed has not removed it.
+	assert.Contains(t, err.Error(), "starter",
+		"the error must name the module whose fixtures could not be read")
+	assert.Contains(t, err.Error(), "pinned",
+		"and must say that it is PINNED, which is the diagnosis: an unknown-fixture "+
+			"error here has meant a pinned module the SDK never read, not a wrong name")
 }

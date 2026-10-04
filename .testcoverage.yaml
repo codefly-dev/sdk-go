@@ -12,3 +12,11 @@ threshold:
 exclude:
   paths:
     - \.pb\.go$
+    # scripts/ is TOOLING, not the library a consumer imports: importsof reads a
+    # Go file's imports for the ref sweep and runs as a built binary, so the
+    # test that drives it (TestTheImportReaderAnswersWithWhatGoSees) execs it
+    # and no coverage counter is attributed. Counting it would lower the gate on
+    # the library in exchange for a number about a 40-line main, and raising
+    # the gate by excluding real code is the thing this line must not become —
+    # it names scripts/ exactly, not a pattern that grows.
+    - ^scripts/
