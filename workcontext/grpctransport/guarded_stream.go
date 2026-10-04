@@ -7,6 +7,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
@@ -743,4 +744,80 @@ func ValidateMethodSet(
 		return fmt.Errorf("%w: %s", errStreamMisuse, strings.Join(problems, "; "))
 	}
 	return nil
+}
+
+// GuardedStreams is the stream interceptor with its validation MADE MANDATORY.
+//
+// StreamServerInterceptor plus ValidateMethodSet was correct and optional, and
+// optional is the whole of the finding: the README recipe did not call the
+// validation for several revisions, so a consumer following it kept the
+// fail-open the validation exists to close, and nothing anywhere said so. A
+// safety check a caller may skip is a safety check for whoever remembers it.
+//
+// So it is not skippable here. Intercept REFUSES EVERY STREAM until Validate
+// has been called and passed:
+//
+//	streams := grpctransport.GuardStreams(bearing, guardFor)
+//	server := grpc.NewServer(grpc.StreamInterceptor(streams.Intercept))
+//	pb.RegisterStreamerServer(server, impl)
+//	if err := streams.Validate(server.GetServiceInfo(), unguarded...); err != nil {
+//	    return err
+//	}
+//	// only now does the server serve
+//
+// The ordering is forced by grpc itself — the interceptor is built before
+// registration and the served method set exists only after it — so the one
+// thing a library can do is make the gap LOUD instead of silent. A server that
+// forgets refuses every stream on the first request, which is a failure found
+// in the first test rather than a method that was never guarded.
+//
+// StreamServerInterceptor stays, for a server that has its own reason to wire
+// the two separately. This is what the README recommends.
+type GuardedStreams struct {
+	bearing   []string
+	intercept grpc.StreamServerInterceptor
+	validated atomic.Bool
+}
+
+// GuardStreams builds the interceptor and the validation together.
+func GuardStreams(
+	capabilityBearing []string,
+	guardFor func(ctx context.Context, info *grpc.StreamServerInfo) (*workcontext.StreamGuard, error),
+) *GuardedStreams {
+	return &GuardedStreams{
+		bearing:   capabilityBearing,
+		intercept: StreamServerInterceptor(capabilityBearing, guardFor),
+	}
+}
+
+// Validate asks the server what it serves and records that the answer held.
+func (g *GuardedStreams) Validate(
+	served map[string]grpc.ServiceInfo,
+	deliberatelyUnguarded ...string,
+) error {
+	if err := ValidateMethodSet(served, g.bearing, deliberatelyUnguarded...); err != nil {
+		return err
+	}
+	g.validated.Store(true)
+	return nil
+}
+
+// Intercept is the interceptor, and it refuses every stream until Validate has
+// passed.
+func (g *GuardedStreams) Intercept(
+	server any,
+	stream grpc.ServerStream,
+	info *grpc.StreamServerInfo,
+	handler grpc.StreamHandler,
+) error {
+	if !g.validated.Load() {
+		return statusFor(fmt.Errorf(
+			"%w: this stream interceptor has not been validated against the server's method "+
+				"set, so it does not know whether any stream it is not guarding was meant to "+
+				"be unguarded. Call Validate(server.GetServiceInfo(), …) after registering "+
+				"services and before Serve",
+			errStreamMisuse,
+		))
+	}
+	return g.intercept(server, stream, info, handler)
 }

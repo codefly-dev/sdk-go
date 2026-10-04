@@ -614,35 +614,39 @@ guard, err := workcontext.NewStreamGuard(workcontext.StreamGuardOptions{
 // DECLARED at construction: every method whose streams carry a capability. A
 // method in this list is guarded or its stream is refused; a method outside it
 // reaches the handler UNGUARDED, which is why the validation below is not
-// optional.
+// optional and is not skippable.
 bearing := []string{"/codefly.example.Streamer/Emit"}
 
-server := grpc.NewServer(grpc.StreamInterceptor(
-    grpctransport.StreamServerInterceptor(bearing,
-        func(ctx context.Context, info *grpc.StreamServerInfo) (*workcontext.StreamGuard, error) {
-            verified := verifiedFor(ctx) // from the server's own stream setup
-            return workcontext.NewStreamGuard(workcontext.StreamGuardOptions{
-                Recheck: workcontext.RecheckWith(verifier, verified),
-            })
-        }),
-))
+streams := grpctransport.GuardStreams(bearing,
+    func(ctx context.Context, info *grpc.StreamServerInfo) (*workcontext.StreamGuard, error) {
+        verified := verifiedFor(ctx) // from the server's own stream setup
+        return workcontext.NewStreamGuard(workcontext.StreamGuardOptions{
+            Recheck: workcontext.RecheckWith(verifier, verified),
+        })
+    })
+
+server := grpc.NewServer(grpc.StreamInterceptor(streams.Intercept))
 pb.RegisterStreamerServer(server, impl)
 
-// REQUIRED, after registering and before Serve. The interceptor is handed no
-// server, so it cannot see that "/codefly.example.Streamer/Emmit" matches
-// nothing, or that a second streaming method exists that nobody named — and
-// either one reaches the handler with no guard and no complaint. This asks the
-// server, once:
+// REQUIRED, after registering and before Serve. Until this passes, Intercept
+// REFUSES EVERY STREAM — because an earlier revision of this recipe left the
+// call out, and a consumer following it kept the fail-open the call exists to
+// close. grpc forces the ordering (the interceptor is built before
+// registration, the served set exists only after), so the gap is made loud
+// instead of silent.
 //
-//   - a declared name the server does not serve is a typo;
-//   - a declared name that is unary guards nothing;
-//   - a SERVED stream that is neither declared nor named as deliberately
-//     unguarded is a decision nobody made.
+// It asks the server three things the interceptor cannot see from inside one
+// request:
 //
-// A stream that genuinely carries no authority is passed as a third argument,
-// so the decision exists in the source rather than in somebody's memory.
-if err := grpctransport.ValidateMethodSet(
-    server.GetServiceInfo(), bearing,
+//   - a declared name the server does not serve is a typo, and guards nothing;
+//   - a declared name that is unary guards nothing and makes the set non-empty;
+//   - a SERVED stream that is neither declared nor named below is a decision
+//     nobody made.
+//
+// A stream that genuinely carries no authority is named here, so the decision
+// lives in the source rather than in somebody's memory.
+if err := streams.Validate(
+    server.GetServiceInfo(),
     "/codefly.example.Streamer/Health", // deliberately unguarded
 ); err != nil {
     return err

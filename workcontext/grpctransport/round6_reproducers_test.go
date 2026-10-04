@@ -253,3 +253,68 @@ func TestEveryServedStreamIsEitherGuardedOrDeliberatelyNot(t *testing.T) {
 	require.Contains(t, both.Error(), "unary on this server", "the unary name")
 	require.Contains(t, both.Error(), "UNGUARDED", "and the streams nothing names")
 }
+
+// THE VALIDATION IS MANDATORY, not merely available.
+//
+// StreamServerInterceptor plus ValidateMethodSet was correct and OPTIONAL, and
+// optional is the finding: the README recipe did not call the validation for
+// several revisions, so a consumer following it kept the fail-open the
+// validation exists to close. A safety check a caller may skip is a safety
+// check for whoever remembers it.
+//
+// grpc forces the ordering — the interceptor is built before registration and
+// the served set exists only after — so the one thing a library can do is make
+// the gap LOUD. An unvalidated interceptor refuses every stream, which is a
+// failure found by the first test rather than a method that was never guarded.
+func TestAnUnvalidatedInterceptorRefusesEveryStream(t *testing.T) {
+	authority := &revocableGuard{}
+	streams := GuardStreams([]string{streamMethod},
+		func(context.Context, *grpc.StreamServerInfo) (*workcontext.StreamGuard, error) {
+			return authority.guard(t), nil
+		})
+
+	// Not validated: every stream is refused, and the message says what to do.
+	connection := serveWith(t, streams.Intercept, func(stream grpc.ServerStream) error {
+		return stream.SendMsg(wrapperspb.String("served without validation"))
+	})
+	received, _, _, err := clientSaw(t, connection)
+	require.Error(t, err)
+	require.Zero(t, received, "a stream was served by an interceptor that validated nothing")
+	require.Equal(t, codes.Internal, status.Code(err),
+		"an unvalidated interceptor is this server's own misconfiguration")
+	require.Contains(t, status.Convert(err).Message(), "has not been validated")
+	require.Contains(t, status.Convert(err).Message(), "GetServiceInfo",
+		"and names the call, because a refusal with no way forward gets worked around")
+
+	// Validated against a server that really serves it: streams flow.
+	served := map[string]grpc.ServiceInfo{
+		streamService: {Methods: []grpc.MethodInfo{{Name: "Emit", IsServerStream: true}}},
+	}
+	require.NoError(t, streams.Validate(served))
+
+	ok := GuardStreams([]string{streamMethod},
+		func(context.Context, *grpc.StreamServerInfo) (*workcontext.StreamGuard, error) {
+			return authority.guard(t), nil
+		})
+	require.NoError(t, ok.Validate(served))
+	flowing := serveWith(t, ok.Intercept, func(stream grpc.ServerStream) error {
+		return stream.SendMsg(wrapperspb.String("payload"))
+	})
+	count, _, _, err := clientSaw(t, flowing)
+	require.NoError(t, err)
+	require.Equal(t, 1, count, "a validated interceptor serves the stream it guards")
+
+	// And a validation that FAILS does not arm it: the typo case, where the
+	// declared method matches nothing the server serves.
+	wrong := GuardStreams([]string{"/" + streamService + "/Emmit"},
+		func(context.Context, *grpc.StreamServerInfo) (*workcontext.StreamGuard, error) {
+			return authority.guard(t), nil
+		})
+	require.Error(t, wrong.Validate(served))
+	refused := serveWith(t, wrong.Intercept, func(stream grpc.ServerStream) error {
+		return stream.SendMsg(wrapperspb.String("served after a failed validation"))
+	})
+	after, _, _, err := clientSaw(t, refused)
+	require.Error(t, err, "a FAILED validation must not arm the interceptor")
+	require.Zero(t, after)
+}

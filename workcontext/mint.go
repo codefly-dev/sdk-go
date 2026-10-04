@@ -1179,6 +1179,24 @@ func (c *MintClient) projectedToken(ctx context.Context) (string, error) {
 			ErrMintUnavailable, started.Sub(pending.started).Round(time.Millisecond),
 		)
 	}
+	// WHY THE CHECK ABOVE IS THE WHOLE OF IT, since a review held that a
+	// transfer between attempts was still possible and I could not construct
+	// one. The chain is short enough to state:
+	//
+	//   - `done` is closed IMMEDIATELY after the answer is stored, so an
+	//     attempt waiting on it takes the value as soon as the source returns;
+	//   - an attempt joins a read only if that read began within one
+	//     RequestTimeout, which is the check above;
+	//   - every attempt's own context is RequestTimeout-bounded from before
+	//     this function is entered, by mintInto.
+	//
+	// So the value an attempt receives was sampled inside its own budget,
+	// whichever attempt started the read. I added a second check of the
+	// answer's age at the point of USE as belt and braces, and then removed
+	// it: `sampled` is never before `started`, and `done` closes at `sampled`,
+	// so no test could reach the branch. A rule no test can reach is a rule
+	// nobody has tested, which is the standard the rest of this file is held
+	// to — so the argument is written here instead of a branch nobody checks.
 	if pending == nil {
 		// ONE OUTSTANDING READ, NOT ONE PER ATTEMPT. ProjectedTokenSource takes
 		// no context, so a read cannot be cancelled and a blocked source leaves
