@@ -572,6 +572,25 @@ func TestNoSourceNoGateCanReadIsShipped(t *testing.T) {
 		shipped)
 }
 
+// buildConstraintsIn is the constraint lines in a file's header, or none.
+//
+// Only the header: the block ends at the first blank line before `package`, so
+// a `//go:build` in a comment further down is not a constraint and is not
+// reported as one.
+func buildConstraintsIn(source string) []string {
+	var found []string
+	for _, line := range strings.Split(source, "\n") {
+		trimmed := strings.TrimSpace(line)
+		if trimmed == "" {
+			break
+		}
+		if strings.HasPrefix(trimmed, "//go:build") || strings.HasPrefix(trimmed, "// +build") {
+			found = append(found, trimmed)
+		}
+	}
+	return found
+}
+
 // trackedGoFiles is every non-test Go file this repository ships, from git.
 func trackedGoFiles(t *testing.T) []string {
 	t.Helper()
@@ -589,4 +608,61 @@ func trackedGoFiles(t *testing.T) []string {
 		files = append(files, path)
 	}
 	return files
+}
+
+// NO BUILD CONSTRAINT IN A HAND-WRITTEN NON-TEST FILE.
+//
+// A constrained file is not built in the current configuration, so
+// `packages.Load` never type-checks it and every semantic rule here — the codec
+// rule, the capability walk, the hand-written-message rule — reads nothing.
+// Executed: Codex's `envelopeTarget` probe inside a `//go:build r8hidden` root
+// file passed all three Go gates and the sweep.
+//
+// TestTheGateReadsEveryShippedFile detects this generically, because such a
+// file is tracked and unread. This refuses it by name as well, for two reasons:
+// the diagnosis is the actionable part ("unread" sends a reader looking for a
+// loader bug), and it says what the answer is — this repository has no use for
+// one. Zero in the tree today, and one would be a design change rather than a
+// detail: the SDK resolves values and compiles the same everywhere.
+//
+// Test files are exempt. A `_test.go` cannot be imported by shipped code, and
+// nothing in a test binary reaches a consumer.
+func TestNoBuildConstraintHidesAFileFromTheGates(t *testing.T) {
+	// THE DETECTION FIRST, over source written here. A mutation that disabled
+	// the rule entirely left this test green, because the tree has no
+	// constrained file and an empty answer was right either way — the same
+	// assert-the-tree-is-clean shape a review struck elsewhere in this
+	// repository. The rule is driven over an input before it is run over the
+	// tree.
+	for name, source := range map[string]string{
+		"the modern form":      "//go:build r8hidden\n\npackage x\n",
+		"the legacy form":      "// +build r8hidden\n\npackage x\n",
+		"a negated constraint": "//go:build !r8hidden\n\npackage x\n",
+		"one after a doc line": "// Package x does things.\n//go:build r8hidden\n\npackage x\n",
+	} {
+		t.Run(name, func(t *testing.T) {
+			require.NotEmpty(t, buildConstraintsIn(source),
+				"a constrained file is invisible to every semantic rule here")
+		})
+	}
+	// And ordinary source is not flagged, so the rule is not simply refusing
+	// everything — the mutation guard for the cases above.
+	require.Empty(t, buildConstraintsIn("// Package x does things.\npackage x\n\nimport \"fmt\"\n"))
+
+	constrained := map[string][]string{}
+	for _, path := range trackedGoFiles(t) {
+		content, err := os.ReadFile(filepath.Join("..", path))
+		require.NoError(t, err)
+		if found := buildConstraintsIn(string(content)); len(found) > 0 {
+			constrained[path] = found
+		}
+	}
+	require.Empty(t, constrained,
+		"these shipped files carry a build constraint: %v.\n"+
+			"A constrained file is not built in the current configuration, so packages.Load "+
+			"never type-checks it and every semantic rule here reads nothing — a reviewer put "+
+			"a working decoder behind `//go:build r8hidden` and it passed all three Go gates "+
+			"and the sweep. The import sweep still reads it, so an import ban holds and "+
+			"nothing else does. This repository compiles the same everywhere and has no use "+
+			"for one; adding the first is a design change.", constrained)
 }

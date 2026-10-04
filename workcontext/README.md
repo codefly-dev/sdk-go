@@ -610,12 +610,15 @@ guard, err := workcontext.NewStreamGuard(workcontext.StreamGuardOptions{
 })
 
 // And let the SERVER enforce it, rather than each handler remembering to.
+//
+// DECLARED at construction: every method whose streams carry a capability. A
+// method in this list is guarded or its stream is refused; a method outside it
+// reaches the handler UNGUARDED, which is why the validation below is not
+// optional.
+bearing := []string{"/codefly.example.Streamer/Emit"}
+
 server := grpc.NewServer(grpc.StreamInterceptor(
-    grpctransport.StreamServerInterceptor(
-        // DECLARED at construction: every method whose streams carry a
-        // capability. A method in this list is guarded or its stream is
-        // refused; a method outside it is never asked about.
-        []string{"/codefly.example.Streamer/Emit"},
+    grpctransport.StreamServerInterceptor(bearing,
         func(ctx context.Context, info *grpc.StreamServerInfo) (*workcontext.StreamGuard, error) {
             verified := verifiedFor(ctx) // from the server's own stream setup
             return workcontext.NewStreamGuard(workcontext.StreamGuardOptions{
@@ -623,6 +626,27 @@ server := grpc.NewServer(grpc.StreamInterceptor(
             })
         }),
 ))
+pb.RegisterStreamerServer(server, impl)
+
+// REQUIRED, after registering and before Serve. The interceptor is handed no
+// server, so it cannot see that "/codefly.example.Streamer/Emmit" matches
+// nothing, or that a second streaming method exists that nobody named — and
+// either one reaches the handler with no guard and no complaint. This asks the
+// server, once:
+//
+//   - a declared name the server does not serve is a typo;
+//   - a declared name that is unary guards nothing;
+//   - a SERVED stream that is neither declared nor named as deliberately
+//     unguarded is a decision nobody made.
+//
+// A stream that genuinely carries no authority is passed as a third argument,
+// so the decision exists in the source rather than in somebody's memory.
+if err := grpctransport.ValidateMethodSet(
+    server.GetServiceInfo(), bearing,
+    "/codefly.example.Streamer/Health", // deliberately unguarded
+); err != nil {
+    return err
+}
 
 // The handler then just sends. It is handed the wrapper, it has no route to
 // the raw stream, and the interceptor calls Finish.

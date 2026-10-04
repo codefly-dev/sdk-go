@@ -145,10 +145,42 @@ func sweepEnv(t *testing.T) []string {
 	return append(os.Environ(), "IMPORTSOF_BIN="+importReader(t))
 }
 
+// sweepRefOf runs the sweep in REF MODE over a committed blob.
+//
+// A different path through the script from the working tree: the ref arm reads
+// blobs out of `git cat-file` into a temporary directory and maps them back,
+// and it applies the historical `legacy` allowance. Both arms were measured
+// passing the old denylist's gaps, so both are probed.
+func sweepRefOf(t *testing.T, script string, name string, source string) (string, error) {
+	t.Helper()
+	repository := t.TempDir()
+	require.NoError(t, os.MkdirAll(filepath.Dir(filepath.Join(repository, name)), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(repository, name), []byte(source), 0o600))
+	require.NoError(t, os.MkdirAll(filepath.Join(repository, "scripts"), 0o755))
+	copyFile(t, script, filepath.Join(repository, "scripts", "check-one-implementation.sh"))
+	copyPolicy(t, filepath.Dir(script), filepath.Join(repository, "scripts"))
+	for _, command := range [][]string{
+		{"git", "init", "--quiet", "-b", "main"},
+		{"git", "add", "."},
+		{"git", "-c", "user.email=t@t", "-c", "user.name=t", "commit", "--quiet", "-m", "probe"},
+	} {
+		run := exec.Command(command[0], command[1:]...)
+		run.Dir = repository
+		output, err := run.CombinedOutput()
+		require.NoError(t, err, "%s: %s", command, output)
+	}
+	run := exec.Command("bash", "scripts/check-one-implementation.sh", "main")
+	run.Dir = repository
+	run.Env = sweepEnv(t)
+	output, err := run.CombinedOutput()
+	return string(output), err
+}
+
 // sweepOf runs the sweep over a throwaway repository containing one file.
 func sweepOf(t *testing.T, script string, name string, source string) (string, error) {
 	t.Helper()
 	repository := t.TempDir()
+	require.NoError(t, os.MkdirAll(filepath.Dir(filepath.Join(repository, name)), 0o755))
 	require.NoError(t, os.WriteFile(filepath.Join(repository, name), []byte(source), 0o600))
 	require.NoError(t, os.MkdirAll(filepath.Join(repository, "scripts"), 0o755))
 	for _, command := range [][]string{
@@ -445,6 +477,69 @@ func TestTheImportScannerReadsOneLineOnce(t *testing.T) {
 			require.Contains(t, out, "crypto/ed25519")
 		})
 	}
+
+	// THE DENY-BY-DEFAULT POLICY, THROUGH THE SCRIPT, IN TREE AND REF MODE.
+	//
+	// This is what had no test. The policy file is asserted not to LIST these
+	// paths, and the Go gates refuse them in a checkout — but nothing ran the
+	// SWEEP over them, which is the only thing that reads a published ref and
+	// is the whole of the required check. A reviewer pointed out that
+	// restoring the entire old denylist script left every test green, and that
+	// was true.
+	//
+	// Ref mode is checked separately from tree mode because they take
+	// different paths through the script: the tree reads files from disk, a ref
+	// reads blobs out of `git cat-file` into a temporary directory. The old
+	// `ok` was measured in both.
+	for name, spec := range map[string]string{
+		"json/v2, which is not encoding/json":  "encoding/json/v2",
+		"mldsa, a signature nobody had listed": "crypto/mldsa",
+		"protodelim, a codec by another name":  "google.golang.org/protobuf/encoding/protodelim",
+		"the gRPC codec registry":              "google.golang.org/grpc/encoding",
+		"prototext":                            "google.golang.org/protobuf/encoding/prototext",
+		"jsontext":                             "encoding/json/jsontext",
+		"hpke, an AEAD and so MAC-capable":     "crypto/hpke",
+		"unsafe, which can forge anything":     "unsafe",
+	} {
+		// BOTH MODULES, because the policy is per module and the sweep picks
+		// the list by PATH. Probing only a root-level file left the leaf list
+		// untested: a mutation that allowlisted `crypto/mldsa` for the leaf
+		// changed nothing, because no probe ever asked the leaf list anything.
+		for module, path := range map[string]string{
+			"root": "second.go",
+			"leaf": "workcontext/second.go",
+		} {
+			source := "package x\n\nimport _ \"" + spec + "\"\n"
+			t.Run(name+", in the "+module+" module's working tree", func(t *testing.T) {
+				out, err := sweepOf(t, script, path, source)
+				require.Error(t, err, "the sweep passed this file:\n%s", out)
+				require.Contains(t, out, spec)
+				require.Contains(t, out, path)
+			})
+			t.Run(name+", in the "+module+" module at a ref", func(t *testing.T) {
+				out, err := sweepRefOf(t, script, path, source)
+				require.Error(t, err, "the sweep passed this blob at a ref:\n%s", out)
+				require.Contains(t, out, spec)
+			})
+		}
+	}
+
+	// `import "C"` is not an import path, so it is refused by name — in both
+	// modes, and with the diagnosis that says why rather than "not listed".
+	t.Run("cgo, in the working tree", func(t *testing.T) {
+		out, err := sweepOf(t, script, "cgo.go", "package x\n\n/*\n*/\nimport \"C\"\n")
+		require.Error(t, err, out)
+		require.Contains(t, out, "cgo.go imports C")
+		require.Contains(t, out, "cgo is not a package name to add to a list",
+			"and the diagnosis says WHY, because a reader told only \"not listed\" would "+
+				"reasonably try adding it")
+	})
+	t.Run("cgo, at a ref", func(t *testing.T) {
+		out, err := sweepRefOf(t, script, "cgo.go", "package x\n\n/*\n*/\nimport \"C\"\n")
+		require.Error(t, err, out)
+		require.Contains(t, out, "cgo.go imports C")
+		require.Contains(t, out, "cgo is not a package name to add to a list")
+	})
 
 	// THE BANS THE AST GATE HAS AND THIS ONE DID NOT. Four import paths the
 	// AST gate refuses passed here with `ok working tree (4 Go files)`, exit 0

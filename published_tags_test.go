@@ -2,6 +2,7 @@ package codefly_test
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -36,12 +37,13 @@ func TestEveryPublishedTagCarryingTheImplementationIsRetracted(t *testing.T) {
 			"looked at nothing, which is the fail-open this repository has fixed five times.")
 
 	rootRetracted := retractedVersions(t, ".")
-	leafBound := leafRetractBound(t)
 	reader := importReader(t)
+
+	offendingByTag := offendingPathsByRef(t, reader, tags)
 
 	var rootCarrying, leafCarrying, unretracted []string
 	for _, tag := range tags {
-		offending := offendingPathsAt(t, reader, tag)
+		offending := offendingByTag[tag]
 		if len(offending) == 0 {
 			continue
 		}
@@ -69,15 +71,23 @@ func TestEveryPublishedTagCarryingTheImplementationIsRetracted(t *testing.T) {
 			}
 		}
 		if byLeaf {
+			// THE LEAF'S INTERVAL IS THE LEAF'S OWN TEST TO ASSERT, and this
+			// is where a correction belongs. This used to read the retract
+			// bound's TIMESTAMP out of the High field and compare it as a
+			// string — which cannot see an interval whose LOW bound is above
+			// its high, and that is exactly the state it passed over: the leaf
+			// retraction was `[v0.0.0, v0.0.0-…]`, which covers no version at
+			// all, because a prerelease sorts below its release.
+			//
+			// A hand comparison of one bound is how that went unnoticed, so
+			// the question moved to workcontext's own
+			// TestTheRetractIntervalCoversThePublishedVersions, which asks
+			// golang.org/x/mod/semver — Go's implementation of the ordering —
+			// whether the interval is non-empty and covers every carrying
+			// pseudo-version. What is recorded here is only that this tag's
+			// files belong to the LEAF module, which is the fact this test can
+			// establish.
 			leafCarrying = append(leafCarrying, tag)
-			// The leaf module has never been tagged, so there is no leaf
-			// version to name: what a consumer resolves is a pseudo-version of
-			// the commit. The leaf retract covers a RANGE up to a timestamp,
-			// so the question is whether this tag's commit falls inside it.
-			if stamp := commitStamp(t, tag); stamp > leafBound {
-				unretracted = append(unretracted,
-					tag+" (leaf module, commit "+stamp+" is past the retract bound "+leafBound+")")
-			}
 		}
 	}
 
@@ -102,62 +112,50 @@ func tagHasLeafModule(t *testing.T, tag string) bool {
 	return run.Run() == nil
 }
 
-// commitStamp is a tag's commit time in a pseudo-version's own format, so it
-// compares against a retract bound as a string the way the go tool orders them.
-func commitStamp(t *testing.T, tag string) string {
+// offendingPathsByRef runs the repository sweep ONCE over every tag and returns
+// the paths it reported, by ref.
+//
+// One invocation, not one per tag. Per-tag it was 333 seconds for 83 tags —
+// each spawning the script, which parses the policy, builds its allow lists and
+// shells out per file — and CI's job timeout is five minutes. A gate that
+// cannot finish inside the job is a gate somebody deletes. The script already
+// loops over its arguments and reports `ok <ref>` or `FAIL <ref> …`, so this is
+// a parse of what it was always printing.
+func offendingPathsByRef(t *testing.T, reader string, tags []string) map[string][]string {
 	t.Helper()
-	run := exec.Command("git", "log", "-1", "--format=%cd",
-		"--date=format:%Y%m%d%H%M%S", tag)
-	output, err := run.Output()
-	require.NoError(t, err)
-	return strings.TrimSpace(string(output))
-}
-
-// leafRetractBound is the timestamp inside the leaf module's retract high
-// bound. A leaf go.mod with no retract is a finding, loudly, because that is
-// the state this correction found.
-func leafRetractBound(t *testing.T) string {
-	t.Helper()
-	spans := retractSpans(t, "workcontext")
-	require.NotEmpty(t, spans,
-		"workcontext/go.mod retracts nothing, and it is the module that carries the "+
-			"implementation from root tag v0.1.66 onward")
-	var highest string
-	for _, span := range spans {
-		_, stamp, found := strings.Cut(span.High, "-")
-		require.True(t, found,
-			"the leaf retract bound %q is not a pseudo-version; this module has never been "+
-				"tagged, so a range of pseudo-versions is what covers its published versions",
-			span.High)
-		stamp, _, _ = strings.Cut(stamp, "-")
-		if stamp > highest {
-			highest = stamp
-		}
-	}
-	return highest
-}
-
-// offendingPathsAt runs the repository sweep over one tag and returns the paths
-// it reported.
-func offendingPathsAt(t *testing.T, reader string, tag string) []string {
-	t.Helper()
-	run := exec.Command("bash", "scripts/check-one-implementation.sh", tag)
+	run := exec.Command("bash", append([]string{"scripts/check-one-implementation.sh"}, tags...)...)
 	run.Env = append(sweepEnv(t), "IMPORTSOF_BIN="+reader)
-	output, err := run.CombinedOutput()
-	if err == nil {
-		return nil
-	}
-	require.Contains(t, string(output), "carries a Work Context implementation",
-		"the sweep failed on %s for a reason that is not a finding:\n%s", tag, output)
-	var paths []string
+	output, _ := run.CombinedOutput()
+
+	byRef := map[string][]string{}
+	current := ""
 	for _, line := range strings.Split(string(output), "\n") {
-		path, _, found := strings.Cut(strings.TrimSpace(line), " imports ")
-		if found && strings.HasSuffix(path, ".go") {
-			paths = append(paths, path)
+		switch {
+		case strings.HasPrefix(line, "FAIL ") && strings.Contains(line, "carries a Work Context"):
+			current = strings.TrimSpace(strings.TrimSuffix(
+				strings.TrimPrefix(line, "FAIL "), " carries a Work Context implementation:"))
+			byRef[current] = nil
+		case strings.HasPrefix(line, "ok   "):
+			current = ""
+		case current != "" && strings.HasPrefix(line, "       "):
+			path, _, found := strings.Cut(strings.TrimSpace(line), " imports ")
+			if found && strings.HasSuffix(path, ".go") {
+				byRef[current] = append(byRef[current], path)
+			}
 		}
 	}
-	require.NotEmpty(t, paths, "the sweep reported a finding and named no file:\n%s", output)
-	return paths
+	// EVERY TAG MUST HAVE BEEN REPORTED ON, or the parse is reading less than
+	// the sweep said and a tag could be silently clean.
+	reported := len(byRef)
+	for _, line := range strings.Split(string(output), "\n") {
+		if strings.HasPrefix(line, "ok   ") {
+			reported++
+		}
+	}
+	require.GreaterOrEqual(t, reported, len(tags),
+		"the sweep reported on %d of %d tags; a tag it did not reach is a tag this gate "+
+			"cleared without looking:\n%s", reported, len(tags), output)
+	return byRef
 }
 
 // localTags is every tag in this checkout, which in CI is every published tag.
@@ -212,7 +210,7 @@ func retractedVersions(t *testing.T, dir string) map[string]bool {
 		for _, span := range spans {
 			// `go mod edit -json` writes a single version as Low == High, so
 			// one comparison covers both shapes.
-			if semverAtMost(span.Low, tag) && semverAtMost(tag, span.High) {
+			if semverAtMost(t, span.Low, tag) && semverAtMost(t, tag, span.High) {
 				covered[tag] = true
 			}
 		}
@@ -220,9 +218,42 @@ func retractedVersions(t *testing.T, dir string) map[string]bool {
 	return covered
 }
 
-// semverAtMost reports whether low <= high.
-func semverAtMost(low string, high string) bool {
+// semverAtMost reports whether low <= high, for PLAIN RELEASE VERSIONS ONLY.
+//
+// It refuses a prerelease rather than ordering one, and that guard is the
+// lesson from the leaf module's empty interval: a prerelease sorts BELOW its
+// release, a hand comparison that does not know this reads `[v0.0.0,
+// v0.0.0-…]` as a sensible range, and the interval covered nothing. The root
+// module's tags and retract bounds are all plain `vX.Y.Z`, so this is enough
+// here — and if that ever stops being true, this fails instead of guessing.
+//
+// The leaf module's own interval, which IS pseudo-versions, is asserted by
+// workcontext's TestTheRetractIntervalCoversThePublishedVersions using
+// golang.org/x/mod/semver. One hand-rolled ordering in this repository is one
+// too many; this one is bounded to the case it is correct for.
+func semverAtMost(t *testing.T, low string, high string) bool {
+	t.Helper()
+	require.NoError(t, comparableVersions(low, high))
 	return low == high || compareVersions(low, high) <= 0
+}
+
+// comparableVersions reports whether this comparison may be made at all.
+//
+// Separated from the comparison so a probe can drive it: asserted only through
+// semverAtMost, a mutation that removed the guard changed nothing, because the
+// root module's tags and bounds are all plain releases and no test ever passed
+// a prerelease. A guard no test can reach is a guard nobody has checked, which
+// is the shape that let the empty interval through in the first place.
+func comparableVersions(versions ...string) error {
+	for _, version := range versions {
+		if strings.Contains(version, "-") {
+			return fmt.Errorf(
+				"%q carries a prerelease and this comparison cannot order one: a prerelease "+
+					"sorts BELOW its release, which is how an empty retract interval read as a "+
+					"range. Use golang.org/x/mod/semver, as workcontext does", version)
+		}
+	}
+	return nil
 }
 
 // compareVersions orders vMAJOR.MINOR.PATCH numerically. Both inputs come from
@@ -304,4 +335,38 @@ func TestTheHistoricalImportAllowanceCarriesNothingCapabilityShaped(t *testing.T
 					"deny-by-default was adopted to close.", path, fragment)
 		}
 	}
+}
+
+// THE ORDERING GUARD, driven at the predicate.
+//
+// This repository's hand-rolled version comparison is bounded to plain releases
+// on purpose, and the bound is the lesson from the leaf module's retract
+// interval: `[v0.0.0, v0.0.0-20261004000000-zzzzzzzzzzzz]` covers NO version,
+// because a prerelease sorts below its release — and a hand comparison that did
+// not know that read it as a sensible range for a whole commit.
+//
+// So this refuses rather than guesses, and the refusal is tested, because a
+// mutation that removed it left every test green: the root's tags and bounds
+// are all plain releases, so nothing ever reached the guard.
+func TestTheVersionComparisonRefusesWhatItCannotOrder(t *testing.T) {
+	for name, version := range map[string]string{
+		"a pseudo-version":    "v0.0.0-20261004000000-zzzzzzzzzzzz",
+		"a release candidate": "v1.0.0-rc.1",
+		"the zero prerelease": "v0.0.0-0",
+	} {
+		t.Run(name, func(t *testing.T) {
+			require.Error(t, comparableVersions("v0.1.51", version))
+			require.Error(t, comparableVersions(version, "v0.1.51"))
+			require.ErrorContains(t, comparableVersions(version),
+				"sorts BELOW its release",
+				"the refusal must say WHY, because the reader's next move is to compare it anyway")
+		})
+	}
+
+	// Plain releases are comparable, so the guard is not refusing everything —
+	// and the ordering it then performs is the one the retract check relies on.
+	require.NoError(t, comparableVersions("v0.1.51", "v0.1.65", "v0.2.0"))
+	require.True(t, semverAtMost(t, "v0.1.51", "v0.1.65"))
+	require.True(t, semverAtMost(t, "v0.1.65", "v0.1.65"))
+	require.False(t, semverAtMost(t, "v0.2.0", "v0.1.65"))
 }

@@ -117,6 +117,7 @@ func TestNoCodecTouchesACapabilityByType(t *testing.T) {
 // inspectCodecUses is the rule over one type-checked file.
 func inspectCodecUses(loaded *packages.Package, file *ast.File, path string) []string {
 	var findings []string
+	findings = append(findings, inspectHandWrittenProtoMessages(loaded, file, path)...)
 	// THE Fun POSITION, and the identifier inside it. ast.Inspect descends into
 	// a SelectorExpr, so recording only call.Fun left `Marshal` — the Sel of a
 	// perfectly ordinary `json.Marshal(x)` — looking like a codec mentioned
@@ -342,6 +343,69 @@ func indirectionFunctionOf(loaded *packages.Package, expression ast.Expr) string
 	}
 	return ""
 }
+
+// inspectHandWrittenProtoMessages refuses a hand-written ProtoReflect method —
+// which is to say, any type in this repository that claims to BE a protobuf
+// message.
+//
+// THE PREVIOUS FIX CLOSED A SUBCLASS AND LEFT THE CLASS OPEN. Making the
+// interface walk transitive caught a struct carrying an interface; it does not
+// catch a concrete FUNCTION type, because carriesAnInterface does not descend
+// into a *types.Signature and capabilityWithin finds nothing in a func-typed
+// field. Executed, decoding a real core-minted token:
+//
+//	type r8thunk func() protoreflect.Message
+//	func (f r8thunk) ProtoReflect() protoreflect.Message { return f() }
+//	proto.Unmarshal(raw, r8thunk(claims.ProtoReflect))
+//
+// and the same through a struct with a func field. Both passed all three Go
+// gates, lint and the sweep.
+//
+// Chasing the shape was the mistake. A wrapper can be a struct, a func, a
+// defined slice, a map, a channel — anything with a method set — so a rule
+// written about shapes is a rule that is behind by one shape, which is the
+// denylist failure in another costume. What every one of them must have is a
+// ProtoReflect method, because that IS the protobuf contract: it is how the
+// capability gets reached, and no amount of indirection avoids it.
+//
+// So the rule is about the method, not the shape. A protobuf message is
+// GENERATED, by protoc, in the repository that owns the .proto — core. This
+// repository writes none, has zero today, and a hand-written one is a type
+// pretending to be a message, which is the second implementation in the one
+// form that cannot be disguised.
+func inspectHandWrittenProtoMessages(
+	loaded *packages.Package, file *ast.File, path string,
+) []string {
+	var findings []string
+	for _, declaration := range file.Decls {
+		function, ok := declaration.(*ast.FuncDecl)
+		if !ok || function.Recv == nil || function.Name == nil {
+			continue
+		}
+		if !slices.Contains(protoMessageMethods, function.Name.Name) {
+			continue
+		}
+		receiver := "a local type"
+		if object, ok := loaded.TypesInfo.Defs[function.Name].(*types.Func); ok {
+			receiver = object.FullName()
+		}
+		findings = append(findings, fmt.Sprintf(
+			"%s hand-writes %s on %s.\n"+
+				"A protobuf message is GENERATED, by protoc, in the repository that owns the\n"+
+				"schema — core. A hand-written %s makes a local type into a proto.Message, which\n"+
+				"is how a capability reaches a codec with no interface and no capability type\n"+
+				"anywhere in the signature: a func type, a struct with a func field, a defined\n"+
+				"slice, anything with a method set. Chasing the shapes is a denylist; the method\n"+
+				"is the contract, so the method is the rule.",
+			path, function.Name.Name, receiver, function.Name.Name))
+	}
+	return findings
+}
+
+// protoMessageMethods are the methods that make a type a protobuf message to
+// the codecs. ProtoReflect is the v2 contract and Reset/String/ProtoMessage are
+// the v1 one, which proto.Unmarshal still accepts through protoimpl.
+var protoMessageMethods = []string{"ProtoReflect", "ProtoMessage"}
 
 // codecFunctionOf resolves an expression to a codec function's OBJECT, or nil.
 func codecFunctionOf(loaded *packages.Package, expression ast.Expr) *types.Func {
@@ -679,13 +743,15 @@ import (
 	"reflect"
 
 	"google.golang.org/protobuf/proto"
+	"google.golang.org/protobuf/reflect/protoreflect"
 	basev0 "github.com/codefly-dev/core/generated/go/codefly/base/v0"
 )
 
 // Sinks, so every probe shares one import block without "imported and not
-// used". Neither is a codec use, so neither can be the finding.
+// used". None is a codec use, so none can be the finding.
 var (
 	_ = reflect.TypeOf
+	_ protoreflect.Message
 	_ = basev0.File_codefly_base_v0_work_context_proto
 	_ = json.Valid
 	// proto.Size is not a codec, so naming it keeps the import live for every
@@ -740,6 +806,44 @@ func into(raw []byte, c *basev0.WorkContextV1) error { return use(proto.Unmarsha
 		},
 		// L5's other half: the capability reached THROUGH A FIELD, by an alias
 		// declared in another file. No syntactic rule could resolve it.
+		// ROUND EIGHT'S BLOCKER, and the lesson is that round seven's fix
+		// closed a SUBCLASS. A concrete FUNCTION type implementing
+		// proto.Message by delegation: no interface in the signature, no
+		// capability type anywhere, and the promoted method reaches the
+		// capability. Executed against the previous head on a real
+		// core-minted token.
+		"a concrete func type implementing proto.Message": {
+			source: `type thunk func() protoreflect.Message
+
+func (f thunk) ProtoReflect() protoreflect.Message { return f() }
+
+func decode(raw []byte, claims *basev0.WorkContextV1) error {
+	return proto.Unmarshal(raw, thunk(claims.ProtoReflect))
+}`,
+			says: "hand-writes ProtoReflect",
+		},
+		// The same, lazily, through a struct whose FIELD is a func —
+		// carriesAnInterface finds no interface in a func-typed field.
+		"a struct with a func field": {
+			source: `type lazy struct{ get func() protoreflect.Message }
+
+func (l lazy) ProtoReflect() protoreflect.Message { return l.get() }
+
+func decode(raw []byte, claims *basev0.WorkContextV1) error {
+	return proto.Unmarshal(raw, lazy{get: claims.ProtoReflect})
+}`,
+			says: "hand-writes ProtoReflect",
+		},
+		// And the v1 contract, which proto.Unmarshal still accepts through
+		// protoimpl — so the rule covers both or it covers one spelling.
+		"the v1 message contract": {
+			source: `type legacy struct{ inner *basev0.WorkContextV1 }
+
+func (legacy) Reset()         {}
+func (legacy) String() string { return "" }
+func (legacy) ProtoMessage()  {}`,
+			says: "hand-writes ProtoMessage",
+		},
 		// ROUND SEVEN'S BLOCKER: a CONCRETE wrapper around an embedded
 		// interface. No handwritten anything — the promoted ProtoReflect
 		// delegates to the capability, so this is the ordinary protobuf
