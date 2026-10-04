@@ -2,6 +2,7 @@ package workcontext
 
 import (
 	"context"
+	"crypto/x509"
 	"errors"
 	"fmt"
 	"go/ast"
@@ -282,15 +283,8 @@ func (s *blockingSource) ProjectedToken() (string, error) {
 	return "projected", nil
 }
 
-// B6. ENDPOINT TRUST WAS OPTIONAL, AND SILENTLY THE SYSTEM POOL.
-//
-// Every other route to a weak transport here was closed — no caller-supplied
-// client, no reachable Transport, a TLS 1.3 floor, no followed redirect — and
-// the trust anchor defaulted to whatever the image shipped. A mis-issued
-// certificate for the host name, or a corporate interception root, receives the
-// projected service-account token. It is a deployment decision, so it is stated
-// or construction refuses; TrustSystemRoots is how a deployment that means the
-// host's pool says so.
+// The mint endpoint needs an explicit anchor source: omission must never use
+// the public roots bundled with the image.
 func TestTheMintEndpointsTrustAnchorIsRequired(t *testing.T) {
 	base := MintOptions{
 		URL:                "https://mint.example/platform/_mint",
@@ -298,6 +292,8 @@ func TestTheMintEndpointsTrustAnchorIsRequired(t *testing.T) {
 		Audience:           testAudienceName,
 		ProjectedToken:     ProjectedTokenFile("/var/run/secrets/token"),
 		ProjectionAudience: "projection-audience",
+		ClientCertificate:  unusedMintCertificate,
+		AdmittedPeers:      testMintPeers,
 	}
 
 	_, err := NewMintClient(base)
@@ -306,13 +302,12 @@ func TestTheMintEndpointsTrustAnchorIsRequired(t *testing.T) {
 	require.ErrorContains(t, err, "https://mint.example/platform/_mint",
 		"the refusal must name the endpoint the projection would have been sent to")
 	require.ErrorContains(t, err, "x509.SystemCertPool",
-		"and must name the two lines a deployment that really means the host's pool writes, "+
-			"because a refusal with no way forward gets worked around")
+		"the refusal must make clear that system roots are not the default")
 
 	named := base
-	named.RootCAs = certPoolOf()
+	named.TrustAnchor = func() (*x509.CertPool, error) { return certPoolOf(), nil }
 	_, err = NewMintClient(named)
-	require.NoError(t, err, "naming the roots is the whole of the requirement")
+	require.NoError(t, err, "all three transport sources are supplied")
 }
 
 // F-5 and F-6. EVERY 200 THAT IS NOT A CAPABILITY LATCHED FOREVER, and so did

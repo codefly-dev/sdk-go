@@ -227,12 +227,43 @@ that are easy to get backwards:
   and terminal — a process seeing one must stop serving — so anything transient
   classified that way permanently stops a process holding a good credential: an
   interrupted response read, a projected-token `EMFILE`, a momentarily empty
-  projection, a 408. All of those are `ErrMintUnavailable`. A TLS verification
-  failure is the opposite: not an outage but the one thing this transport
-  exists to refuse, so it latches. Local misuse is `ErrInvalid`, never
-  `ErrMintRefused`, or `Refused()` and `errors.Is` disagree.
+  projection, a 408. All of those are `ErrMintUnavailable`. TLS verification
+  and peer-admission failures are also retryable: the handshake refuses them
+  before any projected token leaves, and rotation or admission can recover.
+  Local misuse is `ErrInvalid`, never `ErrMintRefused`, or `Refused()` and
+  `errors.Is` disagree.
 - **The shared request is detached from whoever started it**, bounded by
   `RequestTimeout`. On the caller's context, a cancelled leader counted as no
   failure, so twenty callers with deadlines shorter than a degraded host's
   latency produced twenty mint requests — each of which the host may complete
   and audit while this process discards it.
+
+## The mint transport admits the peer before disclosing the projection
+
+`MintOptions` requires three sources: `TrustAnchor`, `ClientCertificate` and
+`AdmittedPeers`. The SDK owns its HTTP client and transport; a caller can
+supply neither. The private TLS dialer reads the current anchor for each
+handshake with normal chain and hostname verification enabled, and
+`GetClientCertificate` reads the workload's current X.509-SVID. The endpoint
+must request the client certificate. `VerifyConnection` reads the admitted
+SPIFFE IDs only after chain verification, then compares them against the
+leaf's URI SANs. Both sides lower-case the scheme and trust domain and remove
+empty path segments and trailing slashes; path case is significant. Anything
+outside `spiffe://<trust-domain>/<path>` is refused, including userinfo, ports,
+queries, fragments, escapes and dot segments.
+
+Every mint, renewal and refresh dials fresh: TLS 1.3 minimum, no connection or
+TLS session reuse, no compression, proxy or redirect. HTTP/1.1 prevents
+multiplexing across admission decisions. A withdrawal takes effect on the next
+request. The handshake-to-write window remains, normally microseconds subject
+to scheduling; no HTTP headers or body leave before `VerifyConnection` returns.
+
+A missing source or malformed currently readable admitted identity is
+`ErrInvalid` at construction. Unavailable projections are enforced at the
+handshake so a client can recover: unreadable or nil anchors, unreadable or
+empty certificates, empty or unreadable peer sets, malformed live peer IDs and
+TLS verification failures return `ErrMintUnavailable`. A verified leaf without
+an admitted SPIFFE ID additionally wraps `ErrMintPeerNotAdmitted`. These errors
+never latch. `mint_transport_test.go` captures server-side authorization
+headers, tests withdrawal and rotation across requests, proves client
+certificate presentation, and requires recovery after source failures.

@@ -140,6 +140,8 @@ var narrowedImports = map[string]struct {
 		symbols: []string{
 			"Config", "VersionTLS13",
 			"CertificateVerificationError", "RecordHeaderError",
+			// The mint transport reads roots and admits a peer per handshake.
+			"Client", "ConnectionState",
 			// tls.go's workload leaf certificates, reloaded on rotation.
 			// Measured from the tree, so the list is what is used and no more.
 			"Certificate", "X509KeyPair", "LoadX509KeyPair",

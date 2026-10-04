@@ -262,10 +262,11 @@ client, err := workcontext.NewMintClient(workcontext.MintOptions{
     },
     ProjectedToken:     workcontext.ProjectedTokenFile("/var/run/secrets/codefly/token"),
     ProjectionAudience: projectionAudience,
-    // REQUIRED: the roots that may sign the mint endpoint's certificate.
-    // There is no safe default for where this process sends its
-    // service-account token, so there is no default.
-    RootCAs: platformRoots,
+    // REQUIRED: sources of current trust roots, workload X.509-SVID,
+    // and admitted mint endpoint SPIFFE IDs. Re-read per handshake.
+    TrustAnchor:       readPlatformRoots,     // func() (*x509.CertPool, error)
+    ClientCertificate: readWorkloadSVID,      // func() (*tls.Certificate, error)
+    AdmittedPeers:     readAdmittedMintPeers, // func() ([]string, error)
 })
 ```
 
@@ -280,24 +281,40 @@ host SIGNED to be the audience the pin answered.
 projected service-account token travels on that request as a bearer credential,
 so plaintext is a disclosure the configuration must not be able to choose.
 
-**The transport is the client's, and you cannot supply one.** `RootCAs` is the
-only thing a caller says about it, and it is **required**: `NewMintClient`
-returns `ErrInvalid` without it. A nil `RootCAs` used to mean the system pool
-silently, which left the one remaining hole in a transport built to have none —
-every other route to a weak channel was closed and the trust anchor was still
-whatever the image shipped, so a mis-issued certificate for the host name, or a
-corporate interception root, received the projected token. A deployment that
-really means the host's pool writes `x509.SystemCertPool()`, which is two lines
-and is visible at the call site. An `*http.Client` option was a hole that
-inspecting the client could not close: a nil `Transport` means the global,
-mutable `http.DefaultTransport`; a wrapping `RoundTripper` is opaque; a
-`DialTLSContext` bypasses `TLSClientConfig` entirely; and a caller keeping the
-`*http.Transport` pointer can turn verification off after construction, because
-copying an `http.Client` shares its `Transport`. Each of those sent the
-projection over a channel nobody authenticated. So the client builds the
-transport — TLS 1.3 minimum, verification on, no custom dialer, no proxy — and
-refuses redirects, because Go's own client forwards `Authorization` across a
-redirect to the same host.
+**The SDK owns the mint transport.** Callers provide `TrustAnchor`,
+`ClientCertificate` and `AdmittedPeers` sources; all three functions are
+required. `NewMintClient` returns `ErrInvalid` for a missing source or a
+malformed currently readable admitted identity. Unreadable or empty peer
+projections are retryable at the handshake, and construction never caches them.
+
+Every mint, renewal and refresh opens a **new TLS 1.3 connection**. The SDK
+reads the current anchor for the handshake, presents the workload's current
+X.509-SVID through `GetClientCertificate`, and reads the current admitted peer
+set in `VerifyConnection`, **after Go has verified the chain and hostname**.
+The endpoint must request a client certificate. There is no system-root
+fallback, connection reuse, TLS session resumption, compression, proxy or
+followed redirect. HTTP/1.1 keeps requests on separate connections without
+HTTP/2 multiplexing. Callers cannot supply an HTTP client or reach its transport;
+only the SDK's private TLS dialer installs the per-handshake roots.
+
+Admission compares the leaf certificate's URI SANs with the admitted SPIFFE
+IDs. Both sides are canonicalized by lower-casing the scheme and trust domain
+and removing empty path segments, including trailing slashes; path case stays
+significant. IDs must have the form `spiffe://<trust-domain>/<path>`. Userinfo,
+ports, query strings, fragments, escapes and dot segments are refused.
+
+An unreadable anchor or client certificate, nil anchor, empty or unreadable
+peer set, invalid live peer identity, or failed TLS verification refuses the
+request with **`ErrMintUnavailable`**. A verified leaf with no admitted SPIFFE
+ID also wraps **`ErrMintPeerNotAdmitted`**, available through `errors.Is`.
+These failures are retryable and deliver no HTTP headers or body, including
+the projected token in `Authorization`.
+
+A root or peer withdrawal takes effect on the **next mint request**. The
+handshake-to-write window remains (normally microseconds, subject to
+scheduling); no token leaves before `VerifyConnection` returns. Tests capture
+requests at the server, rotate roots and client certificates, withdraw a
+same-root peer, and require recovery after source failures.
 
 Then, on every outbound request:
 
