@@ -33,8 +33,26 @@ here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 # The ref this change is becoming, and the ref it merges into, are both
 # excluded: the working-tree sweep covers the former, and sweeping the latter
-# is circular — main carries the implementation until this change deletes it.
-base="${SWEEP_BASE:-${GITHUB_BASE_REF:-${GITHUB_REF_NAME:-main}}}"
+# is circular — the default branch carries the implementation until this change
+# deletes it.
+#
+# THE BASE IS THE DEFAULT BRANCH, NOT THE REF BEING BUILT. It used to fall
+# through to GITHUB_REF_NAME, and that made the same required check answer
+# differently depending on which EVENT ran it:
+#
+#   pull_request  GITHUB_BASE_REF=main        -> main excluded, check green
+#   push          GITHUB_BASE_REF is empty    -> base became the pushed branch,
+#                                                main swept, check RED
+#
+# Measured: run 37208615216, a push build, `FAIL origin/main carries a Work
+# Context implementation` listing the very files this PR deletes. Both builds
+# report under one check name, so the result depended on which event landed
+# last — a check whose answer depends on its trigger is worse than a check that
+# is wrong, because it is right half the time.
+#
+# The workflow passes SWEEP_BASE explicitly from the repository's own default
+# branch, so this fallback is a safety net rather than the mechanism.
+base="${SWEEP_BASE:-${GITHUB_BASE_REF:-main}}"
 head_ref="${SWEEP_HEAD:-${GITHUB_HEAD_REF:-${GITHUB_REF_NAME:-}}}"
 
 # Every remote-tracking ref, by PREFIX so namespaced refs are not dropped.

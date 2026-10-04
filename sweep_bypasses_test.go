@@ -711,3 +711,79 @@ func TestTheSweepRefusesSourcesNoGateCanRead(t *testing.T) {
 		"package x\n\nimport \"fmt\"\n\nvar _ = fmt.Sprint\n")
 	require.NoError(t, err, out)
 }
+
+// THE SAME CHECK MUST ANSWER THE SAME WAY WHICHEVER EVENT RAN IT.
+//
+// The base ref — the one this change merges into, excluded because sweeping it
+// is circular — fell through to GITHUB_REF_NAME when GITHUB_BASE_REF was empty.
+// That is empty on a PUSH build, so:
+//
+//	pull_request  GITHUB_BASE_REF=main      -> main excluded, check green
+//	push          GITHUB_BASE_REF empty     -> base became the pushed branch,
+//	                                           main swept, check RED
+//
+// Measured in CI, run 37208615216: `FAIL origin/main carries a Work Context
+// implementation`, listing the files this PR deletes. Both triggers report
+// under one required check name, so the answer depended on which event landed
+// last — and a check that is right half the time is worse than one that is
+// wrong, because the green is what somebody acts on.
+//
+// Nothing covered this: every test here set SWEEP_BASE explicitly, which is
+// precisely the variable CI was not setting on a push.
+func TestTheBaseRefIsTheDefaultBranchWhicheverEventRan(t *testing.T) {
+	sweep, err := filepath.Abs("scripts/sweep-published-refs.sh")
+	require.NoError(t, err)
+	checker, err := filepath.Abs("scripts/check-one-implementation.sh")
+	require.NoError(t, err)
+	clone := clonedRemote(t, sweep, checker, "feature/work")
+	// A third published ref, so "everything else is still swept" is an
+	// assertion rather than an empty list: excluding the base and the head
+	// from a two-branch remote leaves nothing, and nil contains nothing.
+	runIn(t, clone, "git", "push", "--quiet", "origin",
+		"refs/remotes/origin/main:refs/heads/badges")
+	runIn(t, clone, "git", "fetch", "--prune", "--quiet", "origin",
+		"+refs/heads/*:refs/remotes/origin/*")
+
+	listWith := func(environment ...string) []string {
+		t.Helper()
+		run := exec.Command("bash", "scripts/sweep-published-refs.sh")
+		run.Dir = clone
+		run.Env = append(sweepEnv(t), append([]string{"SWEEP_LIST_ONLY=1"}, environment...)...)
+		output, err := run.Output()
+		require.NoError(t, err, "%s", output)
+		var refs []string
+		for _, line := range strings.Split(strings.TrimSpace(string(output)), "\n") {
+			if line != "" {
+				refs = append(refs, line)
+			}
+		}
+		return refs
+	}
+
+	// A PUSH build: no GITHUB_BASE_REF, GITHUB_REF_NAME is the pushed branch.
+	// This is the shape that was red.
+	push := listWith("GITHUB_BASE_REF=", "GITHUB_REF_NAME=feature/work", "GITHUB_HEAD_REF=")
+	require.NotContains(t, push, "origin/main",
+		"a push build swept the default branch, which carries the implementation until "+
+			"this change merges — the circular case the exclusion exists for")
+	require.NotContains(t, push, "origin/feature/work",
+		"and the ref being built is covered by the working-tree sweep")
+	require.Contains(t, push, "origin/badges", "while every other published ref is still swept")
+
+	// A PULL_REQUEST build: GITHUB_BASE_REF names the base.
+	pull := listWith("GITHUB_BASE_REF=main", "GITHUB_REF_NAME=feature/work",
+		"GITHUB_HEAD_REF=feature/work")
+	require.NotContains(t, pull, "origin/main")
+	require.NotContains(t, pull, "origin/feature/work")
+
+	// THE TWO MUST AGREE. That is the property; the individual exclusions are
+	// how it is reached.
+	require.ElementsMatch(t, push, pull,
+		"the same required check swept a different set depending on which event ran it")
+
+	// And an explicit SWEEP_BASE still wins, which is what the workflow passes.
+	explicit := listWith("SWEEP_BASE=badges", "GITHUB_BASE_REF=", "GITHUB_REF_NAME=feature/work")
+	require.NotContains(t, explicit, "origin/badges")
+	require.Contains(t, explicit, "origin/main",
+		"with badges named as the base, main is an ordinary published ref again")
+}
