@@ -5,6 +5,7 @@ import (
 	"go/ast"
 	"go/types"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"slices"
 	"sort"
@@ -469,4 +470,123 @@ func TestTheGateActuallyHasTypeInformation(t *testing.T) {
 		"no package carried type information, so every go/types rule in this gate "+
 			"was deciding nothing. A gate with no inputs passes everything.")
 	var _ types.Type = types.Typ[types.Bool] // the import is load-bearing above
+}
+
+// THE GATE READS EVERY SHIPPED FILE, asserted against git rather than assumed.
+//
+// This is the half of the one-implementation rule that the shared policy file
+// did not close. `packages.Load` builds for ONE configuration, so a file the
+// current build does not select is a file the type-checked gates never see:
+// GOOS/GOARCH or custom build tags, cgo under CGO_ENABLED=0, a directory
+// beginning with `_` or `.`, a nested module, a `vendor/` tree. The sweep reads
+// every tracked file regardless of tags (go/parser ignores them), so a
+// prohibited IMPORT there is still caught — what is not caught is every
+// semantic rule: the codec rule, the capability walk, the envelope rule.
+//
+// "Every source file is checked regardless of build tags" was true of the
+// syntactic scanners and stopped being true when the type-checked gates
+// arrived. So the claim is now a test: what the loader read must equal what the
+// repository ships. Today they are equal; the day somebody adds a
+// build-constrained file this fails, and the answer is to load that
+// configuration too or to refuse the file — not to let it through unread.
+//
+// It also subsumes the testdata claim. A reviewer struck
+// TestTestdataIsNotAHidingPlace for checking the helper and never that the gate
+// LOADS a testdata package: `git ls-files` lists one, so this is what would
+// fail if the loader skipped it.
+func TestTheGateReadsEveryShippedFile(t *testing.T) {
+	tracked := trackedGoFiles(t)
+	require.NotEmpty(t, tracked, "git listed no Go files, so this asserted nothing")
+
+	read := map[string]bool{}
+	for _, module := range loadModules(t) {
+		for _, loaded := range module.packages {
+			for _, file := range loaded.Syntax {
+				path := module.relative(loaded, file)
+				if path != "" && !strings.HasSuffix(path, "_test.go") {
+					read[path] = true
+				}
+			}
+		}
+	}
+
+	var unread []string
+	for _, path := range tracked {
+		if !read[path] {
+			unread = append(unread, path)
+		}
+	}
+	require.Empty(t, unread,
+		"these files are shipped and the type-checked gates never read them: %v.\n"+
+			"packages.Load builds for ONE configuration, so a build-constrained file, a cgo\n"+
+			"file under CGO_ENABLED=0, a `_`-prefixed directory, a nested module or a vendor\n"+
+			"tree is invisible to every semantic rule here — the codec rule, the capability\n"+
+			"walk, the envelope rule. The import sweep still reads them, so an import ban\n"+
+			"holds; nothing else does. Load that configuration too, or refuse the file.",
+		unread)
+
+	// And the loader must not be reading files git does not track, which would
+	// mean it is answering about something other than what ships.
+	trackedSet := map[string]bool{}
+	for _, path := range tracked {
+		trackedSet[path] = true
+	}
+	var untracked []string
+	for path := range read {
+		if !trackedSet[path] {
+			untracked = append(untracked, path)
+		}
+	}
+	require.Empty(t, untracked,
+		"the gates read files this repository does not track: %v", untracked)
+}
+
+// NO GATE HERE READS ASSEMBLY OR C, so none may be shipped.
+//
+// Every rule in this repository is about Go: `go/parser` for the sweep,
+// `go/types` for the codec rule. A `.s` file can implement anything at all, a
+// `.syso` is already-compiled object code linked in whole, and a `.c` compiled
+// through cgo is outside the language. There is no honest need for any of them
+// in an SDK whose job is resolving values — and `import "C"` is already refused
+// by name, so this is the other half of that.
+func TestNoSourceNoGateCanReadIsShipped(t *testing.T) {
+	run := exec.Command("git", "ls-files", "--",
+		"*.s", "*.S", "*.syso", "*.a", "*.o", "*.c", "*.cc", "*.cpp", "*.cxx",
+		"*.h", "*.hh", "*.hpp", "*.m", "*.mm")
+	run.Dir = ".."
+	output, err := run.Output()
+	require.NoError(t, err)
+
+	var shipped []string
+	for _, line := range strings.Split(strings.TrimSpace(string(output)), "\n") {
+		if trimmed := strings.TrimSpace(line); trimmed != "" {
+			shipped = append(shipped, trimmed)
+		}
+	}
+	require.Empty(t, shipped,
+		"these files are shipped and no gate in this repository can read them: %v.\n"+
+			"Every rule here is about Go — go/parser for the import sweep, go/types for the\n"+
+			"codec rule — so assembly, object code and C are outside all of them. A .s file\n"+
+			"can implement anything; a .syso is compiled code linked in whole. `import \"C\"`\n"+
+			"is already refused by name and this is the other half of it.",
+		shipped)
+}
+
+// trackedGoFiles is every non-test Go file this repository ships, from git.
+func trackedGoFiles(t *testing.T) []string {
+	t.Helper()
+	run := exec.Command("git", "ls-files", "--", "*.go")
+	run.Dir = ".."
+	output, err := run.Output()
+	require.NoError(t, err)
+
+	var files []string
+	for _, line := range strings.Split(strings.TrimSpace(string(output)), "\n") {
+		path := strings.TrimSpace(line)
+		if path == "" || strings.HasSuffix(path, "_test.go") {
+			continue
+		}
+		files = append(files, path)
+	}
+	return files
 }

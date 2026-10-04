@@ -117,6 +117,7 @@ leaf net/http
 leaf net/url
 leaf os
 leaf slices
+leaf sort
 leaf strconv
 leaf strings
 leaf sync

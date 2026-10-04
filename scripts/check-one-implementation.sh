@@ -182,11 +182,29 @@ offending_import() {
   return 0
 }
 
+# refuse_unreadable_sources <listing> -> prints each file no gate can read.
+#
+# Every rule in this repository is about Go — go/parser here, go/types in the
+# Go gates — so assembly, object code and C are outside all of them. A .s file
+# can implement anything; a .syso is compiled code linked in whole. `import "C"`
+# is refused by name and this is the other half of it. Checked HERE as well as
+# in the Go gate, because the Go gate reads a checkout and this reads every
+# published ref.
+refuse_unreadable_sources() {
+  grep -E '\.(s|S|syso|a|o|c|cc|cpp|cxx|h|hh|hpp|m|mm)$' || true
+}
+
 carrying_in_tree() {
-  local found="" tracked list imports path imported
+  local found="" tracked list imports path imported unreadable
   if ! tracked=$(git ls-files -- '*.go'); then
     echo "FAIL cannot enumerate the tracked Go files in this checkout." >&2
     exit 1
+  fi
+  unreadable=$(git ls-files | refuse_unreadable_sources)
+  if [ -n "$unreadable" ]; then
+    while IFS= read -r path; do
+      [ -n "$path" ] && found="$found$path is a source no gate here can read"$'\n'
+    done <<< "$unreadable"
   fi
   list=$(mktemp); imports=$(mktemp)
   while IFS= read -r path; do
@@ -207,10 +225,16 @@ carrying_in_tree() {
 }
 
 carrying_in_ref() {
-  local ref="$1" found="" entries list imports work path imported index=0
+  local ref="$1" found="" entries list imports work path imported unreadable index=0
   if ! entries=$(git ls-tree -r --name-only "$ref"); then
     echo "FAIL cannot enumerate $ref, so it has not been swept." >&2
     exit 1
+  fi
+  unreadable=$(printf '%s\n' "$entries" | refuse_unreadable_sources)
+  if [ -n "$unreadable" ]; then
+    while IFS= read -r path; do
+      [ -n "$path" ] && found="$found$path is a source no gate here can read"$'\n'
+    done <<< "$unreadable"
   fi
   work=$(mktemp -d); list=$(mktemp); imports=$(mktemp)
   # Each blob's path in the REF is recorded beside its temporary copy, so a

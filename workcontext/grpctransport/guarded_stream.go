@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sort"
+	"strings"
 	"sync"
 
 	"google.golang.org/grpc"
@@ -642,7 +644,11 @@ func StreamServerInterceptor(
 // than something the interceptor does because grpc hands the interceptor no
 // server, and inventing a registration hook to reach one would be a bigger
 // surface than a call a server makes.
-func ValidateMethodSet(served map[string]grpc.ServiceInfo, capabilityBearing []string) error {
+func ValidateMethodSet(
+	served map[string]grpc.ServiceInfo,
+	capabilityBearing []string,
+	deliberatelyUnguarded ...string,
+) error {
 	// STREAMING METHODS ONLY. Every grpc.MethodInfo went into this map,
 	// ignoring IsClientStream and IsServerStream — so for a service with a
 	// unary Read and a streaming Emit, declaring only "/Service/Read" passed
@@ -672,34 +678,69 @@ func ValidateMethodSet(served map[string]grpc.ServiceInfo, capabilityBearing []s
 			unknown = append(unknown, method)
 		}
 	}
+
+	// AND THE OTHER DIRECTION, which is the fail-open this validation did not
+	// reach: a STREAMING method the server serves and the set does not name
+	// gets the raw handler, with guardFor never called. The set was checked
+	// against the server and the server was never checked against the set.
+	//
+	// Deny by default, as everywhere else here: every served streaming method
+	// is either capability-bearing or NAMED as deliberately unguarded. A
+	// stream that carries no authority is a real thing and this does not force
+	// it to be guarded — it forces somebody to have said so, once, where a
+	// reader sees it, instead of a method being unguarded because nobody
+	// thought about it.
+	declared := map[string]bool{}
+	for _, method := range capabilityBearing {
+		declared[method] = true
+	}
+	for _, method := range deliberatelyUnguarded {
+		declared[method] = true
+	}
+	var unconsidered []string
+	for method := range known {
+		if !declared[method] {
+			unconsidered = append(unconsidered, method)
+		}
+	}
+
+	// ALL THREE AT ONCE. Returning on the first meant a server with both a
+	// typo and an unconsidered stream was told about one of them, fixed it,
+	// and met the other on the next run — and a test that asserted the typo's
+	// message started failing because a different true finding came out first.
+	sort.Strings(unknown)
+	sort.Strings(notStreaming)
+	sort.Strings(unconsidered)
+	var problems []string
+	if len(unknown) > 0 {
+		problems = append(problems, fmt.Sprintf(
+			"these methods are declared capability-bearing and this server does not serve "+
+				"them: %v (a name that matches nothing guards nothing, and reads exactly like "+
+				"a method that was considered)", unknown))
+	}
 	if len(notStreaming) > 0 {
-		return fmt.Errorf(
-			"%w: these methods are declared capability-bearing for a STREAM interceptor and "+
-				"are unary on this server: %v. A unary method's name in this set guards nothing "+
-				"and makes the set non-empty, which is how an interceptor that enforces nothing "+
-				"passes its own startup check",
-			errStreamMisuse, notStreaming,
-		)
+		problems = append(problems, fmt.Sprintf(
+			"these are declared capability-bearing for a STREAM interceptor and are unary on "+
+				"this server: %v (a unary name makes the set non-empty and guards nothing)",
+			notStreaming))
+	}
+	if len(unconsidered) > 0 {
+		problems = append(problems, fmt.Sprintf(
+			"this server serves these streaming methods and nothing names them: %v (a stream "+
+				"missing from the set reaches the handler UNGUARDED; name it as "+
+				"capability-bearing, or pass it as deliberately unguarded — the decision is "+
+				"what has to exist, not the guard)", unconsidered))
 	}
 	if len(known) == 0 {
-		return fmt.Errorf(
-			"%w: this server registers no streaming method, so a stream interceptor has "+
-				"nothing to guard", errStreamMisuse,
-		)
-	}
-	if len(unknown) > 0 {
-		return fmt.Errorf(
-			"%w: these methods are declared capability-bearing and this server does not "+
-				"serve them: %v. A name that matches nothing guards nothing, and reads exactly "+
-				"like a method that was considered",
-			errStreamMisuse, unknown,
-		)
+		problems = append(problems, "this server registers no streaming method at all, so a "+
+			"stream interceptor has nothing to guard")
 	}
 	if len(capabilityBearing) == 0 {
-		return fmt.Errorf(
-			"%w: no method is declared capability-bearing, so the interceptor would guard "+
-				"nothing", errStreamMisuse,
-		)
+		problems = append(problems, "no method is declared capability-bearing, so the "+
+			"interceptor would guard nothing")
+	}
+	if len(problems) > 0 {
+		return fmt.Errorf("%w: %s", errStreamMisuse, strings.Join(problems, "; "))
 	}
 	return nil
 }

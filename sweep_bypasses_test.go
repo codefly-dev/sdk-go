@@ -563,3 +563,56 @@ func TestTheImportReaderAnswersWithWhatGoSees(t *testing.T) {
 		"the escape is unquoted to the path the compiler sees, the raw string is read, "+
 			"and the \")\" in the comment does not end the block")
 }
+
+// NO GATE HERE CAN READ ASSEMBLY OR C, so the sweep refuses them — at every
+// published ref, where no Go test runs.
+//
+// Every rule in this repository is about Go: `go/parser` for the imports,
+// `go/types` for the codec rule. A `.s` file can implement anything at all, a
+// `.syso` is already-compiled object code linked in whole, and a `.c` reached
+// through cgo is outside the language. `import "C"` is refused by name and this
+// is the other half of it: the import ban is meaningless if the implementation
+// can arrive as an object file.
+func TestTheSweepRefusesSourcesNoGateCanRead(t *testing.T) {
+	script, err := filepath.Abs("scripts/check-one-implementation.sh")
+	require.NoError(t, err)
+
+	for name, probe := range map[string]struct{ file, source string }{
+		"hand-written assembly": {"sign_amd64.s", "TEXT sign(SB),$0\n\tRET\n"},
+		"a compiled object":     {"libsign.syso", "\x7fELF not really\n"},
+		"a C source":            {"sign.c", "int sign(void) { return 0; }\n"},
+		"a C header":            {"sign.h", "int sign(void);\n"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			repository := t.TempDir()
+			require.NoError(t, os.WriteFile(filepath.Join(repository, "ordinary.go"),
+				[]byte("package x\n\nimport \"fmt\"\n\nvar _ = fmt.Sprint\n"), 0o600))
+			require.NoError(t, os.WriteFile(filepath.Join(repository, probe.file),
+				[]byte(probe.source), 0o600))
+			require.NoError(t, os.MkdirAll(filepath.Join(repository, "scripts"), 0o755))
+			copyFile(t, script, filepath.Join(repository, "scripts", "check-one-implementation.sh"))
+			copyPolicy(t, filepath.Dir(script), filepath.Join(repository, "scripts"))
+			for _, command := range [][]string{{"git", "init", "--quiet"}, {"git", "add", "."}} {
+				run := exec.Command(command[0], command[1:]...)
+				run.Dir = repository
+				output, err := run.CombinedOutput()
+				require.NoError(t, err, "%s: %s", command, output)
+			}
+
+			run := exec.Command("bash", "scripts/check-one-implementation.sh")
+			run.Dir = repository
+			run.Env = sweepEnv(t)
+			raw, err := run.CombinedOutput()
+
+			require.Error(t, err, "a source no gate can read must not sweep clean:\n%s", raw)
+			require.Contains(t, string(raw), probe.file)
+			require.Contains(t, string(raw), "no gate here can read")
+		})
+	}
+
+	// And a repository of ordinary Go still passes, so this is not simply
+	// failing — the mutation guard for every case above.
+	out, err := sweepOf(t, script, "ordinary.go",
+		"package x\n\nimport \"fmt\"\n\nvar _ = fmt.Sprint\n")
+	require.NoError(t, err, out)
+}

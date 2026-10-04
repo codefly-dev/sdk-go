@@ -103,19 +103,27 @@ qualifier, because the qualifier is the author's choice.
   `mint.go` inherit the allowance — an allowlist undone by `touch`.
 - **No declaration named `workcontext*`** (case-insensitively, every
   declaration kind) unless it aliases into core's module.
-- **The sweep tests import PATHS**, taken from inside the quotes, and never a
-  line's shape. Its previous regex tried to recognise an import and was walked
-  past by a non-ASCII alias (`ψ "crypto/ed25519"`) and a comment-prefixed line
-  (`/* x */ "crypto/ed25519"`) — in the root module, where it is the only gate.
-  It reads the closing paren off the COMMENT-STRIPPED line — a `)` in a comment
-  closed the block early — and scans each line ONCE for either quoting, because
-  two sequential passes dropped a raw-string path preceding a quoted one.
-- **The two gates' ban lists are one list, asserted.** They disagreed both ways:
-  the legacy protobuf module, `protoiface`, `protoimpl` and a vendored path
-  ending `/ed25519` swept clean where the sweep is the only gate, and the cipher
-  family was banned by the sweep but not by the gate reading the module the
-  capability lives in. `TestTheShellSweepBansEverythingTheASTGateBans` parses the
-  script's own expressions and fails when they differ.
+- **The sweep reads imports with GO'S OWN PARSER** (`scripts/importsof`), not a
+  regex. Its awk extractor was rewritten three times for this class and five
+  more shapes walked past it, the decisive one being `import
+  "\x63rypto/ed25519"` — which compiles, IS `crypto/ed25519` to the compiler,
+  and is not that string to anything matching text. No regex closes that. A
+  file that does not parse is a failure, not a file with no imports.
+- **ONE import policy, `scripts/allowed-imports.txt`,** read by the Go gate and
+  by the sweep. There were two and they disagreed in both directions, which was
+  a blocker twice: the sweep is the only thing that runs over a published ref
+  and is the whole of the required check, so a branch carrying `crypto/mldsa`
+  and `encoding/json/v2` swept clean while the allowlist in `go test` refused
+  it. A line may name the FILES that may have an import; `legacy` lines apply
+  to published refs only, because deny-by-default describes today's tree and
+  sweeping two years of tags with it flagged 33 clean versions.
+- **The gates must READ every shipped file, asserted against `git ls-files`.**
+  `packages.Load` builds one configuration, so a build-constrained file, a cgo
+  file under `CGO_ENABLED=0`, a `_`-prefixed directory, a nested module or a
+  vendor tree is invisible to every semantic rule. The sweep still reads them
+  (go/parser ignores build tags), so an import ban holds and nothing else does
+  — and assembly, object code and C are refused outright, because no rule here
+  can read them.
 - **A gate that could not look must not report success.** Four fail-opens, three
   inside the assertion added the round before: a swallowed `git ls-remote`
   failure skipped the comparison entirely, the comparison was between COUNTS

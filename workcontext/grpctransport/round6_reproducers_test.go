@@ -211,3 +211,45 @@ func TestAUnaryMethodNameGuardsNothingAndIsRefused(t *testing.T) {
 		map[string]grpc.ServiceInfo{streamService: {Methods: []grpc.MethodInfo{{Name: "Read"}}}},
 		[]string{"/" + streamService + "/Read"}))
 }
+
+// M-4: THE INTERCEPTOR FAILED OPEN FOR A SERVED METHOD MISSING FROM THE SET,
+// and the validation that was supposed to catch misconfiguration only looked
+// one way — the declared set was checked against the server, and the server was
+// never checked against the set.
+//
+// Deny by default, as everywhere else here: every served streaming method is
+// either capability-bearing or NAMED as deliberately unguarded. A stream that
+// carries no authority is a real thing, so this does not force a guard on it —
+// it forces somebody to have said so once, where a reader sees it, instead of a
+// method going unguarded because nobody thought about it.
+func TestEveryServedStreamIsEitherGuardedOrDeliberatelyNot(t *testing.T) {
+	served := map[string]grpc.ServiceInfo{
+		streamService: {Methods: []grpc.MethodInfo{
+			{Name: "Emit", IsServerStream: true},
+			{Name: "Watch", IsServerStream: true},
+			{Name: "Read"},
+		}},
+	}
+	watch := "/" + streamService + "/Watch"
+
+	// Emit declared, Watch neither declared nor exempted: refused.
+	err := ValidateMethodSet(served, []string{streamMethod})
+	require.Error(t, err, "Watch reaches the handler unguarded and nothing says that is intended")
+	require.ErrorIs(t, err, workcontext.ErrInvalid)
+	require.Contains(t, err.Error(), "Watch")
+	require.Contains(t, err.Error(), "reaches the handler UNGUARDED")
+
+	// Watch named as deliberately unguarded: accepted. The decision exists.
+	require.NoError(t, ValidateMethodSet(served, []string{streamMethod}, watch))
+
+	// Or guarded instead: also accepted.
+	require.NoError(t, ValidateMethodSet(served, []string{streamMethod, watch}))
+
+	// AND EVERY PROBLEM AT ONCE, because returning on the first told a server
+	// with two mistakes about one of them.
+	both := ValidateMethodSet(served, []string{"/" + streamService + "/Emmit", "/" + streamService + "/Read"})
+	require.Error(t, both)
+	require.Contains(t, both.Error(), "Emmit", "the typo")
+	require.Contains(t, both.Error(), "unary on this server", "the unary name")
+	require.Contains(t, both.Error(), "UNGUARDED", "and the streams nothing names")
+}
