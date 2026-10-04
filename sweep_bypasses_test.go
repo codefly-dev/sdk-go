@@ -799,3 +799,51 @@ func TestTheBaseRefIsTheDefaultBranchWhicheverEventRan(t *testing.T) {
 	require.Contains(t, explicit, "origin/main",
 		"with badges named as the base, main is an ordinary published ref again")
 }
+
+// THE WORKFLOW MUST SWEEP THE PR'S OWN TARGET, not whatever the default branch
+// happens to be.
+//
+// `SWEEP_BASE` read `github.event.repository.default_branch` unconditionally.
+// That is right for every pull request this repository has had and wrong for
+// one targeting anything else — a release branch, say. Then the release branch
+// would be SWEPT, failing circularly on the very content the PR is changing,
+// while the default branch was excluded and went unchecked. Both halves are
+// wrong and they conceal each other: the red looks like a finding and the
+// unchecked branch looks clean.
+//
+// `github.base_ref` is set on a pull_request and empty on a push, which is the
+// distinction needed — a push build has no base, and the default branch is the
+// right answer for it.
+//
+// WHAT THIS TEST CAN AND CANNOT DO, stated because the gap is the point: a
+// GitHub expression is evaluated by GitHub, not here, so this asserts the
+// expression's SHAPE — that the PR's target is consulted before the default
+// branch. The script's behaviour given a base is covered by
+// TestTheBaseRefIsTheDefaultBranchWhicheverEventRan, which drives both event
+// shapes. Neither test runs the expression; a reviewer executed the old and new
+// forms externally to establish that.
+func TestTheSweepsBaseIsThePullRequestsOwnTarget(t *testing.T) {
+	workflow, err := os.ReadFile(filepath.Join(".github", "workflows", "go.yml"))
+	require.NoError(t, err)
+
+	var base string
+	for _, line := range strings.Split(string(workflow), "\n") {
+		if key, value, found := strings.Cut(strings.TrimSpace(line), "SWEEP_BASE:"); found && key == "" {
+			base = strings.TrimSpace(value)
+			break
+		}
+	}
+	require.NotEmpty(t, base, "the sweep step passes no SWEEP_BASE, so it is guessing again")
+
+	require.Contains(t, base, "github.base_ref",
+		"SWEEP_BASE must consult the pull request's own target. Reading only the default "+
+			"branch sweeps the real target of a PR aimed anywhere else — failing circularly "+
+			"on the content that PR is changing — and excludes the default branch, which then "+
+			"goes unchecked.")
+	require.Contains(t, base, "default_branch",
+		"and must fall back to the default branch, because a push build has no base at all — "+
+			"which is the bug this replaced")
+	require.Less(t, strings.Index(base, "github.base_ref"), strings.Index(base, "default_branch"),
+		"the order is the whole rule: the PR's target FIRST, the default branch only as the "+
+			"fallback. Reversed, every pull request would sweep its own target.")
+}
