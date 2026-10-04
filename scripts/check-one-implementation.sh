@@ -225,7 +225,7 @@ carrying_in_tree() {
 }
 
 carrying_in_ref() {
-  local ref="$1" found="" entries list imports work path imported unreadable index=0
+  local ref="$1" found="" entries list imports work path imported unreadable
   if ! entries=$(git ls-tree -r --name-only "$ref"); then
     echo "FAIL cannot enumerate $ref, so it has not been swept." >&2
     exit 1
@@ -237,35 +237,48 @@ carrying_in_ref() {
     done <<< "$unreadable"
   fi
   work=$(mktemp -d); list=$(mktemp); imports=$(mktemp)
-  # Each blob's path in the REF is recorded beside its temporary copy, so a
-  # finding names that path and not something under /tmp.
-  local -a origin=()
+
+  # ONE PROCESS PER REF, not one per file. This ran `git cat-file blob` for
+  # every Go file at every ref — about 4,000 spawns for 83 tags — and the tag
+  # audit took four minutes against a five-minute CI job. `git archive` writes
+  # the whole tree once, and the files land at their real paths, which also
+  # removes an index-to-path mapping that existed only to undo the temporary
+  # names.
+  if ! git archive --format=tar "$ref" | tar -x -C "$work" 2>/dev/null; then
+    echo "FAIL cannot extract $ref, so it has not been swept." >&2
+    exit 1
+  fi
+
+  # AND THE EXTRACTION IS COMPARED AGAINST THE LISTING, by name. `git archive`
+  # omits what it cannot write — a submodule's gitlink, which `ls-tree -r`
+  # still names — and omitting is exactly how the previous `2>/dev/null` on
+  # cat-file turned an unreadable entry into a file with no imports. A ref this
+  # sweep could not fully extract is a ref it has not swept.
+  local missing=""
   while IFS= read -r path; do
     case "$path" in
       *_test.go) continue ;;
       *.go) ;;
       *) continue ;;
     esac
-    # THE SAME FAIL-OPEN AS THE TREE'S, and this one needed no error at all:
-    # `git ls-tree -r` names gitlinks as well as blobs, so a submodule whose
-    # path ends in `.go` is listed and `git cat-file blob` cannot read it.
-    # Measured: `fatal: bad file` swallowed by 2>/dev/null, the source emptied,
-    # and the ref reported `ok` with exit 0.
-    if ! git cat-file blob "$ref:$path" > "$work/$index.go" 2>"$work/err"; then
-      echo "FAIL cannot read $ref:$path, so this ref has not been swept. git said:" >&2
-      sed 's/^/       /' "$work/err" >&2
-      exit 1
+    if [ ! -f "$work/$path" ]; then
+      missing="$missing $path"
+      continue
     fi
-    origin[index]="$path"
-    printf '%s\n' "$work/$index.go" >> "$list"
-    index=$((index + 1))
+    printf '%s\n' "$work/$path" >> "$list"
   done <<< "$entries"
-  if [ "$index" -gt 0 ]; then
+  if [ -n "$missing" ]; then
+    echo "FAIL $ref lists Go files that could not be extracted, so it has not been swept:$missing" >&2
+    rm -rf "$work"; rm -f "$list" "$imports"
+    exit 1
+  fi
+
+  if [ -s "$list" ]; then
     imports_of_files "$list" > "$imports"
     while IFS=$'\t' read -r path imported; do
       [ -n "$imported" ] || continue
-      local base="${path##*/}"
-      path="${origin[${base%.go}]}"
+      # Back to the path IN THE REF: strip the extraction directory.
+      path="${path#"$work"/}"
       if offending_import "$path" "$imported"; then
         found="$found$path imports $imported"$'\n'
       fi

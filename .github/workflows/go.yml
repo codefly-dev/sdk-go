@@ -70,7 +70,13 @@ jobs:
   one-implementation:
     name: no second Work Context implementation
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    # Ten, not five. This job sweeps the working tree and every published ref,
+    # reading imports with go/parser — one `git cat-file` per Go file per ref.
+    # Measured locally between 22s and 131s depending only on the OS file
+    # cache, and a CI runner is slower than that. A gate that times out is a
+    # gate somebody deletes, and the honest answer to "the gates cost more now"
+    # is to say what they cost.
+    timeout-minutes: 10
     steps:
       - name: Checkout
         # fetch-depth 0 so every published ref is reachable: the second step
@@ -149,7 +155,10 @@ jobs:
   coverage:
     name: coverage
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    # Ten: the root suite now includes the published-tag audit, which
+    # sweeps 83 tags through the import reader. Measured 22s-131s on a warm
+    # versus cold file cache.
+    timeout-minutes: 10
     permissions:
       contents: write
     # The receipts store is written in the caller's transaction, admits on a
@@ -210,7 +219,10 @@ jobs:
   race:
     name: race
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    # Ten: the root suite now includes the published-tag audit, which
+    # sweeps 83 tags through the import reader. Measured 22s-131s on a warm
+    # versus cold file cache.
+    timeout-minutes: 10
     strategy:
       matrix:
         module: [ ".", "workcontext" ]

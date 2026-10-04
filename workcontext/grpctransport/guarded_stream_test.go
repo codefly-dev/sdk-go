@@ -251,7 +251,7 @@ func TestTheStreamInterceptorHandsTheHandlerAGuardedStream(t *testing.T) {
 	require.NoError(t, err)
 
 	underlying := &recordingStream{ctx: context.Background()}
-	interceptor := StreamServerInterceptor(
+	interceptor := streamServerInterceptor(
 		[]string{streamMethod},
 		func(context.Context, *grpc.StreamServerInfo) (*workcontext.StreamGuard, error) {
 			return guard, nil
@@ -285,7 +285,7 @@ func TestTheStreamInterceptorRefusesWhenItCannotBuildAGuard(t *testing.T) {
 	refused := errors.New("this capability did not verify")
 	bearing := &grpc.StreamServerInfo{FullMethod: streamMethod}
 
-	err := StreamServerInterceptor(
+	err := streamServerInterceptor(
 		[]string{streamMethod},
 		func(context.Context, *grpc.StreamServerInfo) (*workcontext.StreamGuard, error) {
 			return nil, refused
@@ -297,7 +297,7 @@ func TestTheStreamInterceptorRefusesWhenItCannotBuildAGuard(t *testing.T) {
 
 	// A DECLARED capability-bearing method whose guard could not be built is
 	// REFUSED. This used to be the passthrough that handed out the raw stream.
-	err = StreamServerInterceptor(
+	err = streamServerInterceptor(
 		[]string{streamMethod},
 		func(context.Context, *grpc.StreamServerInfo) (*workcontext.StreamGuard, error) {
 			return nil, nil
@@ -310,7 +310,7 @@ func TestTheStreamInterceptorRefusesWhenItCannotBuildAGuard(t *testing.T) {
 	// A method OUTSIDE the declared set is not guarded and never asks: the
 	// decision is in the construction, where a reviewer reads it.
 	var handed grpc.ServerStream
-	err = StreamServerInterceptor(
+	err = streamServerInterceptor(
 		[]string{streamMethod},
 		func(context.Context, *grpc.StreamServerInfo) (*workcontext.StreamGuard, error) {
 			t.Fatal("guardFor must not be asked about a method outside the declared set")
@@ -324,7 +324,7 @@ func TestTheStreamInterceptorRefusesWhenItCannotBuildAGuard(t *testing.T) {
 	require.Same(t, underlying, handed)
 
 	// And no guard-builder at all is a configuration error, not a pass.
-	err = StreamServerInterceptor([]string{streamMethod}, nil)(
+	err = streamServerInterceptor([]string{streamMethod}, nil)(
 		nil, underlying, bearing, func(any, grpc.ServerStream) error { return nil })
 	require.ErrorIs(t, err, workcontext.ErrInvalid)
 }

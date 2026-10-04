@@ -24,7 +24,7 @@ import (
 // it is called before each emission depends on each author remembering — the
 // same shape as the optional carrier this module deleted: a rule that holds
 // wherever somebody thought of it. Wrapping the stream makes the check
-// structural, and StreamServerInterceptor makes the wrapping structural too.
+// structural, and streamServerInterceptor makes the wrapping structural too.
 //
 // # Three routes out of a stream, not one
 //
@@ -94,7 +94,7 @@ type GuardedServerStream struct {
 //
 // A caller using Guard directly MUST call Finish when its handler is done, or
 // the headers and trailers it set are never sent, and MUST pass this wrapper's
-// Context to anything that writes metadata. StreamServerInterceptor does both,
+// Context to anything that writes metadata. streamServerInterceptor does both,
 // which is the reason to prefer it — and the reason the README's recipe is the
 // interceptor and not this.
 func Guard(stream grpc.ServerStream, guard *workcontext.StreamGuard) (*GuardedServerStream, error) {
@@ -246,7 +246,7 @@ func (s *GuardedServerStream) setTrailer(trailer metadata.MD) error {
 
 // Finish performs the LAST re-check and releases the headers and trailers the
 // handler set, or discards them. It is called once, after the handler returns,
-// and StreamServerInterceptor calls it.
+// and streamServerInterceptor calls it.
 //
 // It returns the handler's own error unchanged when authority still holds, and
 // a gRPC status when it does not — so a handler that completed under authority
@@ -503,8 +503,17 @@ func (e statusError) GRPCStatus() *status.Status {
 	return status.New(e.code, e.err.Error())
 }
 
-// StreamServerInterceptor guards every stream a server opens, so enforcement is
+// streamServerInterceptor guards every stream a server opens, so enforcement is
 // WIRING rather than something each handler author remembers.
+//
+// UNEXPORTED, and that is the last of the validate/enforce mismatch. It was
+// public beside ValidateMethodSet, so the correct way to install this took two
+// calls and only one of them was reachable from the type system: a consumer
+// wiring the interceptor alone got a server where an undeclared stream reaches
+// the handler unguarded, which is exactly what the README recipe did for
+// several revisions. GuardStreams is the only way in now, and its Intercept
+// refuses every stream until Validate has passed, so there is no public path
+// that skips the check.
 //
 // Guard on its own leaves the original stream in the caller's scope, so the
 // rule held wherever somebody thought of it. An interceptor is installed once,
@@ -542,7 +551,7 @@ func (e statusError) GRPCStatus() *status.Status {
 // Declaring the set removes the learning. A server that cannot enumerate its
 // capability-bearing methods does not know which of its streams carry
 // authority, which is the thing to fix before installing an interceptor.
-func StreamServerInterceptor(
+func streamServerInterceptor(
 	capabilityBearing []string,
 	guardFor func(ctx context.Context, info *grpc.StreamServerInfo) (*workcontext.StreamGuard, error),
 ) grpc.StreamServerInterceptor {
@@ -565,7 +574,7 @@ func StreamServerInterceptor(
 		if len(guarded) == 0 {
 			// AN EMPTY SET GUARDS NOTHING, so it refuses everything instead.
 			//
-			// StreamServerInterceptor(nil, guardFor) read as "no method carries
+			// streamServerInterceptor(nil, guardFor) read as "no method carries
 			// a capability" and passed every stream through unguarded —
 			// measured, a message delivered under revoked authority with zero
 			// re-checks. An interceptor installed to enforce something, that
@@ -634,10 +643,10 @@ func StreamServerInterceptor(
 // same observation there. The server knows, so the server is asked, once, at
 // startup:
 //
-//	interceptor := grpctransport.StreamServerInterceptor(bearing, guardFor)
-//	server := grpc.NewServer(grpc.StreamInterceptor(interceptor))
+//	streams := grpctransport.GuardStreams(bearing, guardFor)
+//	server := grpc.NewServer(grpc.StreamInterceptor(streams.Intercept))
 //	pb.RegisterStreamerServer(server, impl)
-//	if err := grpctransport.ValidateMethodSet(server.GetServiceInfo(), bearing); err != nil {
+//	if err := streams.Validate(server.GetServiceInfo(), unguarded...); err != nil {
 //	    return err
 //	}
 //
@@ -748,7 +757,7 @@ func ValidateMethodSet(
 
 // GuardedStreams is the stream interceptor with its validation MADE MANDATORY.
 //
-// StreamServerInterceptor plus ValidateMethodSet was correct and optional, and
+// streamServerInterceptor plus ValidateMethodSet was correct and optional, and
 // optional is the whole of the finding: the README recipe did not call the
 // validation for several revisions, so a consumer following it kept the
 // fail-open the validation exists to close, and nothing anywhere said so. A
@@ -771,8 +780,10 @@ func ValidateMethodSet(
 // forgets refuses every stream on the first request, which is a failure found
 // in the first test rather than a method that was never guarded.
 //
-// StreamServerInterceptor stays, for a server that has its own reason to wire
-// the two separately. This is what the README recommends.
+// There is no longer a public way to build the interceptor WITHOUT this: the
+// previous revision exported both and a consumer could wire the interceptor
+// alone, which is the mismatch a review kept naming. One entry point, and the
+// validation is part of it.
 type GuardedStreams struct {
 	bearing   []string
 	intercept grpc.StreamServerInterceptor
@@ -786,7 +797,7 @@ func GuardStreams(
 ) *GuardedStreams {
 	return &GuardedStreams{
 		bearing:   capabilityBearing,
-		intercept: StreamServerInterceptor(capabilityBearing, guardFor),
+		intercept: streamServerInterceptor(capabilityBearing, guardFor),
 	}
 }
 

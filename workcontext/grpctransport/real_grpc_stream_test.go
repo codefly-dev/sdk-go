@@ -53,14 +53,14 @@ func (g *revocableGuard) guard(t *testing.T) *workcontext.StreamGuard {
 }
 
 // serveGuarded stands up a real gRPC server whose one streaming method runs
-// handler behind StreamServerInterceptor, and returns a client connection.
+// handler behind streamServerInterceptor, and returns a client connection.
 func serveGuarded(
 	t *testing.T,
 	guard *workcontext.StreamGuard,
 	handler func(stream grpc.ServerStream) error,
 ) *grpc.ClientConn {
 	t.Helper()
-	return serveWith(t, StreamServerInterceptor(
+	return serveWith(t, streamServerInterceptor(
 		[]string{streamMethod},
 		func(context.Context, *grpc.StreamServerInfo) (*workcontext.StreamGuard, error) {
 			return guard, nil

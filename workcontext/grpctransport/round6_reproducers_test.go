@@ -98,14 +98,14 @@ func TestAHeaderSetAfterTheFirstMessageIsNotSilentlyDropped(t *testing.T) {
 //
 // A method missing from the declared set, and an EMPTY set, each delivered a
 // message under revoked authority with ZERO re-checks. The second is the worse
-// one: StreamServerInterceptor(nil, guardFor) read as "no method carries a
+// one: streamServerInterceptor(nil, guardFor) read as "no method carries a
 // capability", so the wiring was present and enforced nothing — and wiring
 // that is present is wiring nobody looks at again.
 func TestAnEmptyMethodSetGuardsNothingAndSoRefusesEverything(t *testing.T) {
 	authority := &revocableGuard{}
 	authority.revoked.Store(true)
 
-	connection := serveWith(t, StreamServerInterceptor(nil,
+	connection := serveWith(t, streamServerInterceptor(nil,
 		func(context.Context, *grpc.StreamServerInfo) (*workcontext.StreamGuard, error) {
 			return authority.guard(t), nil
 		}), func(stream grpc.ServerStream) error {
@@ -150,7 +150,7 @@ func TestACapabilityThatExpiresMidStreamTellsTheClientToMintAgain(t *testing.T) 
 	expired := fmt.Errorf("stream terminated: %w: expired at 2026-10-02T12:15:00Z",
 		workcontext.ErrInvalid)
 
-	connection := serveWith(t, StreamServerInterceptor([]string{streamMethod},
+	connection := serveWith(t, streamServerInterceptor([]string{streamMethod},
 		func(context.Context, *grpc.StreamServerInfo) (*workcontext.StreamGuard, error) {
 			// A guard whose re-check answers exactly what core's Verifier
 			// answers for a capability whose window has passed: ErrInvalid,
@@ -256,7 +256,7 @@ func TestEveryServedStreamIsEitherGuardedOrDeliberatelyNot(t *testing.T) {
 
 // THE VALIDATION IS MANDATORY, not merely available.
 //
-// StreamServerInterceptor plus ValidateMethodSet was correct and OPTIONAL, and
+// streamServerInterceptor plus ValidateMethodSet was correct and OPTIONAL, and
 // optional is the finding: the README recipe did not call the validation for
 // several revisions, so a consumer following it kept the fail-open the
 // validation exists to close. A safety check a caller may skip is a safety

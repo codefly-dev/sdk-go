@@ -188,8 +188,14 @@ and never asked.
 So `GuardedServerStream` keeps the stream private and forwards every interface
 method by hand, HOLDS headers and trailers until `Finish` re-checks and releases
 them, and owns the transport stream in the context it hands out.
-`StreamServerInterceptor` — not `Guard` — is the recipe, because it does the
-wrapping, the context and the `Finish`. Whether a method is guarded is a
+`GuardStreams` — not `Guard`, and not a bare interceptor — is the recipe,
+because it does the
+wrapping, the context and the `Finish`, and because its `Intercept` REFUSES
+EVERY STREAM until `Validate(server.GetServiceInfo(), …)` has passed. The
+interceptor constructor is unexported for that reason: exporting it beside the
+validation meant the correct wiring took two calls and only one was reachable
+from the type system, so a consumer could install the enforcement and skip the
+check — which the README recipe itself did for several revisions. Whether a method is guarded is a
 property of the METHOD and the first answer binds; a per-request `(nil, nil)` is
 the optional-carrier shape this module deleted.
 

@@ -241,7 +241,7 @@ func TestAFirstRequestWithoutACapabilityNeitherBypassesNorDisablesTheMethod(t *t
 	var asked int
 	var mu sync.Mutex
 	var handedRaw bool
-	interceptor := StreamServerInterceptor(
+	interceptor := streamServerInterceptor(
 		// DECLARED: this method carries a capability, whatever any one request
 		// looks like.
 		[]string{streamMethod},
@@ -434,7 +434,7 @@ func TestARecheckSourceFailureReachesTheClientAsUnavailable(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	connection := serveWith(t, StreamServerInterceptor(
+	connection := serveWith(t, streamServerInterceptor(
 		[]string{streamMethod},
 		func(context.Context, *grpc.StreamServerInfo) (*workcontext.StreamGuard, error) {
 			return guard, nil
