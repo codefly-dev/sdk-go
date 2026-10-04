@@ -748,7 +748,19 @@ func TestTheBaseRefIsTheDefaultBranchWhicheverEventRan(t *testing.T) {
 		t.Helper()
 		run := exec.Command("bash", "scripts/sweep-published-refs.sh")
 		run.Dir = clone
-		run.Env = append(sweepEnv(t), append([]string{"SWEEP_LIST_ONLY=1"}, environment...)...)
+		// EVERY VARIABLE THE SCRIPT READS IS CLEARED FIRST, then the case sets
+		// what it means. sweepEnv inherits os.Environ(), and an ambient
+		// SWEEP_BASE takes precedence in the script over GITHUB_BASE_REF — so
+		// a case that clears GITHUB_BASE_REF to model a push build would pass
+		// on an inherited SWEEP_BASE, concealing the exact fallback it exists
+		// to test. A reviewer caught that, and it is the "passes for the wrong
+		// reason" shape this whole file is about.
+		cleared := append(sweepEnv(t),
+			"SWEEP_LIST_ONLY=1",
+			"SWEEP_BASE=", "SWEEP_HEAD=",
+			"GITHUB_BASE_REF=", "GITHUB_HEAD_REF=", "GITHUB_REF_NAME=",
+		)
+		run.Env = append(cleared, environment...)
 		output, err := run.Output()
 		require.NoError(t, err, "%s", output)
 		var refs []string
