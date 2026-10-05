@@ -97,6 +97,7 @@ leaf context
 leaf crypto/sha256 workcontext/cache_partition.go
 leaf crypto/tls workcontext/mint.go
 leaf crypto/x509 workcontext/mint.go
+leaf encoding/asn1 workcontext/mint.go
 leaf encoding/base64 workcontext/cache_partition.go
 leaf encoding/binary
 leaf encoding/hex

@@ -2,11 +2,13 @@ package workcontext
 
 import (
 	"context"
+	"crypto"
 	"crypto/ed25519"
 	"crypto/rand"
 	"crypto/tls"
 	"crypto/x509"
 	"crypto/x509/pkix"
+	"encoding/asn1"
 	"errors"
 	"io"
 	"log"
@@ -91,6 +93,24 @@ func (ca *mintTestCA) certificate(t *testing.T, peers []string, configure ...fun
 	return &tls.Certificate{Certificate: [][]byte{der}, PrivateKey: key, Leaf: leaf}
 }
 
+// ExtraExtensions signs the URI bytes verbatim. Parsing peers before signing
+// would erase the trailing '#' that this fixture exists to exercise.
+func mintRawSAN(t *testing.T, peers []string) func(*x509.Certificate) {
+	t.Helper()
+	names := []asn1.RawValue{
+		{Class: asn1.ClassContextSpecific, Tag: 2, Bytes: []byte("mint.test.example")},
+		{Class: asn1.ClassContextSpecific, Tag: 7, Bytes: []byte{127, 0, 0, 1}},
+	}
+	for _, peer := range peers {
+		names = append(names, asn1.RawValue{Class: asn1.ClassContextSpecific, Tag: 6, Bytes: []byte(peer)})
+	}
+	der, err := asn1.Marshal(names)
+	require.NoError(t, err)
+	return func(leaf *x509.Certificate) {
+		leaf.ExtraExtensions = []pkix.Extension{{Id: asn1.ObjectIdentifier{2, 5, 29, 17}, Value: der}}
+	}
+}
+
 func newMintTLSServer(t *testing.T, handler http.Handler, ca *mintTestCA, configure ...func(*tls.Config)) *httptest.Server {
 	t.Helper()
 	server := &httptest.Server{Listener: newMintMemoryListener(t), Config: &http.Server{Handler: handler}}
@@ -149,7 +169,7 @@ func TestMintPeerAdmissionPrecedesAnyHTTPDisclosure(t *testing.T) {
 		"dot segment":                       {"spiffe://test.example/mint/./issuer"},
 		"parent segment":                    {"spiffe://test.example/mint/../issuer"},
 		"escaped segment":                   {"spiffe://test.example/mint/%69ssuer"},
-		"invalid trust domain":              {"spiffe://test_example/mint/issuer"},
+		"invalid trust domain":              {"spiffe://test+example/mint/issuer"},
 		"multiple SPIFFE IDs":               {testMintPeer, "spiffe://test.example/workload/other"},
 		"matching second SPIFFE ID":         {"spiffe://test.example/workload/other", testMintPeer},
 		"duplicate SPIFFE IDs":              {testMintPeer, testMintPeer},
@@ -171,6 +191,79 @@ func TestMintPeerAdmissionPrecedesAnyHTTPDisclosure(t *testing.T) {
 			require.ErrorIs(t, err, ErrMintPeerNotAdmitted)
 		})
 	}
+}
+
+func TestMintRawURISANAdmission(t *testing.T) {
+	for name, fixture := range map[string]struct {
+		peers    []string
+		accepted bool
+	}{
+		"valid":                  {[]string{testMintPeer}, true},
+		"empty fragment":         {[]string{testMintPeer + "#"}, false},
+		"fragment":               {[]string{testMintPeer + "#part"}, false},
+		"empty query":            {[]string{testMintPeer + "?"}, false},
+		"query":                  {[]string{testMintPeer + "?key=value"}, false},
+		"percent escape":         {[]string{"spiffe://test.example/mint/%69ssuer"}, false},
+		"no URI":                 {nil, false},
+		"two identical URIs":     {[]string{testMintPeer, testMintPeer}, false},
+		"valid beside lossy URI": {[]string{testMintPeer, testMintPeer + "#"}, false},
+	} {
+		t.Run(name, func(t *testing.T) {
+			host := newMintHost(t, func() time.Time { return testClock })
+			certificate := host.tlsCA.certificate(t, nil, mintRawSAN(t, fixture.peers))
+			for _, hostname := range []string{"127.0.0.1", "mint.test.example"} {
+				_, err := certificate.Leaf.Verify(x509.VerifyOptions{Roots: host.tlsCA.pool, DNSName: hostname})
+				require.NoError(t, err, "the raw SAN fixture must verify independently of admission")
+			}
+			if name == "empty fragment" {
+				require.Len(t, certificate.Leaf.URIs, 1)
+				require.Equal(t, testMintPeer, certificate.Leaf.URIs[0].String(), "prove x509 lost the forbidden delimiter")
+			}
+			config := host.tlsConfig.Load().Clone()
+			config.Certificates = []tls.Certificate{*certificate}
+			host.tlsConfig.Store(config)
+			client := newTestMintClient(t, host, projectedFile(t, "secret-projection"), host.now)
+			_, err := client.Credential(t.Context())
+			if fixture.accepted {
+				require.NoError(t, err)
+				require.Equal(t, "Bearer secret-projection", (<-host.arrivals).authorization)
+				return
+			}
+			requireNoMintDisclosure(t, host, 0)
+			requireMintRetryable(t, client, err)
+			require.ErrorIs(t, err, ErrMintPeerNotAdmitted)
+		})
+	}
+}
+
+func TestMintRawSANRequiresCompleteGeneralNames(t *testing.T) {
+	validURI := asn1.RawValue{Class: asn1.ClassContextSpecific, Tag: 6, Bytes: []byte(testMintPeer)}
+	valid, err := asn1.Marshal([]asn1.RawValue{validURI})
+	require.NoError(t, err)
+	compoundURI := validURI
+	compoundURI.IsCompound = true
+	compound, err := asn1.Marshal([]asn1.RawValue{compoundURI})
+	require.NoError(t, err)
+	wrongClassURI := validURI
+	wrongClassURI.Class = asn1.ClassApplication
+	wrongClass, err := asn1.Marshal([]asn1.RawValue{wrongClassURI})
+	require.NoError(t, err)
+	for name, raw := range map[string][]byte{
+		"truncated sequence": valid[:len(valid)-1],
+		"trailing data":      append(append([]byte{}, valid...), 0),
+		"compound URI":       compound,
+		"wrong class":        wrongClass,
+	} {
+		t.Run(name, func(t *testing.T) {
+			state := tls.ConnectionState{PeerCertificates: []*x509.Certificate{{
+				Extensions: []pkix.Extension{{Id: asn1.ObjectIdentifier{2, 5, 29, 17}, Value: raw}},
+			}}}
+			_, ok := mintPeerURI(state)
+			require.False(t, ok, "only a complete GeneralNames sequence with one primitive URI supplies an identity")
+		})
+	}
+	_, ok := mintPeerURI(tls.ConnectionState{})
+	require.False(t, ok)
 }
 
 func TestMintPeerWithdrawalAppliesToTheNextMint(t *testing.T) {
@@ -351,11 +444,17 @@ func TestMintCanonicalSPIFFEAdmission(t *testing.T) {
 		{testMintPeer, "SPIFFE://TEST.Example/mint/issuer"},
 		{"SPIFFE://TEST.Example/mint/issuer", testMintPeer},
 		{"spiffe://Test.Example/mint/issuer", "SpIfFe://TEST.EXAMPLE/mint/issuer"},
+		{"spiffe://test_domain.example/mint/issuer", "SPIFFE://TEST_DOMAIN.EXAMPLE/mint/issuer"},
+		{"SPIFFE://TEST_DOMAIN.EXAMPLE/mint/issuer", "spiffe://test_domain.example/mint/issuer"},
+		{"spiffe://test_example/mint/issuer", "spiffe://test_example/mint/issuer"},
+		{"spiffe://example.org/workload", "spiffe://example.org/workload"},
+		{"spiffe://example.com/workload", "spiffe://example.com/workload"},
+		{"spiffe://prod-1.example/work_load.v2", "spiffe://prod-1.example/work_load.v2"},
 	} {
 		t.Run(spelling.leaf+" against "+spelling.admitted, func(t *testing.T) {
 			host := newMintHost(t, func() time.Time { return testClock })
 			config := host.tlsConfig.Load().Clone()
-			config.Certificates = []tls.Certificate{*host.tlsCA.certificate(t, []string{spelling.leaf})}
+			config.Certificates = []tls.Certificate{*host.tlsCA.certificate(t, nil, mintRawSAN(t, []string{spelling.leaf}))}
 			host.tlsConfig.Store(config)
 			client := newTestMintClient(t, host, projectedFile(t, "projected"), host.now, func(options *MintOptions) {
 				options.AdmittedPeers = func() ([]string, error) { return []string{spelling.admitted}, nil }
@@ -372,7 +471,9 @@ func TestMintRejectsMalformedAdmittedIdentitiesAtHandshake(t *testing.T) {
 		"", "https://test.example/mint/issuer", "spiffe:test.example/mint", "/mint/issuer",
 		"spiffe:///mint", "spiffe://test.example", "spiffe://test.example///",
 		"spiffe://test.example//mint/issuer", "spiffe://test.example/mint//issuer", testMintPeer + "/",
-		"spiffe://test_example/mint/issuer", "spiffe://test.K/mint/issuer",
+		"spiffe://test+example/mint/issuer", "spiffe://test.K/mint/issuer",
+		"spiffe://.test.example/mint/issuer", "spiffe://test..example/mint/issuer", "spiffe://test.example./mint/issuer",
+		"spiffe://" + strings.Repeat("a", 256) + "/mint/issuer",
 		"spiffe://user@test.example/mint", "spiffe://test.example:443/mint",
 		"spiffe://test.example/mint?query", "spiffe://test.example/mint?",
 		"spiffe://test.example/mint#fragment", "spiffe://test.example/mint#",
@@ -490,8 +591,25 @@ func mintGoroutineStackContains(function string) bool {
 	return strings.Contains(string(stack[:n]), function)
 }
 
+// A source can return an arbitrary signer. Public works in the Sign case, so
+// the stall happens in TLS 1.3's actual CertificateVerify signing operation.
+type mintBlockingSigner struct {
+	crypto.Signer
+	block func(string)
+}
+
+func (s mintBlockingSigner) Public() crypto.PublicKey {
+	s.block("signer Public")
+	return s.Signer.Public()
+}
+
+func (s mintBlockingSigner) Sign(random io.Reader, digest []byte, options crypto.SignerOpts) ([]byte, error) {
+	s.block("signer Sign")
+	return s.Signer.Sign(random, digest, options)
+}
+
 func TestMintTransportSourceReadsAreBoundedAndRecover(t *testing.T) {
-	for _, stage := range []string{"anchor", "peers", "certificate", "post-handshake anchor", "post-handshake peers"} {
+	for _, stage := range []string{"anchor", "peers", "certificate", "signer Public", "signer Sign", "post-handshake anchor", "post-handshake peers"} {
 		t.Run(stage, func(t *testing.T) {
 			source := strings.TrimPrefix(stage, "post-handshake ")
 			blockAt := uint64(1)
@@ -501,6 +619,9 @@ func TestMintTransportSourceReadsAreBoundedAndRecover(t *testing.T) {
 			var sourceReads atomic.Uint64
 			clock := &movableClock{at: testClock}
 			host := newMintHost(t, clock.now)
+			certificate := *host.clientCertificate
+			key, ok := certificate.PrivateKey.(crypto.Signer)
+			require.True(t, ok)
 			closed := mintConnectionClosures(host)
 			entered := make(chan struct{}, 16)
 			release := make(chan struct{})
@@ -517,12 +638,13 @@ func TestMintTransportSourceReadsAreBoundedAndRecover(t *testing.T) {
 					<-release
 				}
 			}
+			certificate.PrivateKey = mintBlockingSigner{Signer: key, block: read}
 			const timeout = 500 * time.Millisecond
 			client := newTestMintClient(t, host, projectedFile(t, "secret-projection"), clock.now, func(options *MintOptions) {
 				options.RequestTimeout = timeout
 				options.TrustAnchor = func() (*x509.CertPool, error) { read("anchor"); return host.tlsCA.pool, nil }
 				options.AdmittedPeers = func() ([]string, error) { read("peers"); return testMintPeers() }
-				options.ClientCertificate = func() (*tls.Certificate, error) { read("certificate"); return host.clientCertificate, nil }
+				options.ClientCertificate = func() (*tls.Certificate, error) { read("certificate"); return &certificate, nil }
 			})
 			done := make(chan error, 1)
 			started := time.Now()
@@ -700,4 +822,124 @@ func TestMintTransportSourcesHonorTheRequestContext(t *testing.T) {
 			requireNoMintDisclosure(t, host, 0)
 		})
 	}
+}
+
+func TestMintTransportSlotIsReleasedOnlyByItsWorker(t *testing.T) {
+	var reading atomic.Bool
+	var calls atomic.Uint64
+	for range 2 {
+		entered, release, finished := make(chan struct{}), make(chan struct{}), make(chan struct{})
+		var once sync.Once
+		unblock := func() { once.Do(func() { close(release) }) }
+		t.Cleanup(unblock)
+		ctx, cancel := context.WithCancel(t.Context())
+		done := make(chan error, 1)
+		go func() {
+			_, err := readMintSource(ctx, &reading, func() (int, error) {
+				calls.Add(1)
+				close(entered)
+				<-release
+				close(finished)
+				return 1, nil
+			})
+			done <- err
+		}()
+		select {
+		case <-entered:
+		case <-time.After(time.Second):
+			t.Fatal("the released slot was not available to the next worker")
+		}
+		cancel()
+		select {
+		case err := <-done:
+			require.ErrorIs(t, err, context.Canceled)
+		case <-time.After(time.Second):
+			t.Fatal("cancellation did not bound the wait")
+		}
+		require.True(t, reading.Load(), "the canceled waiter must not release its live worker's slot")
+		before := calls.Load()
+		_, err := readMintSource(t.Context(), &reading, func() (int, error) { calls.Add(1); return 2, nil })
+		require.ErrorIs(t, err, ErrMintUnavailable)
+		require.Equal(t, before, calls.Load(), "only one callback may run, including after a previous slot release")
+		unblock()
+		select {
+		case <-finished:
+		case <-time.After(time.Second):
+			t.Fatal("the released callback did not return")
+		}
+		require.Eventually(t, func() bool { return !reading.Load() }, time.Second, time.Millisecond,
+			"the worker must release its slot exactly once after returning")
+	}
+	require.EqualValues(t, 2, calls.Load())
+}
+
+func TestMintSourceValueDiscardsCanceledReads(t *testing.T) {
+	for _, cancellation := range []string{"before", "during"} {
+		t.Run(cancellation, func(t *testing.T) {
+			ctx, cancel := context.WithCancel(t.Context())
+			defer cancel()
+			if cancellation == "before" {
+				cancel()
+			}
+			calls := 0
+			value, err := mintSourceValue(ctx, func() (string, error) {
+				calls++
+				cancel()
+				return "late projection", nil
+			})
+			require.ErrorIs(t, err, context.Canceled)
+			require.Empty(t, value, "late projections must not reach TLS signing or another source")
+			if cancellation == "before" {
+				require.Zero(t, calls, "a canceled worker must not start another source")
+			} else {
+				require.Equal(t, 1, calls)
+			}
+		})
+	}
+}
+
+// This exercises the documented consistency limit, not an atomic-snapshot
+// guarantee: an anchor may be withdrawn while the later peer read is waiting.
+func TestMintSourceFreshnessWindowIncludesLaterCallbacks(t *testing.T) {
+	clock := &movableClock{at: testClock}
+	host := newMintHost(t, clock.now)
+	var roots atomic.Pointer[x509.CertPool]
+	roots.Store(host.tlsCA.pool)
+	var anchorReads, peerReads atomic.Uint64
+	entered, release := make(chan struct{}), make(chan struct{})
+	var once sync.Once
+	unblock := func() { once.Do(func() { close(release) }) }
+	defer unblock()
+	client := newTestMintClient(t, host, projectedFile(t, "projected"), clock.now, func(options *MintOptions) {
+		options.TrustAnchor = func() (*x509.CertPool, error) { anchorReads.Add(1); return roots.Load(), nil }
+		options.AdmittedPeers = func() ([]string, error) {
+			if peerReads.Add(1) == 2 {
+				close(entered)
+				<-release
+			}
+			return testMintPeers()
+		}
+	})
+	done := make(chan error, 1)
+	go func() { _, err := client.mintOnce(t.Context()); done <- err }()
+	select {
+	case <-entered:
+	case <-time.After(time.Second):
+		t.Fatal("the second peer read did not start")
+	}
+	require.EqualValues(t, 2, anchorReads.Load(), "the second anchor has already been sampled")
+	requireNoMintDisclosure(t, host, 0)
+	roots.Store(newMintTestCA(t).pool)
+	unblock()
+	select {
+	case err := <-done:
+		require.NoError(t, err, "independent sources cannot observe a withdrawal after their own sampling")
+	case <-time.After(time.Second):
+		t.Fatal("the peer read did not finish")
+	}
+	require.Equal(t, "Bearer projected", (<-host.arrivals).authorization)
+	_, err := client.mintOnce(t.Context())
+	requireMintRetryable(t, client, err)
+	require.ErrorContains(t, err, "certificate did not verify")
+	requireNoMintDisclosure(t, host, 1)
 }

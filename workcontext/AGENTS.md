@@ -83,6 +83,9 @@ qualifier, because the qualifier is the author's choice.
   *named* `mintResponse`. Types resolve package-qualified (`basev0.WorkScopeV1`,
   not `WorkScopeV1` from anywhere), in the scope of the use, before the use, and
   an ambiguous identifier is refused rather than guessed.
+  `encoding/asn1` is limited to `mint.go` decoding SAN GeneralNames into
+  `[]asn1.RawValue`; it cannot encode or decode any capability. This standard
+  library import adds no module dependency and preserves the signed URI bytes.
 - **No function-local type, and no second local name for core's types outside
   `core.go`** — alias or defined type, through a pointer or a slice, and a local
   name is CHASED to what it names. Either one hands a type-name allowlist
@@ -250,25 +253,34 @@ chain verification. After the handshake, the dialer re-reads roots and peers,
 re-verifies the certificate chains and hostname, and repeats admission before
 returning the connection to HTTP.
 
-The leaf must contain exactly one URI SAN. Both leaf and admitted SPIFFE IDs
-are validated before comparison; only scheme and trust-domain case are ignored.
-The trust domain uses ASCII letters, digits, dots and hyphens, and paths compare
-byte-for-byte. Empty segments, trailing slashes, dot segments, userinfo, ports,
-queries, fragments and percent-escapes are refused rather than normalized.
+The leaf must contain exactly one URI SAN, read from the signed extension's
+original bytes: serializing x509's parsed URL loses an empty fragment delimiter.
+Both leaf and admitted SPIFFE IDs are validated before comparison; only scheme
+and trust-domain case are ignored. The trust domain uses ASCII letters, digits,
+dots, hyphens and underscores, with no empty labels; paths compare byte-for-byte.
+Empty segments, trailing slashes, dot segments, userinfo, ports, queries,
+fragments and percent-escapes are refused rather than normalized.
 
 Every mint, renewal and refresh dials fresh: TLS 1.3 minimum, no connection or
 TLS session reuse, no compression, proxy or redirect. HTTP/1.1 prevents
 multiplexing across admission decisions. Withdrawal during the handshake is
-caught by the post-handshake check. The remaining window is between that check
-and the transport's first write; withdrawal then cannot retract an in-flight
-request.
+caught by the post-handshake check. Each source value's residual freshness
+interval starts when it is sampled and ends at the transport's first HTTP
+write. Rechecking shortens this to the re-read-to-write window, including later
+source waits: the second peer callback may block after the second anchor was
+sampled. Independent sources are not a coordinated snapshot; stronger
+consistency requires a shared snapshot/version check. Withdrawal in this
+interval cannot retract an in-flight request.
 
 Every source wait is bounded by the dial and request contexts, including
 post-handshake reads. Cancellation closes the raw connection while a callback
-is blocked. Like `projectedToken`, all three transport sources share one
-outstanding read slot per client across retries. A callback without a context
-cannot be interrupted; later attempts refuse immediately until it returns,
-its late answer is discarded, and its worker exits. Recovery reads fresh data.
+or private-key operation is blocked. Like `projectedToken`, all three transport
+sources and the TLS operations they trigger share one outstanding worker slot
+per client across retries, held through both handshake phases. Arbitrary
+callbacks and signers cannot be interrupted; cancellation bounds the wait and
+closes the socket, but only the worker's return releases its slot. Later
+attempts refuse immediately until then; late answers are discarded and the
+worker exits. Recovery reads fresh data. TLS alone performs signing.
 
 A missing source is `ErrInvalid` at construction. A malformed admitted entry
 is `ErrInvalid` at the handshake, even alongside a valid entry. Unreadable or

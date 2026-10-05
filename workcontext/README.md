@@ -298,10 +298,13 @@ resumption, compression, proxy or followed redirect. HTTP/1.1 keeps requests
 on separate connections without HTTP/2 multiplexing. Callers cannot supply an
 HTTP client or reach its transport.
 
-The leaf must carry **exactly one URI SAN**, a valid admitted SPIFFE ID.
+The leaf must carry **exactly one URI SAN**, a valid admitted SPIFFE ID. The
+SDK validates its original bytes from the signed SAN extension: Go's parsed
+URL loses an empty fragment delimiter, so serializing that URL is unsafe here.
 IDs must have the form `spiffe://<trust-domain>/<path>`; the trust domain uses
-ASCII letters, digits, dots and hyphens. Scheme and trust-domain case are
-ignored, but paths are compared **byte-for-byte**. Empty segments, trailing
+ASCII letters, digits, dots, hyphens and underscores, with no empty labels.
+Scheme and trust-domain case are ignored, but paths are compared
+**byte-for-byte**. Empty segments, trailing
 slashes, dot segments, userinfo, ports, queries, fragments and percent-escapes
 are refused, never normalized into admitted identities. Any malformed admitted
 entry is `ErrInvalid`, checked at the handshake even alongside a valid entry.
@@ -315,16 +318,23 @@ These failures never latch and deliver no HTTP headers or body, including
 the projected token in `Authorization`.
 
 Source waits honor the dial and request contexts. Cancellation closes the raw
-connection even if a source is blocked. The three transport sources share
-**one outstanding read per client**: retries refuse immediately while it is
-occupied. A callback taking no context cannot itself be interrupted; its one
-worker retains the slot until it returns, discards a late answer and exits.
-Subsequent attempts read fresh values and can recover.
+connection even if a source or private-key operation is blocked. The three
+transport sources and the TLS operations they trigger share **one outstanding
+worker per client**, retaining its slot through the entire handshake and
+post-handshake checks. Retries refuse immediately while it is occupied. An
+arbitrary callback or signer cannot itself be interrupted; cancellation bounds
+the wait, and the slot is released only when the worker returns. Late answers
+are discarded. Subsequent attempts read fresh values and can recover.
 
 A root or peer withdrawal during the handshake is caught by the
-post-handshake check. The remaining window is between that check and the
-transport's first write; withdrawal in that window cannot retract an in-flight
-request. Every new mint, renewal and refresh repeats both checks. Tests capture
+post-handshake check. Each source value's residual freshness interval begins
+when that value is sampled and ends at the transport's first HTTP write. The
+recheck shortens it to the **re-read-to-write window**, including later source
+waits: the second anchor is sampled before the second peer callback, which may
+block while that anchor is withdrawn. Independent sources do not provide a
+coordinated snapshot; stronger consistency requires a shared snapshot/version
+check. Withdrawal in this interval cannot retract an in-flight request.
+Every new mint, renewal and refresh repeats both checks. Tests capture
 HTTP disclosure at the server, withdraw peers and rotate roots inside the
 handshake, and verify deadlines, connection closure, bounded reads and recovery.
 
