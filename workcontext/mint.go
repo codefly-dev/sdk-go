@@ -869,8 +869,9 @@ func validateMintPeer(raw string) (string, error) {
 	// character rule, which permits it: the platform issues no such trust
 	// domain, and Go's X.509 parser refuses a SAN host spelled that way, so an
 	// admitted entry with one could never match a certificate this transport
-	// verifies. Refusing it at the entry says so at configuration time instead
-	// of at the first handshake.
+	// verifies. Refusing it as an entry — judged at the handshake, where the
+	// sources are read — names the misconfiguration rather than letting it
+	// stand as an admitted identity nothing can ever present.
 	for _, label := range strings.Split(domain, ".") {
 		if label == "" {
 			return "", fmt.Errorf("invalid mint SPIFFE ID %q: empty trust-domain label (not a trust domain this platform issues)", raw)
