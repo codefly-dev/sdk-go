@@ -865,9 +865,15 @@ func validateMintPeer(raw string) (string, error) {
 	if !mintSPIFFECharacters(identity.Host) || len(domain) > 255 {
 		return "", fmt.Errorf("invalid mint SPIFFE ID %q: trust domain and path are required", raw)
 	}
+	// An empty label ("test..example") is a deliberate refusal beyond SPIFFE's
+	// character rule, which permits it: the platform issues no such trust
+	// domain, and Go's X.509 parser refuses a SAN host spelled that way, so an
+	// admitted entry with one could never match a certificate this transport
+	// verifies. Refusing it at the entry says so at configuration time instead
+	// of at the first handshake.
 	for _, label := range strings.Split(domain, ".") {
 		if label == "" {
-			return "", fmt.Errorf("invalid mint SPIFFE ID %q: empty trust-domain label", raw)
+			return "", fmt.Errorf("invalid mint SPIFFE ID %q: empty trust-domain label (not a trust domain this platform issues)", raw)
 		}
 	}
 	for _, segment := range segments {
