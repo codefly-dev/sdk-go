@@ -902,54 +902,43 @@ root:
 ./scripts/check-one-implementation.sh
 ```
 
-### This module merges on a pseudo-version, deliberately
+### This module pins core `v0.9.0`, and is itself consumed at a main commit
 
-`workcontext/go.mod` pins **`v0.7.2-0.20261003161926-4051e4383635`** — core at
-`4051e438` — and not a release tag, because there is no tag to move to and will
-not be one before this merges. Core's `version/info.codefly.yaml` already says
-`0.8.0`, but its `version-tag.yml` cuts the tag from the **merge commit** of
-core#692 and core never tags by hand; core#692 is still open on two owner
-decisions. The latest published core tag is `v0.7.1`, dated 2026-09-30.
+`workcontext/go.mod` pins **`v0.9.0`** — a release tag, cut from the merge commit
+of core#692, which is the change that made the capability sealed and gave this
+module `Inspect`, `Verifier.Recheck`, `SealSource` and the conformance kit.
 
-**What `v0.7.1` does and does not carry**, because the imprecise version of this
-("no released core has the Work Context") is both wrong and misleading — it
-invites the answer "then nothing is worse off by waiting". Measured against the
-tag, not inferred:
+**Two earlier tags are a trap worth naming.** Core's `main` cut `v0.8.0` and
+`v0.8.1` from its own release commits while core#692 sat unmerged, so neither
+carries it. They are not missing `workcontext` — the package is there at its
+pre-#692 revision, which is worse than absence: pinning `v0.8.0` compiles
+nothing this module uses and fails on `Seal`, `SealSource`, `OperationBinding`
+and `ErrNotACoreToken`, so the failure reads like a bad pin rather than a stale
+one. If you are bisecting core versions under this module, `v0.9.0` is the
+floor.
 
-| At `v0.7.1` | |
-| --- | --- |
-| present | `Authority.Start`, `Verifier.Verify`, `Verified`, `Grant`, `replay.go`, `scope.go` — an **unsealed** mint and verify |
-| absent | `Seal` and `SealSource`, so no installation, epoch or build binding and no revocation through the seal |
-| absent | `Inspect` — the structural entrypoint this module reads every capability through |
-| absent | `Verifier.Recheck` — the non-consuming re-check the stream guard is built on |
-| absent | `Authenticator` — the verify-only entrypoint |
-| absent | `MaxTTLCeiling` — `v0.7.1` has the unbounded-lifetime behaviour this module measured and refused to trust |
-| absent | **the whole `workcontext/conformance` directory** — the kit this module's suite runs, and the import gate that proves it did not reimplement core |
+**This module itself has no tags**, and that is the pseudo-version that matters
+to a consumer now. `github.com/codefly-dev/sdk-go/workcontext` has never been
+released, so `go get` resolves a pseudo-version of a **main commit** — a pin:
+reproducible, hash-recorded in `go.sum`, and not a release line. Two
+consequences:
 
-So the accurate statement is: **there is no released core carrying the sealed
-capability, the conformance kit, or either verification entrypoint as they now
-stand.** A consumer that needs only unsealed mint-and-verify has `v0.7.1` and is
-not blocked. A consumer that owes an import gate — which is every consumer of
-this contract — has nothing tagged to run it against.
+- **`go get -u` will not move you off it**, and nothing warns you. The pin is
+  the version.
+- **Think before cutting a stable consumer release on it.** Pinning this module
+  at a main commit is fine for integration; publishing something stable on top
+  of an unreleased module means owning that choice deliberately.
 
-A pseudo-version is a *pin*, not a workaround: it is reproducible for anyone who
-checks the branch out, and `go.sum` records the hashes. What it is not is a
-release line, which matters for a consumer in two ways:
+**The retraction in `workcontext/go.mod` waits on the same thing.** It retracts
+every pseudo-version of this module published before the second implementation
+was deleted, and a `retract` directive takes effect only once a version carrying
+it is itself released. Until this module is tagged, that retraction is a
+statement of intent in the file rather than something `go get` enforces.
 
-- **`go get -u` will not move you off it**, and nothing will warn you. The pin
-  is the version.
-- **Do not cut a consumer release whose only Work Context dependency is this
-  pseudo-version** unless you accept the same unreleased dependency. Pinning
-  this module from a branch is fine for integration; publishing it as stable is
-  the thing to hold.
-
-Core will say when `v0.8.0` lands. The follow-up is a one-line `go get` and a
-`go mod tidy` in this module, and it is **not** a merge precondition for this
-pull request: holding a finished change behind somebody else's release is how a
-branch rots, and the pin names an exact commit either way.
-
-What the tag will add is nothing functional — `67ee7220` is the content — so
-re-pinning is bookkeeping, not an upgrade.
+Whether a `workcontext/vX.Y.Z` tag is cut, and when, is a **release-process
+decision for whoever owns releases here** — not something this module does by
+hand, and not something to infer from this file. What is recorded here is only
+what a consumer needs in order to know what they are pinning.
 
 ## The wire
 
