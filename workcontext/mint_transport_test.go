@@ -1,6 +1,7 @@
 package workcontext
 
 import (
+	"context"
 	"crypto/ed25519"
 	"crypto/rand"
 	"crypto/tls"
@@ -14,6 +15,9 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"runtime"
+	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -134,10 +138,22 @@ func requireMintRetryable(t *testing.T, client *MintClient, err error) {
 
 func TestMintPeerAdmissionPrecedesAnyHTTPDisclosure(t *testing.T) {
 	for name, identities := range map[string][]string{
-		"same root, different workload": {"spiffe://test.example/workload/other"},
-		"path case is significant":      {"spiffe://test.example/mint/Issuer"},
-		"no URI SAN":                    nil,
-		"non SPIFFE URI SAN":            {"https://test.example/mint/issuer"},
+		"same root, different workload":     {"spiffe://test.example/workload/other"},
+		"path case is significant":          {"spiffe://test.example/mint/Issuer"},
+		"no URI SAN":                        nil,
+		"non SPIFFE URI SAN":                {"https://test.example/mint/issuer"},
+		"empty first segment":               {"spiffe://test.example//mint/issuer"},
+		"empty middle segment":              {"spiffe://test.example/mint//issuer"},
+		"trailing slash":                    {testMintPeer + "/"},
+		"empty segments and trailing slash": {"spiffe://test.example//mint/issuer/"},
+		"dot segment":                       {"spiffe://test.example/mint/./issuer"},
+		"parent segment":                    {"spiffe://test.example/mint/../issuer"},
+		"escaped segment":                   {"spiffe://test.example/mint/%69ssuer"},
+		"invalid trust domain":              {"spiffe://test_example/mint/issuer"},
+		"multiple SPIFFE IDs":               {testMintPeer, "spiffe://test.example/workload/other"},
+		"matching second SPIFFE ID":         {"spiffe://test.example/workload/other", testMintPeer},
+		"duplicate SPIFFE IDs":              {testMintPeer, testMintPeer},
+		"extra non SPIFFE URI":              {testMintPeer, "https://test.example/mint/issuer"},
 	} {
 		t.Run(name, func(t *testing.T) {
 			host := newMintHost(t, func() time.Time { return testClock })
@@ -217,7 +233,7 @@ func TestMintAnchorRotationAppliesToTheNextMint(t *testing.T) {
 	_, err = client.Credential(t.Context())
 	require.NoError(t, err)
 	require.EqualValues(t, 2, host.requests.Load())
-	require.EqualValues(t, 3, reads.Load(), "each attempt must read the current anchor")
+	require.EqualValues(t, 5, reads.Load(), "successful handshakes re-read the anchor; the rejected handshake reads it once")
 }
 
 func TestMintTransportSourcesFailClosedAndRecover(t *testing.T) {
@@ -332,9 +348,9 @@ func TestMintPresentsTheCurrentClientCertificateWithoutConnectionReuse(t *testin
 
 func TestMintCanonicalSPIFFEAdmission(t *testing.T) {
 	for _, spelling := range []struct{ leaf, admitted string }{
-		{testMintPeer, "SPIFFE://TEST.Example//mint///issuer/"},
-		{"SPIFFE://TEST.Example//mint///issuer/", testMintPeer},
-		{"spiffe://Test.Example/mint//issuer/", "SpIfFe://TEST.EXAMPLE//mint/issuer///"},
+		{testMintPeer, "SPIFFE://TEST.Example/mint/issuer"},
+		{"SPIFFE://TEST.Example/mint/issuer", testMintPeer},
+		{"spiffe://Test.Example/mint/issuer", "SpIfFe://TEST.EXAMPLE/mint/issuer"},
 	} {
 		t.Run(spelling.leaf+" against "+spelling.admitted, func(t *testing.T) {
 			host := newMintHost(t, func() time.Time { return testClock })
@@ -351,12 +367,12 @@ func TestMintCanonicalSPIFFEAdmission(t *testing.T) {
 	}
 }
 
-func TestMintRejectsMalformedAdmittedIdentitiesAtConstruction(t *testing.T) {
-	host := newMintHost(t, func() time.Time { return testClock })
-	valid := newTestMintClient(t, host, projectedFile(t, "projected"), host.now).options
+func TestMintRejectsMalformedAdmittedIdentitiesAtHandshake(t *testing.T) {
 	for _, identity := range []string{
 		"", "https://test.example/mint/issuer", "spiffe:test.example/mint", "/mint/issuer",
 		"spiffe:///mint", "spiffe://test.example", "spiffe://test.example///",
+		"spiffe://test.example//mint/issuer", "spiffe://test.example/mint//issuer", testMintPeer + "/",
+		"spiffe://test_example/mint/issuer", "spiffe://test.K/mint/issuer",
 		"spiffe://user@test.example/mint", "spiffe://test.example:443/mint",
 		"spiffe://test.example/mint?query", "spiffe://test.example/mint?",
 		"spiffe://test.example/mint#fragment", "spiffe://test.example/mint#",
@@ -366,14 +382,16 @@ func TestMintRejectsMalformedAdmittedIdentitiesAtConstruction(t *testing.T) {
 		"spiffe://test.example/mint/%zz", "spiffe://[::1]/mint",
 	} {
 		t.Run(identity, func(t *testing.T) {
-			options := valid
-			options.AdmittedPeers = func() ([]string, error) { return []string{testMintPeer, identity}, nil }
-			_, err := NewMintClient(options)
+			host := newMintHost(t, func() time.Time { return testClock })
+			client := newTestMintClient(t, host, projectedFile(t, "projected"), host.now, func(options *MintOptions) {
+				options.AdmittedPeers = func() ([]string, error) { return []string{testMintPeer, identity}, nil }
+			})
+			_, err := client.Credential(t.Context())
 			require.ErrorIs(t, err, ErrInvalid, "one valid entry must not hide a malformed one")
-			require.NotErrorIs(t, err, ErrMintRefused)
+			requireMintRetryable(t, client, err)
+			requireNoMintDisclosure(t, host, 0)
 		})
 	}
-	requireNoMintDisclosure(t, host, 0)
 }
 
 func TestMintUnavailablePeersAtConstructionAreRetriedAtTheHandshake(t *testing.T) {
@@ -423,8 +441,263 @@ func TestMintTransportKeepsTLSVerificationAndMutualAuthentication(t *testing.T) 
 			requireNoMintDisclosure(t, host, 0)
 			requireMintRetryable(t, client, err)
 			if refusal != "no client certificate request" {
-				require.EqualValues(t, 1, peerReads.Load(), "only construction reads peers before chain verification succeeds")
+				require.Zero(t, peerReads.Load(), "peers must not be read before chain verification succeeds")
 			}
+		})
+	}
+}
+
+func TestNewMintClientReadsNoSources(t *testing.T) {
+	host := newMintHost(t, func() time.Time { return testClock })
+	options := newTestMintClient(t, host, projectedFile(t, "projected"), host.now).options
+	release := make(chan struct{})
+	defer close(release)
+	var reads atomic.Uint64
+	block := func() { reads.Add(1); <-release }
+	options.TrustAnchor = func() (*x509.CertPool, error) { block(); return host.tlsCA.pool, nil }
+	options.ClientCertificate = func() (*tls.Certificate, error) { block(); return host.clientCertificate, nil }
+	options.AdmittedPeers = func() ([]string, error) { block(); return testMintPeers() }
+	done := make(chan error, 1)
+	go func() { _, err := NewMintClient(options); done <- err }()
+	select {
+	case err := <-done:
+		require.NoError(t, err)
+	case <-time.After(time.Second):
+		t.Fatal("construction blocked on a source")
+	}
+	require.Zero(t, reads.Load(), "construction must not even start a source read")
+	requireNoMintDisclosure(t, host, 0)
+}
+
+// Preserve httptest's connection bookkeeping while observing server-side closes.
+func mintConnectionClosures(host *mintHost) <-chan net.Conn {
+	closed := make(chan net.Conn, 16)
+	previous := host.server.Config.ConnState
+	host.server.Config.ConnState = func(connection net.Conn, state http.ConnState) {
+		if previous != nil {
+			previous(connection, state)
+		}
+		if state == http.StateClosed {
+			closed <- connection
+		}
+	}
+	return closed
+}
+
+func mintGoroutineStackContains(function string) bool {
+	stack := make([]byte, 1024*1024)
+	n := runtime.Stack(stack, true)
+	return strings.Contains(string(stack[:n]), function)
+}
+
+func TestMintTransportSourceReadsAreBoundedAndRecover(t *testing.T) {
+	for _, stage := range []string{"anchor", "peers", "certificate", "post-handshake anchor", "post-handshake peers"} {
+		t.Run(stage, func(t *testing.T) {
+			source := strings.TrimPrefix(stage, "post-handshake ")
+			blockAt := uint64(1)
+			if source != stage {
+				blockAt = 2
+			}
+			var sourceReads atomic.Uint64
+			clock := &movableClock{at: testClock}
+			host := newMintHost(t, clock.now)
+			closed := mintConnectionClosures(host)
+			entered := make(chan struct{}, 16)
+			release := make(chan struct{})
+			var once sync.Once
+			unblock := func() { once.Do(func() { close(release) }) }
+			defer unblock()
+			var blocking atomic.Bool
+			blocking.Store(true)
+			var reads atomic.Uint64
+			read := func(name string) {
+				reads.Add(1)
+				if name == source && sourceReads.Add(1) >= blockAt && blocking.Load() {
+					entered <- struct{}{}
+					<-release
+				}
+			}
+			const timeout = 500 * time.Millisecond
+			client := newTestMintClient(t, host, projectedFile(t, "secret-projection"), clock.now, func(options *MintOptions) {
+				options.RequestTimeout = timeout
+				options.TrustAnchor = func() (*x509.CertPool, error) { read("anchor"); return host.tlsCA.pool, nil }
+				options.AdmittedPeers = func() ([]string, error) { read("peers"); return testMintPeers() }
+				options.ClientCertificate = func() (*tls.Certificate, error) { read("certificate"); return host.clientCertificate, nil }
+			})
+			done := make(chan error, 1)
+			started := time.Now()
+			go func() { _, err := client.Credential(t.Context()); done <- err }()
+			select {
+			case <-entered:
+			case <-time.After(2 * time.Second):
+				t.Fatal("the handshake never reached the blocked source")
+			}
+			initialReads := reads.Load()
+			refuseAttempt := func() {
+				t.Helper()
+				began := time.Now()
+				// Exercise a separate transport attempt while Credential's
+				// detached single-flight request may still be waiting.
+				_, err := client.mintOnce(t.Context())
+				requireMintRetryable(t, client, err)
+				require.ErrorContains(t, err, "source read is still outstanding")
+				require.Less(t, time.Since(began), timeout/2, "a second attempt must refuse immediately")
+				require.Equal(t, initialReads, reads.Load(), "all sources share one outstanding read slot")
+			}
+			refuseAttempt()
+			select {
+			case err := <-done:
+				requireMintRetryable(t, client, err)
+				require.ErrorIs(t, err, context.DeadlineExceeded)
+			case <-time.After(timeout + 250*time.Millisecond):
+				t.Fatal("the request outlived its deadline while a source was blocked")
+			}
+			require.Less(t, time.Since(started), timeout+250*time.Millisecond)
+			for range 2 {
+				select {
+				case <-closed:
+				case <-time.After(250 * time.Millisecond):
+					t.Fatal("the server did not see the raw connection close before the source was released")
+				}
+			}
+			require.Eventually(t, func() bool {
+				return !mintGoroutineStackContains(".mintHTTPClient.func")
+			}, 250*time.Millisecond, time.Millisecond, "the dial goroutine must exit while the source is still blocked")
+			for range 3 {
+				refuseAttempt()
+			}
+			requireNoMintDisclosure(t, host, 0)
+			blocking.Store(false)
+			unblock()
+			require.Eventually(t, func() bool {
+				return !mintGoroutineStackContains(".readMintSource[")
+			}, time.Second, time.Millisecond, "no source worker may survive release")
+			clock.set(clock.now().Add(2 * time.Second))
+			_, err := client.Credential(t.Context())
+			require.NoError(t, err, "a later attempt must read fresh sources and recover")
+			require.Greater(t, reads.Load(), initialReads)
+			require.EqualValues(t, 1, host.requests.Load())
+			require.Equal(t, "Bearer secret-projection", (<-host.arrivals).authorization)
+		})
+	}
+}
+
+func TestMintWithdrawalDuringHandshakePreventsHTTPDisclosure(t *testing.T) {
+	for _, withdrawal := range []string{"peers", "anchor"} {
+		t.Run(withdrawal, func(t *testing.T) {
+			clock := &movableClock{at: testClock}
+			host := newMintHost(t, clock.now)
+			closed := mintConnectionClosures(host)
+			replacement := newMintTestCA(t)
+			var roots atomic.Pointer[x509.CertPool]
+			roots.Store(host.tlsCA.pool)
+			var peers atomic.Value
+			peers.Store([]string{testMintPeer})
+			var anchorReads, peerReads atomic.Uint64
+			entered, release := make(chan struct{}), make(chan struct{})
+			var once sync.Once
+			unblock := func() { once.Do(func() { close(release) }) }
+			defer unblock()
+			var withdraw atomic.Bool
+			withdraw.Store(true)
+			client := newTestMintClient(t, host, projectedFile(t, "secret-projection"), clock.now, func(options *MintOptions) {
+				options.TrustAnchor = func() (*x509.CertPool, error) { anchorReads.Add(1); return roots.Load(), nil }
+				options.AdmittedPeers = func() ([]string, error) { peerReads.Add(1); return peers.Load().([]string), nil }
+				options.ClientCertificate = func() (*tls.Certificate, error) {
+					if withdraw.CompareAndSwap(true, false) {
+						close(entered)
+						<-release
+						if withdrawal == "peers" {
+							peers.Store([]string{"spiffe://test.example/mint/replacement"})
+						} else {
+							roots.Store(replacement.pool)
+						}
+					}
+					return host.clientCertificate, nil
+				}
+			})
+			done := make(chan error, 1)
+			go func() { _, err := client.Credential(t.Context()); done <- err }()
+			select {
+			case <-entered:
+			case <-time.After(time.Second):
+				t.Fatal("the handshake never reached the client-certificate barrier")
+			}
+			require.EqualValues(t, 1, anchorReads.Load())
+			require.EqualValues(t, 1, peerReads.Load(), "initial admission must precede the withdrawal")
+			requireNoMintDisclosure(t, host, 0)
+			unblock()
+			select {
+			case err := <-done:
+				requireMintRetryable(t, client, err)
+				if withdrawal == "peers" {
+					require.ErrorIs(t, err, ErrMintPeerNotAdmitted)
+				} else {
+					require.ErrorContains(t, err, "certificate did not verify")
+					require.NotErrorIs(t, err, ErrMintPeerNotAdmitted)
+				}
+			case <-time.After(time.Second):
+				t.Fatal("post-handshake withdrawal did not finish")
+			}
+			select {
+			case <-closed:
+			case <-time.After(time.Second):
+				t.Fatal("the refused connection was not closed")
+			}
+			requireNoMintDisclosure(t, host, 0)
+			roots.Store(host.tlsCA.pool)
+			peers.Store([]string{testMintPeer})
+			clock.set(clock.now().Add(2 * time.Second))
+			_, err := client.Credential(t.Context())
+			require.NoError(t, err)
+			require.Equal(t, "Bearer secret-projection", (<-host.arrivals).authorization)
+		})
+	}
+}
+
+func TestMintTransportSourcesHonorTheRequestContext(t *testing.T) {
+	for _, cancellation := range []string{"deadline", "cancel"} {
+		t.Run(cancellation, func(t *testing.T) {
+			host := newMintHost(t, func() time.Time { return testClock })
+			closed := mintConnectionClosures(host)
+			entered, release := make(chan struct{}), make(chan struct{})
+			defer close(release)
+			client := newTestMintClient(t, host, projectedFile(t, "projected"), host.now, func(options *MintOptions) {
+				options.RequestTimeout = 5 * time.Second
+				options.TrustAnchor = func() (*x509.CertPool, error) {
+					close(entered)
+					<-release
+					return host.tlsCA.pool, nil
+				}
+			})
+			// The request has less time left than the dialer's configured cap.
+			ctx, cancel := context.WithTimeout(t.Context(), 500*time.Millisecond)
+			defer cancel()
+			done := make(chan error, 1)
+			go func() { _, err := client.mintOnce(ctx); done <- err }()
+			select {
+			case <-entered:
+			case <-time.After(time.Second):
+				t.Fatal("the anchor read never started")
+			}
+			expected := context.DeadlineExceeded
+			if cancellation == "cancel" {
+				expected = context.Canceled
+				cancel()
+			}
+			select {
+			case err := <-done:
+				requireMintRetryable(t, client, err)
+				require.ErrorIs(t, err, expected)
+			case <-time.After(time.Second):
+				t.Fatal("the mint ignored request cancellation")
+			}
+			select {
+			case <-closed:
+			case <-time.After(250 * time.Millisecond):
+				t.Fatal("the detached HTTP dial retained its raw connection after request cancellation")
+			}
+			requireNoMintDisclosure(t, host, 0)
 		})
 	}
 }

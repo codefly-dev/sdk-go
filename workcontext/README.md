@@ -283,38 +283,50 @@ so plaintext is a disclosure the configuration must not be able to choose.
 
 **The SDK owns the mint transport.** Callers provide `TrustAnchor`,
 `ClientCertificate` and `AdmittedPeers` sources; all three functions are
-required. `NewMintClient` returns `ErrInvalid` for a missing source or a
-malformed currently readable admitted identity. Unreadable or empty peer
-projections are retryable at the handshake, and construction never caches them.
+required. `NewMintClient` returns `ErrInvalid` for a missing source and reads
+no sources. Every source answer is validated during dialing.
 
 Every mint, renewal and refresh opens a **new TLS 1.3 connection**. The SDK
 reads the current anchor for the handshake, presents the workload's current
 X.509-SVID through `GetClientCertificate`, and reads the current admitted peer
 set in `VerifyConnection`, **after Go has verified the chain and hostname**.
-The endpoint must request a client certificate. There is no system-root
-fallback, connection reuse, TLS session resumption, compression, proxy or
-followed redirect. HTTP/1.1 keeps requests on separate connections without
-HTTP/2 multiplexing. Callers cannot supply an HTTP client or reach its transport;
-only the SDK's private TLS dialer installs the per-handshake roots.
+After the handshake, it reads the anchor and peers again, re-verifies the
+certificate chains and hostname against those roots, and repeats admission
+before handing the connection to HTTP. The endpoint must request a client
+certificate. There is no system-root fallback, connection reuse, TLS session
+resumption, compression, proxy or followed redirect. HTTP/1.1 keeps requests
+on separate connections without HTTP/2 multiplexing. Callers cannot supply an
+HTTP client or reach its transport.
 
-Admission compares the leaf certificate's URI SANs with the admitted SPIFFE
-IDs. Both sides are canonicalized by lower-casing the scheme and trust domain
-and removing empty path segments, including trailing slashes; path case stays
-significant. IDs must have the form `spiffe://<trust-domain>/<path>`. Userinfo,
-ports, query strings, fragments, escapes and dot segments are refused.
+The leaf must carry **exactly one URI SAN**, a valid admitted SPIFFE ID.
+IDs must have the form `spiffe://<trust-domain>/<path>`; the trust domain uses
+ASCII letters, digits, dots and hyphens. Scheme and trust-domain case are
+ignored, but paths are compared **byte-for-byte**. Empty segments, trailing
+slashes, dot segments, userinfo, ports, queries, fragments and percent-escapes
+are refused, never normalized into admitted identities. Any malformed admitted
+entry is `ErrInvalid`, checked at the handshake even alongside a valid entry.
 
 An unreadable anchor or client certificate, nil anchor, empty or unreadable
-peer set, invalid live peer identity, or failed TLS verification refuses the
-request with **`ErrMintUnavailable`**. A verified leaf with no admitted SPIFFE
+peer set, invalid admitted identity, or failed TLS verification refuses the
+request with **`ErrMintUnavailable`** (also wrapping `ErrInvalid` for malformed
+admitted identities). A leaf with an invalid, ambiguous or unadmitted SPIFFE
 ID also wraps **`ErrMintPeerNotAdmitted`**, available through `errors.Is`.
-These failures are retryable and deliver no HTTP headers or body, including
+These failures never latch and deliver no HTTP headers or body, including
 the projected token in `Authorization`.
 
-A root or peer withdrawal takes effect on the **next mint request**. The
-handshake-to-write window remains (normally microseconds, subject to
-scheduling); no token leaves before `VerifyConnection` returns. Tests capture
-requests at the server, rotate roots and client certificates, withdraw a
-same-root peer, and require recovery after source failures.
+Source waits honor the dial and request contexts. Cancellation closes the raw
+connection even if a source is blocked. The three transport sources share
+**one outstanding read per client**: retries refuse immediately while it is
+occupied. A callback taking no context cannot itself be interrupted; its one
+worker retains the slot until it returns, discards a late answer and exits.
+Subsequent attempts read fresh values and can recover.
+
+A root or peer withdrawal during the handshake is caught by the
+post-handshake check. The remaining window is between that check and the
+transport's first write; withdrawal in that window cannot retract an in-flight
+request. Every new mint, renewal and refresh repeats both checks. Tests capture
+HTTP disclosure at the server, withdraw peers and rotate roots inside the
+handshake, and verify deadlines, connection closure, bounded reads and recovery.
 
 Then, on every outbound request:
 

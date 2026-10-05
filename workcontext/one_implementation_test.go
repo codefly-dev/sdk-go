@@ -221,6 +221,8 @@ var narrowedImports = map[string]struct {
 		// importing ed25519.
 		symbols: []string{
 			"CertPool", "NewCertPool", "SystemCertPool",
+			// Recheck the mint peer's certificate against post-handshake roots.
+			"VerifyOptions",
 			"UnknownAuthorityError", "HostnameError", "CertificateInvalidError",
 		},
 	},

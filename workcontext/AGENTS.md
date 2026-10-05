@@ -241,29 +241,41 @@ that are easy to get backwards:
 ## The mint transport admits the peer before disclosing the projection
 
 `MintOptions` requires three sources: `TrustAnchor`, `ClientCertificate` and
-`AdmittedPeers`. The SDK owns its HTTP client and transport; a caller can
-supply neither. The private TLS dialer reads the current anchor for each
-handshake with normal chain and hostname verification enabled, and
-`GetClientCertificate` reads the workload's current X.509-SVID. The endpoint
-must request the client certificate. `VerifyConnection` reads the admitted
-SPIFFE IDs only after chain verification, then compares them against the
-leaf's URI SANs. Both sides lower-case the scheme and trust domain and remove
-empty path segments and trailing slashes; path case is significant. Anything
-outside `spiffe://<trust-domain>/<path>` is refused, including userinfo, ports,
-queries, fragments, escapes and dot segments.
+`AdmittedPeers`. Construction checks configuration without calling any source.
+The SDK owns its HTTP client and transport; a caller can supply neither. The
+private TLS dialer reads the current anchor for normal chain and hostname
+verification. `GetClientCertificate` reads the workload's current X.509-SVID;
+the endpoint must request it. `VerifyConnection` reads admitted peers after
+chain verification. After the handshake, the dialer re-reads roots and peers,
+re-verifies the certificate chains and hostname, and repeats admission before
+returning the connection to HTTP.
+
+The leaf must contain exactly one URI SAN. Both leaf and admitted SPIFFE IDs
+are validated before comparison; only scheme and trust-domain case are ignored.
+The trust domain uses ASCII letters, digits, dots and hyphens, and paths compare
+byte-for-byte. Empty segments, trailing slashes, dot segments, userinfo, ports,
+queries, fragments and percent-escapes are refused rather than normalized.
 
 Every mint, renewal and refresh dials fresh: TLS 1.3 minimum, no connection or
 TLS session reuse, no compression, proxy or redirect. HTTP/1.1 prevents
-multiplexing across admission decisions. A withdrawal takes effect on the next
-request. The handshake-to-write window remains, normally microseconds subject
-to scheduling; no HTTP headers or body leave before `VerifyConnection` returns.
+multiplexing across admission decisions. Withdrawal during the handshake is
+caught by the post-handshake check. The remaining window is between that check
+and the transport's first write; withdrawal then cannot retract an in-flight
+request.
 
-A missing source or malformed currently readable admitted identity is
-`ErrInvalid` at construction. Unavailable projections are enforced at the
-handshake so a client can recover: unreadable or nil anchors, unreadable or
-empty certificates, empty or unreadable peer sets, malformed live peer IDs and
-TLS verification failures return `ErrMintUnavailable`. A verified leaf without
-an admitted SPIFFE ID additionally wraps `ErrMintPeerNotAdmitted`. These errors
-never latch. `mint_transport_test.go` captures server-side authorization
-headers, tests withdrawal and rotation across requests, proves client
-certificate presentation, and requires recovery after source failures.
+Every source wait is bounded by the dial and request contexts, including
+post-handshake reads. Cancellation closes the raw connection while a callback
+is blocked. Like `projectedToken`, all three transport sources share one
+outstanding read slot per client across retries. A callback without a context
+cannot be interrupted; later attempts refuse immediately until it returns,
+its late answer is discarded, and its worker exits. Recovery reads fresh data.
+
+A missing source is `ErrInvalid` at construction. A malformed admitted entry
+is `ErrInvalid` at the handshake, even alongside a valid entry. Unreadable or
+nil anchors, unreadable or empty certificates, empty or unreadable peer sets,
+malformed admitted IDs and TLS failures return `ErrMintUnavailable`; malformed
+admitted IDs also retain `ErrInvalid`. Invalid, ambiguous or unadmitted leaf
+identities additionally wrap `ErrMintPeerNotAdmitted`. These errors never latch.
+`mint_transport_test.go` requires no HTTP disclosure on refusal, withdrawal and
+rotation inside the handshake, bounded source reads and connection closure on
+cancellation, and recovery after release or corrected projections.

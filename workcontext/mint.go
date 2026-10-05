@@ -228,8 +228,8 @@ type MintOptions struct {
 	ProjectionAudience string
 
 	// TrustAnchor reads the roots that may sign the mint endpoint's
-	// certificate. Required; called for every handshake, never cached. An
-	// error or nil pool refuses the connection without using system roots.
+	// certificate. Required; called before and after every handshake, never
+	// cached. An error or nil pool refuses the connection without system roots.
 	// Returned pools must not be mutated while a handshake uses them.
 	TrustAnchor func() (*x509.CertPool, error)
 
@@ -239,10 +239,11 @@ type MintOptions struct {
 	ClientCertificate func() (*tls.Certificate, error)
 
 	// AdmittedPeers reads the SPIFFE IDs the mint endpoint may present in its
-	// leaf's URI SANs. Required; read at construction to validate available
-	// identities and again after chain verification on every handshake.
-	// Scheme and trust domain are lower-cased and empty path segments removed
-	// before exact matching. Only spiffe://<trust-domain>/<path> is accepted.
+	// single URI SAN. Required; read after chain verification during the handshake
+	// and checked again after the handshake with freshly read roots and peers.
+	// IDs are validated before comparison: only scheme and trust-domain case
+	// are ignored, and the path is compared byte-for-byte without normalization.
+	// Only spiffe://<trust-domain>/<path> is accepted.
 	// An error, empty set or unadmitted peer refuses the connection.
 	AdmittedPeers func() ([]string, error)
 
@@ -452,8 +453,8 @@ type MintClient struct {
 // client that issued it.
 var mintClientIDs atomic.Uint64
 
-// NewMintClient validates configuration and currently readable peer identities.
-// It makes no network request; every transport source is read at the handshake.
+// NewMintClient validates configuration without reading any source or making a
+// network request. Source answers are validated at the handshake.
 func NewMintClient(options MintOptions) (*MintClient, error) {
 	endpoint, err := validateMintURL(options.URL)
 	if err != nil {
@@ -492,14 +493,6 @@ func NewMintClient(options MintOptions) (*MintClient, error) {
 	}
 	if options.AdmittedPeers == nil {
 		return nil, fmt.Errorf("%w: no admitted peer source for the mint endpoint", ErrInvalid)
-	}
-	// A malformed identity is configuration misuse. A temporarily unreadable
-	// or empty source is enforced at the handshake, so the client can retry
-	// when the projection becomes available. No construction-time set is kept.
-	if peers, readErr := options.AdmittedPeers(); readErr == nil {
-		if _, peerErr := canonicalMintPeers(peers); peerErr != nil {
-			return nil, fmt.Errorf("%w: admitted mint peers: %v", ErrInvalid, peerErr)
-		}
 	}
 	timeout := options.RequestTimeout
 	if timeout == 0 {
@@ -555,37 +548,20 @@ func NewMintClient(options MintOptions) (*MintClient, error) {
 // client or a reachable Transport. Each request makes a fresh TLS 1.3 handshake
 // under the current anchor, workload certificate and admitted peers, so a
 // withdrawal takes effect on the next request, including renewal and refresh.
-// The handshake-to-write window is the residual (normally microseconds, subject
-// to scheduling): no token or other HTTP bytes leave before VerifyConnection
-// returns. A new handshake, not a pooled connection, performs re-verification.
+// After the handshake, the peer is checked again against freshly read anchors
+// and admitted peers before the connection reaches the transport. The remaining
+// window is between this post-handshake check and the transport's first write;
+// withdrawal in that window cannot retract an in-flight request.
 func mintHTTPClient(options MintOptions) *http.Client {
+	// All transport projections share one slot, including across retries.
+	var reading atomic.Bool
 	config := &tls.Config{
 		MinVersion: tls.VersionTLS13,
 		// HTTP/1.1 keeps each mint on its own connection, with no HTTP/2
 		// multiplexing across admission decisions. A nil ClientSessionCache
-		// also requires full verification instead of TLS session resumption.
-		NextProtos: []string{"http/1.1"},
-		VerifyConnection: func(state tls.ConnectionState) error {
-			// crypto/tls verifies the chain and hostname before this callback.
-			peers, err := options.AdmittedPeers()
-			if err != nil {
-				return fmt.Errorf("%w: read admitted mint peers: %w", ErrMintUnavailable, err)
-			}
-			if len(peers) == 0 {
-				return fmt.Errorf("%w: no admitted mint peers", ErrMintUnavailable)
-			}
-			admitted, err := canonicalMintPeers(peers)
-			if err != nil {
-				return fmt.Errorf("%w: admitted mint peers: %w", ErrMintUnavailable, err)
-			}
-			for _, identity := range state.PeerCertificates[0].URIs {
-				peer, peerErr := canonicalMintPeer(identity.String())
-				if peerErr == nil && slices.Contains(admitted, peer) {
-					return nil
-				}
-			}
-			return fmt.Errorf("%w: %w", ErrMintUnavailable, ErrMintPeerNotAdmitted)
-		},
+		// requires full verification instead of TLS session resumption.
+		NextProtos:       []string{"http/1.1"},
+		VerifyConnection: mintPeerVerifier(context.Background(), &reading, options.AdmittedPeers),
 	}
 	transport := &http.Transport{
 		TLSClientConfig:     config,
@@ -601,12 +577,29 @@ func mintHTTPClient(options MintOptions) *http.Client {
 	transport.DialTLSContext = func(ctx context.Context, network, address string) (net.Conn, error) {
 		// Transport's TLSHandshakeTimeout does not apply to a custom TLS
 		// dialer, so this context bounds both the dial and handshake.
-		ctx, cancel := context.WithTimeout(ctx, maxMintRequestTimeout)
+		timeout := options.RequestTimeout
+		if timeout == 0 {
+			timeout = defaultMintRequestTimeout
+		}
+		ctx, cancel := context.WithTimeout(ctx, timeout)
 		defer cancel()
+		// net/http detaches dial cancellation from the request for connection
+		// reuse. This transport never reuses a connection, so retain the mint
+		// request's cancellation and remaining budget through its context value.
+		if requestCtx, ok := ctx.Value(mintRequestContextKey{}).(context.Context); ok {
+			stop := context.AfterFunc(requestCtx, cancel)
+			defer stop()
+			if err := requestCtx.Err(); err != nil {
+				return nil, fmt.Errorf("%w: %w", ErrMintUnavailable, err)
+			}
+		}
 		connection, err := transport.DialContext(ctx, network, address)
 		if err != nil {
 			return nil, err
 		}
+		// Close the raw connection even while a projection callback is blocked.
+		stopClose := context.AfterFunc(ctx, func() { _ = connection.Close() })
+		defer stopClose()
 		accepted := false
 		defer func() {
 			if !accepted {
@@ -615,12 +608,9 @@ func mintHTTPClient(options MintOptions) *http.Client {
 		}()
 		// Read after connecting so a slow dial cannot retain an old anchor
 		// while the platform rotates it. Each handshake gets its own config.
-		roots, err := options.TrustAnchor()
+		roots, err := mintTrustAnchor(ctx, &reading, options.TrustAnchor)
 		if err != nil {
-			return nil, fmt.Errorf("%w: read mint trust anchor: %w", ErrMintUnavailable, err)
-		}
-		if roots == nil {
-			return nil, fmt.Errorf("%w: mint trust anchor is nil", ErrMintUnavailable)
+			return nil, err
 		}
 		hostname, _, err := net.SplitHostPort(address)
 		if err != nil {
@@ -629,9 +619,10 @@ func mintHTTPClient(options MintOptions) *http.Client {
 		handshake := config.Clone()
 		handshake.RootCAs = roots
 		handshake.ServerName = hostname
+		handshake.VerifyConnection = mintPeerVerifier(ctx, &reading, options.AdmittedPeers)
 		presented := false
 		handshake.GetClientCertificate = func(*tls.CertificateRequestInfo) (*tls.Certificate, error) {
-			certificate, certErr := options.ClientCertificate()
+			certificate, certErr := readMintSource(ctx, &reading, options.ClientCertificate)
 			if certErr != nil {
 				return nil, fmt.Errorf("%w: read mint client certificate: %w", ErrMintUnavailable, certErr)
 			}
@@ -642,11 +633,36 @@ func mintHTTPClient(options MintOptions) *http.Client {
 			return certificate, nil
 		}
 		secured := tls.Client(connection, handshake)
-		if err := secured.HandshakeContext(ctx); err != nil {
-			return nil, err
+		if handshakeErr := secured.HandshakeContext(ctx); handshakeErr != nil {
+			return nil, handshakeErr
 		}
 		if !presented {
 			return nil, fmt.Errorf("%w: mint endpoint did not request the client certificate", ErrMintUnavailable)
+		}
+		// GetClientCertificate and server handshake processing follow the
+		// initial admission decision. Re-read both projections after they finish
+		// so a withdrawal during the handshake cannot authorize an HTTP write.
+		state := secured.ConnectionState()
+		roots, err = mintTrustAnchor(ctx, &reading, options.TrustAnchor)
+		if err != nil {
+			return nil, err
+		}
+		intermediates := x509.NewCertPool()
+		for _, chain := range state.VerifiedChains {
+			for _, certificate := range chain[1:] {
+				intermediates.AddCert(certificate)
+			}
+		}
+		if _, err := state.PeerCertificates[0].Verify(x509.VerifyOptions{
+			Roots: roots, Intermediates: intermediates, DNSName: hostname,
+		}); err != nil {
+			return nil, err
+		}
+		if err := handshake.VerifyConnection(state); err != nil {
+			return nil, err
+		}
+		if err := ctx.Err(); err != nil {
+			return nil, fmt.Errorf("%w: %w", ErrMintUnavailable, err)
 		}
 		accepted = true
 		return secured, nil
@@ -654,22 +670,96 @@ func mintHTTPClient(options MintOptions) *http.Client {
 	return &http.Client{CheckRedirect: refuseMintRedirect, Transport: transport}
 }
 
-func canonicalMintPeers(peers []string) ([]string, error) {
-	canonical := make([]string, 0, len(peers))
-	for _, peer := range peers {
-		identity, err := canonicalMintPeer(peer)
-		if err != nil {
-			return nil, err
-		}
-		canonical = append(canonical, identity)
-	}
-	return canonical, nil
+// mintRequestContextKey preserves cancellation through net/http's detached dial.
+type mintRequestContextKey struct{}
+
+type mintSourceResult[T any] struct {
+	value T
+	err   error
 }
 
-// canonicalMintPeer normalizes only the spellings admission treats as equal.
-// Escapes, dot segments, ports, userinfo, queries and fragments cannot turn a
-// different URI into an admitted workload identity. Path case remains exact.
-func canonicalMintPeer(raw string) (string, error) {
+// readMintSource bounds the wait by the dial context and outstanding callbacks
+// by one per client, like projectedToken. A callback without a context cannot be
+// interrupted: its slot stays occupied until it returns, and later attempts
+// fail immediately instead of accumulating readers. Late answers are discarded.
+func readMintSource[T any](ctx context.Context, reading *atomic.Bool, source func() (T, error)) (T, error) {
+	var zero T
+	if err := ctx.Err(); err != nil {
+		return zero, fmt.Errorf("%w: %w", ErrMintUnavailable, err)
+	}
+	if !reading.CompareAndSwap(false, true) {
+		return zero, fmt.Errorf("%w: a mint transport source read is still outstanding", ErrMintUnavailable)
+	}
+	done := make(chan mintSourceResult[T], 1)
+	go func() {
+		value, err := source()
+		reading.Store(false)
+		done <- mintSourceResult[T]{value: value, err: err}
+	}()
+	select {
+	case answer := <-done:
+		if err := ctx.Err(); err != nil {
+			return zero, fmt.Errorf("%w: %w", ErrMintUnavailable, err)
+		}
+		return answer.value, answer.err
+	case <-ctx.Done():
+		return zero, fmt.Errorf("%w: mint transport source deadline: %w", ErrMintUnavailable, ctx.Err())
+	}
+}
+
+func mintTrustAnchor(ctx context.Context, reading *atomic.Bool, source func() (*x509.CertPool, error)) (*x509.CertPool, error) {
+	roots, err := readMintSource(ctx, reading, source)
+	if err != nil {
+		return nil, fmt.Errorf("%w: read mint trust anchor: %w", ErrMintUnavailable, err)
+	}
+	if roots == nil {
+		return nil, fmt.Errorf("%w: mint trust anchor is nil", ErrMintUnavailable)
+	}
+	return roots, nil
+}
+
+func mintPeerVerifier(ctx context.Context, reading *atomic.Bool, source func() ([]string, error)) func(tls.ConnectionState) error {
+	return func(state tls.ConnectionState) error {
+		// crypto/tls verifies the chain and hostname before this callback.
+		peers, err := readMintSource(ctx, reading, source)
+		if err != nil {
+			return fmt.Errorf("%w: read admitted mint peers: %w", ErrMintUnavailable, err)
+		}
+		if len(peers) == 0 {
+			return fmt.Errorf("%w: no admitted mint peers", ErrMintUnavailable)
+		}
+		admitted, err := validateMintPeers(peers)
+		if err != nil {
+			return fmt.Errorf("%w: admitted mint peers: %w", ErrMintUnavailable, err)
+		}
+		// An X.509-SVID has exactly one URI SAN. A matching identity beside
+		// another URI must not authorize an ambiguous workload certificate.
+		if len(state.PeerCertificates) > 0 && len(state.PeerCertificates[0].URIs) == 1 {
+			peer, peerErr := validateMintPeer(state.PeerCertificates[0].URIs[0].String())
+			if peerErr == nil && slices.Contains(admitted, peer) {
+				return nil
+			}
+		}
+		return fmt.Errorf("%w: %w", ErrMintUnavailable, ErrMintPeerNotAdmitted)
+	}
+}
+
+func validateMintPeers(peers []string) ([]string, error) {
+	validated := make([]string, 0, len(peers))
+	for _, peer := range peers {
+		identity, err := validateMintPeer(peer)
+		if err != nil {
+			return nil, fmt.Errorf("%w: %w", ErrInvalid, err)
+		}
+		validated = append(validated, identity)
+	}
+	return validated, nil
+}
+
+// validateMintPeer validates an identity before folding scheme and trust-domain
+// case. The path is preserved exactly: empty or dot segments and trailing slashes
+// are invalid identities, never alternate spellings of an admitted workload.
+func validateMintPeer(raw string) (string, error) {
 	identity, err := url.Parse(raw)
 	if err != nil || !strings.EqualFold(identity.Scheme, "spiffe") || identity.Opaque != "" ||
 		identity.Host == "" || identity.User != nil || identity.RawQuery != "" ||
@@ -677,8 +767,8 @@ func canonicalMintPeer(raw string) (string, error) {
 		return "", fmt.Errorf("invalid mint SPIFFE ID %q: expected spiffe://<trust-domain>/<path>", raw)
 	}
 	domain := strings.ToLower(identity.Host)
-	segments := strings.FieldsFunc(identity.Path, func(r rune) bool { return r == '/' })
-	if !mintSPIFFECharacters(domain) || len(domain) > 255 || len(segments) == 0 {
+	segments := strings.Split(identity.Path[1:], "/")
+	if !mintSPIFFECharacters(identity.Host) || strings.Contains(domain, "_") || len(domain) > 255 {
 		return "", fmt.Errorf("invalid mint SPIFFE ID %q: trust domain and path are required", raw)
 	}
 	for _, segment := range segments {
@@ -686,7 +776,7 @@ func canonicalMintPeer(raw string) (string, error) {
 			return "", fmt.Errorf("invalid mint SPIFFE ID %q: invalid path segment", raw)
 		}
 	}
-	return "spiffe://" + domain + "/" + strings.Join(segments, "/"), nil
+	return "spiffe://" + domain + identity.Path, nil
 }
 
 func mintSPIFFECharacters(value string) bool {
@@ -1396,6 +1486,7 @@ func (c *MintClient) mintLocked(ctx context.Context, audience string) (Credentia
 	}
 	requestContext, cancel := context.WithTimeout(ctx, c.options.RequestTimeout)
 	defer cancel()
+	requestContext = context.WithValue(requestContext, mintRequestContextKey{}, requestContext)
 	request, err := http.NewRequestWithContext(
 		requestContext, http.MethodPost, c.options.URL, bytes.NewReader(body),
 	)
