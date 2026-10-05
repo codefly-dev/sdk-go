@@ -229,6 +229,8 @@ var narrowedImports = map[string]struct {
 			"CertPool", "NewCertPool", "SystemCertPool",
 			// Recheck the mint peer's certificate against post-handshake roots.
 			"VerifyOptions",
+			// Inspect the parsed TLS leaf's SVID purpose; no key or codec operations.
+			"Certificate", "KeyUsageDigitalSignature", "KeyUsageCertSign", "KeyUsageCRLSign", "ExtKeyUsageServerAuth",
 			"UnknownAuthorityError", "HostnameError", "CertificateInvalidError",
 		},
 	},

@@ -253,6 +253,13 @@ chain verification. After the handshake, the dialer re-reads roots and peers,
 re-verifies the certificate chains and hostname, and repeats admission before
 returning the connection to HTTP.
 
+Before reading admission, check the parsed leaf's X.509-SVID server purpose:
+IsCA must be false; KeyUsage must include digitalSignature and exclude
+keyCertSign and cRLSign. If the EKU extension is present, it must explicitly
+include serverAuth, even if empty or carrying anyExtendedKeyUsage. Ordinary
+Go verification alone does not enforce these restrictions. An absent EKU is
+allowed. Both admission passes use the same leaf-purpose check.
+
 The leaf must contain exactly one URI SAN, read from the signed extension's
 original bytes: serializing x509's parsed URL loses an empty fragment delimiter.
 Both leaf and admitted SPIFFE IDs are validated before comparison; only scheme
@@ -279,15 +286,17 @@ sources and the TLS operations they trigger share one outstanding worker slot
 per client across retries, held through both handshake phases. Arbitrary
 callbacks and signers cannot be interrupted; cancellation bounds the wait and
 closes the socket, but only the worker's return releases its slot. Later
-attempts refuse immediately until then; late answers are discarded and the
-worker exits. Recovery reads fresh data. TLS alone performs signing.
+attempts check the slot before dialing and refuse without a connection attempt
+until then; late answers are discarded and the worker exits. Recovery reads
+fresh data. TLS alone performs signing.
 
 A missing source is `ErrInvalid` at construction. A malformed admitted entry
 is `ErrInvalid` at the handshake, even alongside a valid entry. Unreadable or
 nil anchors, unreadable or empty certificates, empty or unreadable peer sets,
 malformed admitted IDs and TLS failures return `ErrMintUnavailable`; malformed
-admitted IDs also retain `ErrInvalid`. Invalid, ambiguous or unadmitted leaf
-identities additionally wrap `ErrMintPeerNotAdmitted`. These errors never latch.
+admitted IDs also retain `ErrInvalid`. Invalid leaf purposes and invalid,
+ambiguous or unadmitted leaf identities additionally wrap
+`ErrMintPeerNotAdmitted`. These errors never latch.
 `mint_transport_test.go` requires no HTTP disclosure on refusal, withdrawal and
 rotation inside the handshake, bounded source reads and connection closure on
 cancellation, and recovery after release or corrected projections.

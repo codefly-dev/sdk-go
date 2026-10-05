@@ -102,8 +102,8 @@ var (
 	ErrMintUnavailable = errors.New("Codefly credential mint unavailable")
 
 	// ErrMintPeerNotAdmitted means the verified endpoint's leaf certificate
-	// carries no currently admitted SPIFFE ID. It is wrapped by
-	// ErrMintUnavailable: admission can change before the next attempt.
+	// has an invalid SVID server purpose or no currently admitted SPIFFE ID.
+	// It is wrapped by ErrMintUnavailable: rotation or admission can recover.
 	ErrMintPeerNotAdmitted = errors.New("Codefly mint peer not admitted")
 )
 
@@ -600,6 +600,12 @@ func mintHTTPClient(options MintOptions) *http.Client {
 				return nil, fmt.Errorf("%w: %w", ErrMintUnavailable, err)
 			}
 		}
+		// Refuse an occupied worker before an unreachable endpoint can consume
+		// another connection attempt and its timeout. readMintSource still
+		// atomically claims the slot: simultaneous dials can race this check.
+		if reading.Load() {
+			return nil, fmt.Errorf("%w: a mint transport source read is still outstanding", ErrMintUnavailable)
+		}
 		connection, err := transport.DialContext(ctx, network, address)
 		if err != nil {
 			return nil, err
@@ -757,6 +763,9 @@ func mintTrustAnchor(ctx context.Context, source func() (*x509.CertPool, error))
 func mintPeerVerifier(ctx context.Context, source func() ([]string, error)) func(tls.ConnectionState) error {
 	return func(state tls.ConnectionState) error {
 		// crypto/tls verifies the chain and hostname before this callback.
+		if len(state.PeerCertificates) == 0 || !mintPeerHasServerPurpose(state.PeerCertificates[0]) {
+			return fmt.Errorf("%w: %w", ErrMintUnavailable, ErrMintPeerNotAdmitted)
+		}
 		peers, err := mintSourceValue(ctx, source)
 		if err != nil {
 			return fmt.Errorf("%w: read admitted mint peers: %w", ErrMintUnavailable, err)
@@ -776,6 +785,25 @@ func mintPeerVerifier(ctx context.Context, source func() ([]string, error)) func
 		}
 		return fmt.Errorf("%w: %w", ErrMintUnavailable, ErrMintPeerNotAdmitted)
 	}
+}
+
+// mintPeerHasServerPurpose enforces the X.509-SVID leaf rules that ordinary
+// chain verification does not: Go accepts CA targets, ignores KeyUsage bits,
+// and accepts anyExtendedKeyUsage in place of explicit serverAuth. This hop
+// authenticates the mint as a server, never as a certificate or CRL issuer.
+func mintPeerHasServerPurpose(leaf *x509.Certificate) bool {
+	if leaf == nil || leaf.IsCA || leaf.KeyUsage&x509.KeyUsageDigitalSignature == 0 ||
+		leaf.KeyUsage&(x509.KeyUsageCertSign|x509.KeyUsageCRLSign) != 0 {
+		return false
+	}
+	for _, extension := range leaf.Extensions {
+		if extension.Id.Equal([]int{2, 5, 29, 37}) { // id-ce-extKeyUsage, RFC 5280.
+			// An empty or unknown-only EKU is still present; checking only
+			// len(ExtKeyUsage) would mistake it for an unrestricted leaf.
+			return slices.Contains(leaf.ExtKeyUsage, x509.ExtKeyUsageServerAuth)
+		}
+	}
+	return true
 }
 
 // mintPeerURI reads the identity's signed bytes, not x509's parsed URL: URL.String

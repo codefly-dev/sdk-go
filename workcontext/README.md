@@ -298,6 +298,14 @@ resumption, compression, proxy or followed redirect. HTTP/1.1 keeps requests
 on separate connections without HTTP/2 multiplexing. Callers cannot supply an
 HTTP client or reach its transport.
 
+Before reading admission, the SDK checks the parsed leaf's X.509-SVID purpose:
+it must not be a CA, its KeyUsage must include digitalSignature and exclude
+keyCertSign and cRLSign, and any present ExtendedKeyUsage extension must
+explicitly include serverAuth. Ordinary Go certificate verification accepts
+some of these forbidden purposes, so chain and hostname verification alone
+are insufficient. An absent EKU is allowed; an empty EKU or anyExtendedKeyUsage
+without serverAuth is refused.
+
 The leaf must carry **exactly one URI SAN**, a valid admitted SPIFFE ID. The
 SDK validates its original bytes from the signed SAN extension: Go's parsed
 URL loses an empty fragment delimiter, so serializing that URL is unsafe here.
@@ -312,8 +320,9 @@ entry is `ErrInvalid`, checked at the handshake even alongside a valid entry.
 An unreadable anchor or client certificate, nil anchor, empty or unreadable
 peer set, invalid admitted identity, or failed TLS verification refuses the
 request with **`ErrMintUnavailable`** (also wrapping `ErrInvalid` for malformed
-admitted identities). A leaf with an invalid, ambiguous or unadmitted SPIFFE
-ID also wraps **`ErrMintPeerNotAdmitted`**, available through `errors.Is`.
+admitted identities). A leaf with a forbidden SVID purpose or an invalid,
+ambiguous or unadmitted SPIFFE ID also wraps **`ErrMintPeerNotAdmitted`**,
+available through `errors.Is`.
 These failures never latch and deliver no HTTP headers or body, including
 the projected token in `Authorization`.
 
@@ -321,7 +330,8 @@ Source waits honor the dial and request contexts. Cancellation closes the raw
 connection even if a source or private-key operation is blocked. The three
 transport sources and the TLS operations they trigger share **one outstanding
 worker per client**, retaining its slot through the entire handshake and
-post-handshake checks. Retries refuse immediately while it is occupied. An
+post-handshake checks. Retries check the occupied slot before dialing and
+refuse immediately without a connection attempt while it is occupied. An
 arbitrary callback or signer cannot itself be interrupted; cancellation bounds
 the wait, and the slot is released only when the worker returns. Late answers
 are discarded. Subsequent attempts read fresh values and can recover.

@@ -193,6 +193,89 @@ func TestMintPeerAdmissionPrecedesAnyHTTPDisclosure(t *testing.T) {
 	}
 }
 
+func TestMintPeerLeafPurposePrecedesAnyHTTPDisclosure(t *testing.T) {
+	for name, fixture := range map[string]struct {
+		configure func(*x509.Certificate)
+		accepted  bool
+	}{
+		"authentication leaf": {func(*x509.Certificate) {}, true},
+		"explicit non CA": {func(leaf *x509.Certificate) {
+			leaf.BasicConstraintsValid = true
+		}, true},
+		"EKU absent": {func(leaf *x509.Certificate) {
+			leaf.ExtKeyUsage = nil
+		}, true},
+		"serverAuth only": {func(leaf *x509.Certificate) {
+			leaf.ExtKeyUsage = []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth}
+		}, true},
+		"CA with certSign": {func(leaf *x509.Certificate) {
+			leaf.BasicConstraintsValid, leaf.IsCA = true, true
+			leaf.KeyUsage = x509.KeyUsageDigitalSignature | x509.KeyUsageCertSign
+		}, false},
+		"CA without certSign": {func(leaf *x509.Certificate) {
+			leaf.BasicConstraintsValid, leaf.IsCA = true, true
+		}, false},
+		"non CA certSign": {func(leaf *x509.Certificate) {
+			leaf.KeyUsage = x509.KeyUsageDigitalSignature | x509.KeyUsageCertSign
+		}, false},
+		"CRLSign only": {func(leaf *x509.Certificate) {
+			leaf.KeyUsage = x509.KeyUsageCRLSign
+		}, false},
+		"digitalSignature with CRLSign": {func(leaf *x509.Certificate) {
+			leaf.KeyUsage = x509.KeyUsageDigitalSignature | x509.KeyUsageCRLSign
+		}, false},
+		"no digitalSignature": {func(leaf *x509.Certificate) {
+			leaf.KeyUsage = x509.KeyUsageKeyEncipherment
+		}, false},
+		"key usage absent": {func(leaf *x509.Certificate) {
+			leaf.KeyUsage = 0
+		}, false},
+		// anyExtendedKeyUsage passes Go's ordinary server verification but
+		// does not explicitly grant the serverAuth required on this hop.
+		"EKU any without serverAuth": {func(leaf *x509.Certificate) {
+			leaf.ExtKeyUsage = []x509.ExtKeyUsage{x509.ExtKeyUsageAny}
+		}, false},
+		// Presence is determined from Extensions: an empty EKU sequence has
+		// no parsed usages, but it is not the same as an absent extension.
+		"EKU present but empty": {func(leaf *x509.Certificate) {
+			leaf.ExtraExtensions = append(leaf.ExtraExtensions, pkix.Extension{
+				Id: asn1.ObjectIdentifier{2, 5, 29, 37}, Value: []byte{0x30, 0x00},
+			})
+		}, false},
+	} {
+		t.Run(name, func(t *testing.T) {
+			host := newMintHost(t, func() time.Time { return testClock })
+			certificate := host.tlsCA.certificate(t, nil, mintRawSAN(t, []string{testMintPeer}), fixture.configure)
+			for _, hostname := range []string{"127.0.0.1", "mint.test.example"} {
+				_, err := certificate.Leaf.Verify(x509.VerifyOptions{Roots: host.tlsCA.pool, DNSName: hostname})
+				require.NoError(t, err, "ordinary chain, hostname and server-purpose verification must pass independently")
+			}
+			config := host.tlsConfig.Load().Clone()
+			config.Certificates = []tls.Certificate{*certificate}
+			host.tlsConfig.Store(config)
+			var peerReads atomic.Uint64
+			client := newTestMintClient(t, host, projectedFile(t, "secret-projection"), host.now, func(options *MintOptions) {
+				options.AdmittedPeers = func() ([]string, error) { peerReads.Add(1); return testMintPeers() }
+			})
+			written := observeMintHTTPWrites(t, client)
+			_, err := client.Credential(t.Context())
+			if fixture.accepted {
+				require.NoError(t, err)
+				require.Positive(t, written.Load(), "the observer must see a successful mint's HTTP bytes")
+				require.EqualValues(t, 1, host.requests.Load())
+				require.Equal(t, "Bearer secret-projection", (<-host.arrivals).authorization)
+				require.NotEmpty(t, <-host.bodies)
+				return
+			}
+			require.Zero(t, written.Load(), "no request line, header or body may be written to TLS")
+			requireNoMintDisclosure(t, host, 0)
+			requireMintRetryable(t, client, err)
+			require.ErrorIs(t, err, ErrMintPeerNotAdmitted)
+			require.Zero(t, peerReads.Load(), "leaf purpose must be checked before consulting admission")
+		})
+	}
+}
+
 func TestMintRawURISANAdmission(t *testing.T) {
 	for name, fixture := range map[string]struct {
 		peers    []string
@@ -452,14 +535,26 @@ func TestMintCanonicalSPIFFEAdmission(t *testing.T) {
 		{"spiffe://prod-1.example/work_load.v2", "spiffe://prod-1.example/work_load.v2"},
 	} {
 		t.Run(spelling.leaf+" against "+spelling.admitted, func(t *testing.T) {
-			host := newMintHost(t, func() time.Time { return testClock })
+			clock := &movableClock{at: testClock}
+			host := newMintHost(t, clock.now)
 			config := host.tlsConfig.Load().Clone()
 			config.Certificates = []tls.Certificate{*host.tlsCA.certificate(t, nil, mintRawSAN(t, []string{spelling.leaf}))}
 			host.tlsConfig.Store(config)
+			var admitted atomic.Value
+			// Appending a valid path character changes the identity without
+			// invoking malformed-ID rejection instead of membership checking.
+			admitted.Store(spelling.admitted + "_other")
 			client := newTestMintClient(t, host, projectedFile(t, "projected"), host.now, func(options *MintOptions) {
-				options.AdmittedPeers = func() ([]string, error) { return []string{spelling.admitted}, nil }
+				options.AdmittedPeers = func() ([]string, error) { return []string{admitted.Load().(string)}, nil }
 			})
 			_, err := client.Credential(t.Context())
+			requireNoMintDisclosure(t, host, 0)
+			requireMintRetryable(t, client, err)
+			require.ErrorIs(t, err, ErrMintPeerNotAdmitted)
+
+			admitted.Store(spelling.admitted)
+			clock.set(clock.now().Add(2 * time.Second))
+			_, err = client.Credential(t.Context())
 			require.NoError(t, err)
 			require.Equal(t, "Bearer projected", (<-host.arrivals).authorization)
 		})
@@ -496,21 +591,39 @@ func TestMintRejectsMalformedAdmittedIdentitiesAtHandshake(t *testing.T) {
 }
 
 func TestMintUnavailablePeersAtConstructionAreRetriedAtTheHandshake(t *testing.T) {
-	for _, fault := range []error{nil, errors.New("peer projection unreadable")} {
-		t.Run("empty or unreadable", func(t *testing.T) {
-			host := newMintHost(t, func() time.Time { return testClock })
+	for name, fault := range map[string]error{"empty": nil, "unreadable": errors.New("peer projection unreadable")} {
+		t.Run(name, func(t *testing.T) {
+			clock := &movableClock{at: testClock}
+			host := newMintHost(t, clock.now)
 			var ready atomic.Bool
+			var reads atomic.Uint64
 			client := newTestMintClient(t, host, projectedFile(t, "projected"), host.now, func(options *MintOptions) {
 				options.AdmittedPeers = func() ([]string, error) {
+					reads.Add(1)
 					if !ready.Load() {
 						return nil, fault
 					}
 					return testMintPeers()
 				}
 			})
-			ready.Store(true)
+			require.Zero(t, reads.Load(), "construction must not read an unavailable source")
 			_, err := client.Credential(t.Context())
+			requireNoMintDisclosure(t, host, 0)
+			requireMintRetryable(t, client, err)
+			require.EqualValues(t, 1, reads.Load(), "the first mint must actually read the unavailable source")
+			if fault != nil {
+				require.ErrorIs(t, err, fault)
+			} else {
+				require.ErrorContains(t, err, "no admitted mint peers")
+			}
+
+			ready.Store(true)
+			clock.set(clock.now().Add(2 * time.Second))
+			_, err = client.Credential(t.Context())
 			require.NoError(t, err, "construction must not cache an unavailable projection")
+			require.EqualValues(t, 3, reads.Load(), "recovery re-reads peers at both admission passes")
+			require.EqualValues(t, 1, host.requests.Load())
+			require.Equal(t, "Bearer projected", (<-host.arrivals).authorization)
 		})
 	}
 }
@@ -646,6 +759,18 @@ func TestMintTransportSourceReadsAreBoundedAndRecover(t *testing.T) {
 				options.AdmittedPeers = func() ([]string, error) { read("peers"); return testMintPeers() }
 				options.ClientCertificate = func() (*tls.Certificate, error) { read("certificate"); return &certificate, nil }
 			})
+			transport, ok := client.httpClient.Transport.(*http.Transport)
+			require.True(t, ok)
+			var dialAttempts atomic.Uint64
+			transport.DialContext = func(ctx context.Context, network, address string) (net.Conn, error) {
+				if dialAttempts.Add(1) > 1 && blocking.Load() {
+					// A retry reaching an unreachable endpoint consumes the
+					// budget unless the occupied slot is checked before dialing.
+					<-ctx.Done()
+					return nil, ctx.Err()
+				}
+				return dialMintMemory(ctx, network, address)
+			}
 			done := make(chan error, 1)
 			started := time.Now()
 			go func() { _, err := client.Credential(t.Context()); done <- err }()
@@ -661,6 +786,7 @@ func TestMintTransportSourceReadsAreBoundedAndRecover(t *testing.T) {
 				// Exercise a separate transport attempt while Credential's
 				// detached single-flight request may still be waiting.
 				_, err := client.mintOnce(t.Context())
+				require.EqualValues(t, 1, dialAttempts.Load(), "an occupied slot must refuse without any connection attempt")
 				requireMintRetryable(t, client, err)
 				require.ErrorContains(t, err, "source read is still outstanding")
 				require.Less(t, time.Since(began), timeout/2, "a second attempt must refuse immediately")
@@ -675,7 +801,9 @@ func TestMintTransportSourceReadsAreBoundedAndRecover(t *testing.T) {
 				t.Fatal("the request outlived its deadline while a source was blocked")
 			}
 			require.Less(t, time.Since(started), timeout+250*time.Millisecond)
-			for range 2 {
+			// Only the first attempt connected. Every opened raw connection
+			// must still close before the blocked worker is released.
+			for range dialAttempts.Load() {
 				select {
 				case <-closed:
 				case <-time.After(250 * time.Millisecond):
@@ -697,6 +825,7 @@ func TestMintTransportSourceReadsAreBoundedAndRecover(t *testing.T) {
 			clock.set(clock.now().Add(2 * time.Second))
 			_, err := client.Credential(t.Context())
 			require.NoError(t, err, "a later attempt must read fresh sources and recover")
+			require.EqualValues(t, 2, dialAttempts.Load(), "recovery must dial again after the worker releases its slot")
 			require.Greater(t, reads.Load(), initialReads)
 			require.EqualValues(t, 1, host.requests.Load())
 			require.Equal(t, "Bearer secret-projection", (<-host.arrivals).authorization)

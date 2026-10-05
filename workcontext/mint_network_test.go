@@ -78,3 +78,32 @@ func useMintMemoryNetwork(t *testing.T, client *MintClient) {
 	require.True(t, ok)
 	transport.DialContext = dialMintMemory
 }
+
+// Observe plaintext writes at the HTTP-to-TLS boundary, including an incomplete
+// request that would never reach a server handler. TLS has already handshaken
+// when this wrapper is installed, so handshake bytes are not counted as HTTP.
+type mintHTTPWriteObserver struct {
+	net.Conn
+	bytes *atomic.Uint64
+}
+
+func (c *mintHTTPWriteObserver) Write(raw []byte) (int, error) {
+	c.bytes.Add(uint64(len(raw)))
+	return c.Conn.Write(raw)
+}
+
+func observeMintHTTPWrites(t *testing.T, client *MintClient) *atomic.Uint64 {
+	t.Helper()
+	transport, ok := client.httpClient.Transport.(*http.Transport)
+	require.True(t, ok)
+	dial := transport.DialTLSContext
+	var written atomic.Uint64
+	transport.DialTLSContext = func(ctx context.Context, network, address string) (net.Conn, error) {
+		connection, err := dial(ctx, network, address)
+		if err != nil {
+			return nil, err
+		}
+		return &mintHTTPWriteObserver{Conn: connection, bytes: &written}, nil
+	}
+	return &written
+}
