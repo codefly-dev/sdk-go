@@ -83,6 +83,9 @@ qualifier, because the qualifier is the author's choice.
   *named* `mintResponse`. Types resolve package-qualified (`basev0.WorkScopeV1`,
   not `WorkScopeV1` from anywhere), in the scope of the use, before the use, and
   an ambiguous identifier is refused rather than guessed.
+  `encoding/asn1` is limited to `mint.go` decoding SAN GeneralNames into
+  `[]asn1.RawValue`; it cannot encode or decode any capability. This standard
+  library import adds no module dependency and preserves the signed URI bytes.
 - **No function-local type, and no second local name for core's types outside
   `core.go`** — alias or defined type, through a pointer or a slice, and a local
   name is CHASED to what it names. Either one hands a type-name allowlist
@@ -227,12 +230,73 @@ that are easy to get backwards:
   and terminal — a process seeing one must stop serving — so anything transient
   classified that way permanently stops a process holding a good credential: an
   interrupted response read, a projected-token `EMFILE`, a momentarily empty
-  projection, a 408. All of those are `ErrMintUnavailable`. A TLS verification
-  failure is the opposite: not an outage but the one thing this transport
-  exists to refuse, so it latches. Local misuse is `ErrInvalid`, never
-  `ErrMintRefused`, or `Refused()` and `errors.Is` disagree.
+  projection, a 408. All of those are `ErrMintUnavailable`. TLS verification
+  and peer-admission failures are also retryable: the handshake refuses them
+  before any projected token leaves, and rotation or admission can recover.
+  Local misuse is `ErrInvalid`, never `ErrMintRefused`, or `Refused()` and
+  `errors.Is` disagree.
 - **The shared request is detached from whoever started it**, bounded by
   `RequestTimeout`. On the caller's context, a cancelled leader counted as no
   failure, so twenty callers with deadlines shorter than a degraded host's
   latency produced twenty mint requests — each of which the host may complete
   and audit while this process discards it.
+
+## The mint transport admits the peer before disclosing the projection
+
+`MintOptions` requires three sources: `TrustAnchor`, `ClientCertificate` and
+`AdmittedPeers`. Construction checks configuration without calling any source.
+The SDK owns its HTTP client and transport; a caller can supply neither. The
+private TLS dialer reads the current anchor for normal chain and hostname
+verification. `GetClientCertificate` reads the workload's current X.509-SVID;
+the endpoint must request it. `VerifyConnection` reads admitted peers after
+chain verification. After the handshake, the dialer re-reads roots and peers,
+re-verifies the certificate chains and hostname, and repeats admission before
+returning the connection to HTTP.
+
+Before reading admission, check the parsed leaf's X.509-SVID server purpose:
+IsCA must be false; KeyUsage must include digitalSignature and exclude
+keyCertSign and cRLSign. If the EKU extension is present, it must explicitly
+include serverAuth, even if empty or carrying anyExtendedKeyUsage. Ordinary
+Go verification alone does not enforce these restrictions. An absent EKU is
+allowed. Both admission passes use the same leaf-purpose check.
+
+The leaf must contain exactly one URI SAN, read from the signed extension's
+original bytes: serializing x509's parsed URL loses an empty fragment delimiter.
+Both leaf and admitted SPIFFE IDs are validated before comparison; only scheme
+and trust-domain case are ignored. The trust domain uses ASCII letters, digits,
+dots, hyphens and underscores, with no empty labels; paths compare byte-for-byte.
+Empty segments, trailing slashes, dot segments, userinfo, ports, queries,
+fragments and percent-escapes are refused rather than normalized.
+
+Every mint, renewal and refresh dials fresh: TLS 1.3 minimum, no connection or
+TLS session reuse, no compression, proxy or redirect. HTTP/1.1 prevents
+multiplexing across admission decisions. Withdrawal during the handshake is
+caught by the post-handshake check. Each source value's residual freshness
+interval starts when it is sampled and ends at the transport's first HTTP
+write. Rechecking shortens this to the re-read-to-write window, including later
+source waits: the second peer callback may block after the second anchor was
+sampled. Independent sources are not a coordinated snapshot; stronger
+consistency requires a shared snapshot/version check. Withdrawal in this
+interval cannot retract an in-flight request.
+
+Every source wait is bounded by the dial and request contexts, including
+post-handshake reads. Cancellation closes the raw connection while a callback
+or private-key operation is blocked. Like `projectedToken`, all three transport
+sources and the TLS operations they trigger share one outstanding worker slot
+per client across retries, held through both handshake phases. Arbitrary
+callbacks and signers cannot be interrupted; cancellation bounds the wait and
+closes the socket, but only the worker's return releases its slot. Later
+attempts check the slot before dialing and refuse without a connection attempt
+until then; late answers are discarded and the worker exits. Recovery reads
+fresh data. TLS alone performs signing.
+
+A missing source is `ErrInvalid` at construction. A malformed admitted entry
+is `ErrInvalid` at the handshake, even alongside a valid entry. Unreadable or
+nil anchors, unreadable or empty certificates, empty or unreadable peer sets,
+malformed admitted IDs and TLS failures return `ErrMintUnavailable`; malformed
+admitted IDs also retain `ErrInvalid`. Invalid leaf purposes and invalid,
+ambiguous or unadmitted leaf identities additionally wrap
+`ErrMintPeerNotAdmitted`. These errors never latch.
+`mint_transport_test.go` requires no HTTP disclosure on refusal, withdrawal and
+rotation inside the handshake, bounded source reads and connection closure on
+cancellation, and recovery after release or corrected projections.

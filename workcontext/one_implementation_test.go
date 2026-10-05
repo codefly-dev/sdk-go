@@ -130,6 +130,12 @@ var narrowedImports = map[string]struct {
 	files   []string
 	symbols []string
 }{
+	// Only decode the signed SAN GeneralNames sequence, before URL parsing
+	// loses empty fragment delimiters. The codec row also fixes the target type.
+	"encoding/asn1": {
+		files:   []string{"workcontext/mint.go"},
+		symbols: []string{"RawValue", "Unmarshal", "ClassContextSpecific"},
+	},
 	"crypto/tls": {
 		files: []string{"workcontext/mint.go", "tls.go"},
 		// Config and the version floor, plus the two error types the client
@@ -140,6 +146,8 @@ var narrowedImports = map[string]struct {
 		symbols: []string{
 			"Config", "VersionTLS13",
 			"CertificateVerificationError", "RecordHeaderError",
+			// The mint transport reads roots and admits a peer per handshake.
+			"Client", "ConnectionState",
 			// tls.go's workload leaf certificates, reloaded on rotation.
 			// Measured from the tree, so the list is what is used and no more.
 			"Certificate", "X509KeyPair", "LoadX509KeyPair",
@@ -219,6 +227,10 @@ var narrowedImports = map[string]struct {
 		// importing ed25519.
 		symbols: []string{
 			"CertPool", "NewCertPool", "SystemCertPool",
+			// Recheck the mint peer's certificate against post-handshake roots.
+			"VerifyOptions",
+			// Inspect the parsed TLS leaf's SVID purpose; no key or codec operations.
+			"Certificate", "KeyUsageDigitalSignature", "KeyUsageCertSign", "KeyUsageCRLSign", "ExtKeyUsageServerAuth",
 			"UnknownAuthorityError", "HostnameError", "CertificateInvalidError",
 		},
 	},
@@ -234,6 +246,8 @@ var narrowedImports = map[string]struct {
 // at all. Both were reproduced as AST probes that produced zero findings. A
 // whole-file exemption is an exemption for every type in the file.
 var codecAllowlist = []codecUse{
+	{file: "workcontext/mint.go", codec: "encoding/asn1", operations: []string{"Unmarshal"},
+		types: []string{"[]encoding/asn1#RawValue"}, reason: "the signed SAN's GeneralNames, retaining exact URI bytes"},
 	{file: "workcontext/mint.go", codec: codecJSON, operations: jsonOperations, types: mintEndpointJSONTypes,
 		reason: "the mint endpoint's two HTTP bodies, which carry the capability as an opaque string"},
 	{file: "workcontext/mint.go", codec: codecJSON, operations: jsonValueOperations,
@@ -885,6 +899,11 @@ func inspectPlumbingSymbols(file sourceFile, plumbing map[string]string) []strin
 		if !isPlumbing {
 			return true
 		}
+		if path == "encoding/asn1" && selector.Sel.Name == "Unmarshal" &&
+			!codecArgumentIsPermitted(file, node, path, "Unmarshal") {
+			findings = append(findings, fmt.Sprintf("%s calls %s.Unmarshal outside the SAN RawValue codec row", file.path, qualifier.Name))
+			return true
+		}
 		if slices.Contains(narrowedImports[path].symbols, selector.Sel.Name) {
 			return true
 		}
@@ -1333,6 +1352,21 @@ var _ = gob.NewEncoder`,
 import "encoding/asn1"
 var _ = asn1.Marshal`,
 			says: "imports \"encoding/asn1\"",
+		},
+		"ASN1 encoding in the SAN reader": {
+			path: "workcontext/mint.go",
+			source: `package workcontext
+import "encoding/asn1"
+var _ = asn1.Marshal`,
+			says: "uses asn1.Marshal",
+		},
+		"ASN1 decoding into an arbitrary struct in the SAN reader": {
+			path: "workcontext/mint.go",
+			source: `package workcontext
+import "encoding/asn1"
+type payload struct { Token string }
+func decode(raw []byte) { var value payload; _, _ = asn1.Unmarshal(raw, &value) }`,
+			says: "outside the SAN RawValue codec row",
 		},
 		"encoding/xml": {
 			path: "workcontext/carrier.go",
@@ -1810,6 +1844,12 @@ func decode(raw []byte) (mintResponse, error) {
 	var body mintResponse
 	return body, json.Unmarshal(raw, &body)
 }`,
+		},
+		"raw SAN GeneralNames": {
+			path: "workcontext/mint.go",
+			source: `package workcontext
+import "encoding/asn1"
+func decode(raw []byte) { var names []asn1.RawValue; _, _ = asn1.Unmarshal(raw, &names) }`,
 		},
 		"an alias of core's type": {
 			path: "workcontext/core.go",

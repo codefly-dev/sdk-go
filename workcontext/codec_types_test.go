@@ -46,6 +46,7 @@ import (
 // codec registry are absent here and refused there instead. Two rules, one
 // each for the two halves of the question.
 var codecFunctions = map[string][]string{
+	"encoding/asn1": {"Marshal", "MarshalWithParams", "Unmarshal", "UnmarshalWithParams"},
 	"google.golang.org/protobuf/proto": {
 		"Marshal", "Unmarshal", "MarshalOptions", "UnmarshalOptions",
 	},
@@ -739,6 +740,7 @@ func TestTheCodecRuleRefusesEveryShapeThatPassedBefore(t *testing.T) {
 	const preamble = `package probe
 
 import (
+	"encoding/asn1"
 	"encoding/json"
 	"reflect"
 
@@ -750,6 +752,7 @@ import (
 // Sinks, so every probe shares one import block without "imported and not
 // used". None is a codec use, so none can be the finding.
 var (
+	_ asn1.RawValue
 	_ = reflect.TypeOf
 	_ protoreflect.Message
 	_ = basev0.File_codefly_base_v0_work_context_proto
@@ -764,6 +767,14 @@ var (
 		source string
 		says   string
 	}{
+		"ASN1 decoding a capability": {
+			source: `func into(raw []byte, c *basev0.WorkContextV1) { _, _ = asn1.Unmarshal(raw, c) }`,
+			says:   "which is or contains",
+		},
+		"ASN1 decoder passed as a value": {
+			source: `var decode = asn1.Unmarshal`,
+			says:   "without calling it",
+		},
 		// R1: a type parameter. Resolved to the spelling "M".
 		"a generic codec wrapper": {
 			source: `func into[M proto.Message](raw []byte, m M) error { return proto.Unmarshal(raw, m) }

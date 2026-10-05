@@ -262,10 +262,11 @@ client, err := workcontext.NewMintClient(workcontext.MintOptions{
     },
     ProjectedToken:     workcontext.ProjectedTokenFile("/var/run/secrets/codefly/token"),
     ProjectionAudience: projectionAudience,
-    // REQUIRED: the roots that may sign the mint endpoint's certificate.
-    // There is no safe default for where this process sends its
-    // service-account token, so there is no default.
-    RootCAs: platformRoots,
+    // REQUIRED: sources of current trust roots, workload X.509-SVID,
+    // and admitted mint endpoint SPIFFE IDs. Re-read per handshake.
+    TrustAnchor:       readPlatformRoots,     // func() (*x509.CertPool, error)
+    ClientCertificate: readWorkloadSVID,      // func() (*tls.Certificate, error)
+    AdmittedPeers:     readAdmittedMintPeers, // func() ([]string, error)
 })
 ```
 
@@ -280,24 +281,72 @@ host SIGNED to be the audience the pin answered.
 projected service-account token travels on that request as a bearer credential,
 so plaintext is a disclosure the configuration must not be able to choose.
 
-**The transport is the client's, and you cannot supply one.** `RootCAs` is the
-only thing a caller says about it, and it is **required**: `NewMintClient`
-returns `ErrInvalid` without it. A nil `RootCAs` used to mean the system pool
-silently, which left the one remaining hole in a transport built to have none —
-every other route to a weak channel was closed and the trust anchor was still
-whatever the image shipped, so a mis-issued certificate for the host name, or a
-corporate interception root, received the projected token. A deployment that
-really means the host's pool writes `x509.SystemCertPool()`, which is two lines
-and is visible at the call site. An `*http.Client` option was a hole that
-inspecting the client could not close: a nil `Transport` means the global,
-mutable `http.DefaultTransport`; a wrapping `RoundTripper` is opaque; a
-`DialTLSContext` bypasses `TLSClientConfig` entirely; and a caller keeping the
-`*http.Transport` pointer can turn verification off after construction, because
-copying an `http.Client` shares its `Transport`. Each of those sent the
-projection over a channel nobody authenticated. So the client builds the
-transport — TLS 1.3 minimum, verification on, no custom dialer, no proxy — and
-refuses redirects, because Go's own client forwards `Authorization` across a
-redirect to the same host.
+**The SDK owns the mint transport.** Callers provide `TrustAnchor`,
+`ClientCertificate` and `AdmittedPeers` sources; all three functions are
+required. `NewMintClient` returns `ErrInvalid` for a missing source and reads
+no sources. Every source answer is validated during dialing.
+
+Every mint, renewal and refresh opens a **new TLS 1.3 connection**. The SDK
+reads the current anchor for the handshake, presents the workload's current
+X.509-SVID through `GetClientCertificate`, and reads the current admitted peer
+set in `VerifyConnection`, **after Go has verified the chain and hostname**.
+After the handshake, it reads the anchor and peers again, re-verifies the
+certificate chains and hostname against those roots, and repeats admission
+before handing the connection to HTTP. The endpoint must request a client
+certificate. There is no system-root fallback, connection reuse, TLS session
+resumption, compression, proxy or followed redirect. HTTP/1.1 keeps requests
+on separate connections without HTTP/2 multiplexing. Callers cannot supply an
+HTTP client or reach its transport.
+
+Before reading admission, the SDK checks the parsed leaf's X.509-SVID purpose:
+it must not be a CA, its KeyUsage must include digitalSignature and exclude
+keyCertSign and cRLSign, and any present ExtendedKeyUsage extension must
+explicitly include serverAuth. Ordinary Go certificate verification accepts
+some of these forbidden purposes, so chain and hostname verification alone
+are insufficient. An absent EKU is allowed; an empty EKU or anyExtendedKeyUsage
+without serverAuth is refused.
+
+The leaf must carry **exactly one URI SAN**, a valid admitted SPIFFE ID. The
+SDK validates its original bytes from the signed SAN extension: Go's parsed
+URL loses an empty fragment delimiter, so serializing that URL is unsafe here.
+IDs must have the form `spiffe://<trust-domain>/<path>`; the trust domain uses
+ASCII letters, digits, dots, hyphens and underscores, with no empty labels.
+Scheme and trust-domain case are ignored, but paths are compared
+**byte-for-byte**. Empty segments, trailing
+slashes, dot segments, userinfo, ports, queries, fragments and percent-escapes
+are refused, never normalized into admitted identities. Any malformed admitted
+entry is `ErrInvalid`, checked at the handshake even alongside a valid entry.
+
+An unreadable anchor or client certificate, nil anchor, empty or unreadable
+peer set, invalid admitted identity, or failed TLS verification refuses the
+request with **`ErrMintUnavailable`** (also wrapping `ErrInvalid` for malformed
+admitted identities). A leaf with a forbidden SVID purpose or an invalid,
+ambiguous or unadmitted SPIFFE ID also wraps **`ErrMintPeerNotAdmitted`**,
+available through `errors.Is`.
+These failures never latch and deliver no HTTP headers or body, including
+the projected token in `Authorization`.
+
+Source waits honor the dial and request contexts. Cancellation closes the raw
+connection even if a source or private-key operation is blocked. The three
+transport sources and the TLS operations they trigger share **one outstanding
+worker per client**, retaining its slot through the entire handshake and
+post-handshake checks. Retries check the occupied slot before dialing and
+refuse immediately without a connection attempt while it is occupied. An
+arbitrary callback or signer cannot itself be interrupted; cancellation bounds
+the wait, and the slot is released only when the worker returns. Late answers
+are discarded. Subsequent attempts read fresh values and can recover.
+
+A root or peer withdrawal during the handshake is caught by the
+post-handshake check. Each source value's residual freshness interval begins
+when that value is sampled and ends at the transport's first HTTP write. The
+recheck shortens it to the **re-read-to-write window**, including later source
+waits: the second anchor is sampled before the second peer callback, which may
+block while that anchor is withdrawn. Independent sources do not provide a
+coordinated snapshot; stronger consistency requires a shared snapshot/version
+check. Withdrawal in this interval cannot retract an in-flight request.
+Every new mint, renewal and refresh repeats both checks. Tests capture
+HTTP disclosure at the server, withdraw peers and rotate roots inside the
+handshake, and verify deadlines, connection closure, bounded reads and recovery.
 
 Then, on every outbound request:
 

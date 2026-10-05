@@ -37,16 +37,20 @@ import (
 // host could pass the test. faults is asserted from the test goroutine by
 // assertNoHostFaults, which every test using a host runs through t.Cleanup.
 type mintHost struct {
-	t         *testing.T
-	server    *httptest.Server
-	requests  atomic.Uint64
-	presented atomic.Value // the last projected token the host was shown
-	bodies    chan []byte  // every request body, as the client actually sent it
-	now       func() time.Time
-	lifetime  time.Duration
-	audience  string
-	authority *authority
-	echoWrong bool
+	t                 *testing.T
+	server            *httptest.Server
+	tlsCA             *mintTestCA
+	tlsConfig         atomic.Pointer[tls.Config]
+	clientCertificate *tls.Certificate
+	arrivals          chan mintArrival
+	requests          atomic.Uint64
+	presented         atomic.Value // the last projected token the host was shown
+	bodies            chan []byte  // every request body, as the client actually sent it
+	now               func() time.Time
+	lifetime          time.Duration
+	audience          string
+	authority         *authority
+	echoWrong         bool
 	// binding, when set, makes the host mint an operation capability sealed to
 	// that binding.
 	binding    string
@@ -119,9 +123,16 @@ func newMintHost(t *testing.T, now func() time.Time) *mintHost {
 		t: t, now: now, lifetime: 15 * time.Minute,
 		audience: testAudience, authority: newAuthority(t),
 		bodies: make(chan []byte, 64), pin: newTestPin(),
+		arrivals: make(chan mintArrival, 64), tlsCA: newMintTestCA(t),
 	}
-	host.server = httptest.NewTLSServer(http.HandlerFunc(host.handle))
-	t.Cleanup(host.server.Close)
+	host.clientCertificate = host.tlsCA.certificate(t, []string{testMintClientPeer})
+	host.server = newMintTLSServer(t, http.HandlerFunc(host.handle), host.tlsCA,
+		func(config *tls.Config) {
+			host.tlsConfig.Store(config.Clone())
+			config.GetConfigForClient = func(*tls.ClientHelloInfo) (*tls.Config, error) {
+				return host.tlsConfig.Load(), nil
+			}
+		})
 	t.Cleanup(func() {
 		host.faultsMu.Lock()
 		defer host.faultsMu.Unlock()
@@ -136,6 +147,15 @@ func (h *mintHost) handle(writer http.ResponseWriter, request *http.Request) {
 		h.before()
 	}
 	h.presented.Store(request.Header.Get("Authorization"))
+	select {
+	case h.arrivals <- mintArrival{
+		authorization: request.Header.Get("Authorization"),
+		remote:        request.RemoteAddr, close: request.Close,
+		protocol: request.ProtoMajor, encoding: request.Header.Get("Accept-Encoding"),
+		tls: *request.TLS,
+	}:
+	default:
+	}
 	if h.answer != nil {
 		h.answer.write(writer)
 		return
@@ -233,15 +253,16 @@ func newTestMintClient(t *testing.T, host *mintHost, path string, now func() tim
 		ProjectedToken:     ProjectedTokenFile(path),
 		ProjectionAudience: "projection-audience",
 		Now:                now,
-		// The only thing a caller may say about the transport: which roots may
-		// sign the endpoint's certificate. The client builds the rest.
-		RootCAs: certPoolOf(host.server),
+		TrustAnchor:        func() (*x509.CertPool, error) { return host.tlsCA.pool, nil },
+		ClientCertificate:  func() (*tls.Certificate, error) { return host.clientCertificate, nil },
+		AdmittedPeers:      testMintPeers,
 	}
 	for _, option := range options {
 		option(&settings)
 	}
 	client, err := NewMintClient(settings)
 	require.NoError(t, err)
+	useMintMemoryNetwork(t, client)
 	return client
 }
 
@@ -872,18 +893,18 @@ func keysOf(fields map[string]any) []string {
 // destination, asserted before the error is even looked at.
 func TestARedirectedMintSendsNothingToTheDestination(t *testing.T) {
 	now := func() time.Time { return testClock }
+	ca := newMintTestCA(t)
+	certificate := ca.certificate(t, []string{testMintClientPeer})
 	var elsewhereRequests atomic.Uint64
-	elsewhere := httptest.NewTLSServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+	elsewhere := newMintTLSServer(t, http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
 		elsewhereRequests.Add(1)
 		writer.WriteHeader(http.StatusOK)
-	}))
-	t.Cleanup(elsewhere.Close)
+	}), ca)
 
-	redirector := httptest.NewTLSServer(http.HandlerFunc(
+	redirector := newMintTLSServer(t, http.HandlerFunc(
 		func(writer http.ResponseWriter, request *http.Request) {
 			http.Redirect(writer, request, elsewhere.URL, http.StatusTemporaryRedirect)
-		}))
-	t.Cleanup(redirector.Close)
+		}), ca)
 
 	// The root pool trusts BOTH servers, so nothing but the refusal stops the
 	// second request: a client that could not verify the destination's
@@ -895,9 +916,12 @@ func TestARedirectedMintSendsNothingToTheDestination(t *testing.T) {
 		ProjectedToken:     ProjectedTokenFile(projectedFile(t, "projected")),
 		ProjectionAudience: "projection-audience",
 		Now:                now,
-		RootCAs:            certPoolOf(redirector, elsewhere),
+		TrustAnchor:        func() (*x509.CertPool, error) { return ca.pool, nil },
+		ClientCertificate:  func() (*tls.Certificate, error) { return certificate, nil },
+		AdmittedPeers:      testMintPeers,
 	})
 	require.NoError(t, err)
+	useMintMemoryNetwork(t, client)
 
 	_, err = client.Credential(t.Context())
 
@@ -925,7 +949,7 @@ func TestARedirectedMintSendsNothingToTheDestination(t *testing.T) {
 // see each sent the projected bearer over an unauthenticated channel. None of
 // them is reachable now, because there is no option to supply.
 func TestTheMintTransportIsOwnedByTheClient(t *testing.T) {
-	client := mintHTTPClient(nil)
+	client := mintHTTPClient(MintOptions{})
 
 	transport, ok := client.Transport.(*http.Transport)
 	require.True(t, ok, "the client builds a concrete *http.Transport, not a wrapper it cannot reason about")
@@ -933,9 +957,9 @@ func TestTheMintTransportIsOwnedByTheClient(t *testing.T) {
 	require.False(t, transport.TLSClientConfig.InsecureSkipVerify)
 	require.EqualValues(t, tls.VersionTLS13, transport.TLSClientConfig.MinVersion,
 		"the projected service-account token goes over 1.3 or it does not go")
-	require.Nil(t, transport.DialTLSContext,
-		"a custom TLS dialer bypasses TLSClientConfig entirely")
-	require.Nil(t, transport.DialContext)
+	require.NotNil(t, transport.DialTLSContext,
+		"the SDK-owned dialer installs fresh roots with normal TLS verification enabled")
+	require.NotNil(t, transport.DialContext, "the SDK owns the TCP dialer as well as the handshake")
 	require.Nil(t, transport.Proxy,
 		"a proxy for a credential request is an address the configuration did not name")
 	require.NotNil(t, client.CheckRedirect)
@@ -946,15 +970,19 @@ func TestTheMintTransportIsOwnedByTheClient(t *testing.T) {
 
 	// Two clients do not share a transport, so nothing one caller does to its
 	// client can reach another's.
-	require.NotSame(t, client.Transport, mintHTTPClient(nil).Transport)
+	require.NotSame(t, client.Transport, mintHTTPClient(MintOptions{}).Transport)
 
-	// The root pool is the ONLY thing a caller says about it, and it lands
-	// where it is used.
-	pool := x509.NewCertPool()
-	withRoots := mintHTTPClient(pool)
-	rooted, ok := withRoots.Transport.(*http.Transport)
-	require.True(t, ok)
-	require.Same(t, pool, rooted.TLSClientConfig.RootCAs)
+	// Roots are installed in each handshake's private config, never pinned to
+	// this template. Rotation tests exercise the effective verification.
+	require.Nil(t, transport.TLSClientConfig.RootCAs)
+	require.NotNil(t, transport.TLSClientConfig.VerifyConnection)
+	require.Nil(t, transport.TLSClientConfig.ClientSessionCache)
+	require.True(t, transport.DisableKeepAlives)
+	require.Zero(t, transport.MaxIdleConnsPerHost)
+	require.True(t, transport.DisableCompression)
+	require.False(t, transport.ForceAttemptHTTP2)
+	require.Equal(t, []string{"http/1.1"}, transport.TLSClientConfig.NextProtos)
+	require.Equal(t, maxMintRequestTimeout, transport.TLSHandshakeTimeout)
 
 	// And the redirect refusal is on it, as a refusal rather than as
 	// http.ErrUseLastResponse, so net/http never sends the second request.
@@ -973,8 +1001,9 @@ func TestNewMintClientValidatesItsConfiguration(t *testing.T) {
 		Audience:           testAudienceName,
 		ProjectedToken:     ProjectedTokenFile("/var/run/secrets/token"),
 		ProjectionAudience: "projection-audience",
-		// Required: construction refuses a client with no trust anchor.
-		RootCAs: x509.NewCertPool(),
+		TrustAnchor:        func() (*x509.CertPool, error) { return x509.NewCertPool(), nil },
+		ClientCertificate:  unusedMintCertificate,
+		AdmittedPeers:      testMintPeers,
 	}
 	_, err := NewMintClient(valid)
 	require.NoError(t, err)
@@ -1003,7 +1032,9 @@ func TestNewMintClientValidatesItsConfiguration(t *testing.T) {
 		// THE TRUST ANCHOR. Unstated was the whole of the previous behaviour
 		// and it was silently the system pool: every other route to a weak
 		// transport here was closed and this one defaulted.
-		"no trust anchor": func(o *MintOptions) { o.RootCAs = nil },
+		"no trust anchor":       func(o *MintOptions) { o.TrustAnchor = nil },
+		"no client certificate": func(o *MintOptions) { o.ClientCertificate = nil },
+		"no admitted peers":     func(o *MintOptions) { o.AdmittedPeers = nil },
 	} {
 		t.Run(name, func(t *testing.T) {
 			options := valid

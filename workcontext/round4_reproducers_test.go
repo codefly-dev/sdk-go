@@ -2,6 +2,7 @@ package workcontext
 
 import (
 	"context"
+	"crypto/tls"
 	"crypto/x509"
 	"net/http"
 	"net/url"
@@ -318,7 +319,9 @@ func TestEveryMintFaultIsClassifiedByWhatRecoveryItNeeds(t *testing.T) {
 		// A client pointed at the host with a root pool that does not contain
 		// the host's certificate.
 		client := newTestMintClient(t, host, projectedFile(t, "projected"), clock.now,
-			func(options *MintOptions) { options.RootCAs = x509.NewCertPool() })
+			func(options *MintOptions) {
+				options.TrustAnchor = func() (*x509.CertPool, error) { return x509.NewCertPool(), nil }
+			})
 
 		_, err := client.Credential(context.Background())
 		// This LATCHED for one revision, on the argument that the projected
@@ -616,7 +619,9 @@ func TestAConfiguredCeilingAboveCoresIsRefusedAtConstruction(t *testing.T) {
 		ProjectedToken:        ProjectedTokenFile(projectedFile(t, "projected")),
 		ProjectionAudience:    "projection-audience",
 		Now:                   clock.now,
-		RootCAs:               certPoolOf(host.server),
+		TrustAnchor:           func() (*x509.CertPool, error) { return host.tlsCA.pool, nil },
+		ClientCertificate:     func() (*tls.Certificate, error) { return host.clientCertificate, nil },
+		AdmittedPeers:         testMintPeers,
 		MaxCredentialLifetime: corework.MaxTTLCeiling + time.Second,
 	})
 	require.ErrorIs(t, err, ErrInvalid)
@@ -631,7 +636,9 @@ func TestAConfiguredCeilingAboveCoresIsRefusedAtConstruction(t *testing.T) {
 		ProjectedToken:        ProjectedTokenFile(projectedFile(t, "projected")),
 		ProjectionAudience:    "projection-audience",
 		Now:                   clock.now,
-		RootCAs:               certPoolOf(host.server),
+		TrustAnchor:           func() (*x509.CertPool, error) { return host.tlsCA.pool, nil },
+		ClientCertificate:     func() (*tls.Certificate, error) { return host.clientCertificate, nil },
+		AdmittedPeers:         testMintPeers,
 		MaxCredentialLifetime: corework.MaxTTLCeiling,
 	})
 	require.NoError(t, err)
