@@ -17,14 +17,13 @@ import (
 )
 
 type Query struct {
-	module             string
-	consumerModule     string
-	service            string
-	endpointName       string
-	endpointApi        string
-	ctx                context.Context
-	withDefaultNetwork bool
-	namingScope        string
+	module         string
+	consumerModule string
+	service        string
+	endpointName   string
+	endpointApi    string
+	ctx            context.Context
+	namingScope    string
 }
 
 func For(ctx context.Context) *Query {
@@ -73,8 +72,9 @@ func (q *Query) Normalize() {
 	}
 }
 
+// WithDefaultNetwork no longer supplies a default address.
+// Deprecated: resolve a declared endpoint with ResolveNetworkInstance and handle its error.
 func (q *Query) WithDefaultNetwork() *Query {
-	q.withDefaultNetwork = true
 	return q
 }
 
@@ -90,11 +90,6 @@ func (q *Query) NetworkInstance() *resources.NetworkInstance {
 	instance, err := q.ResolveNetworkInstance()
 	if err == nil {
 		return instance
-	}
-	w := wool.Get(q.ctx).In("NetworkInstance")
-	if q.withDefaultNetwork {
-		w.Warn("Cannot find network instance, returning default", wool.Field("error", err))
-		return resources.DefaultNetworkInstance(q.endpointApi)
 	}
 	return nil
 }
@@ -127,9 +122,6 @@ func (q *Query) ResolveNetworkInstance() (*resources.NetworkInstance, error) {
 			return local, nil
 		}
 		err = fmt.Errorf("runtime endpoint unavailable (%v); local endpoint unavailable (%w)", err, localErr)
-	}
-	if q.withDefaultNetwork {
-		return resources.DefaultNetworkInstance(q.endpointApi), nil
 	}
 	return nil, err
 }

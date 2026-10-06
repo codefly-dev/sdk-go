@@ -41,12 +41,9 @@ func TestEnvironmentVariables(t *testing.T) {
 	net := codefly.For(ctx).API(standards.REST).NetworkInstance()
 	assert.Nil(t, net)
 
-	// With default
+	// Default addresses cannot bypass endpoint resolution failures.
 	net = codefly.For(ctx).API(standards.REST).WithDefaultNetwork().NetworkInstance()
-	assert.NotNil(t, net)
-	assert.Equal(t, "localhost", net.Hostname)
-	assert.Equal(t, uint16(8080), net.Port)
-	assert.Equal(t, "http://localhost:8080", net.Address)
+	assert.Nil(t, net)
 
 	// With API and no name
 	env := resources.EndpointAsEnvironmentVariableKey(&resources.EndpointInformation{Module: "mod", Service: "svc", Name: standards.HTTP, API: standards.HTTP})

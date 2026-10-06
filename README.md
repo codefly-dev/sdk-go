@@ -29,6 +29,11 @@ visibility, internal allowlists, exact names, API qualifiers, and ambiguity.
 Its refusal is returned to the caller, including `ErrEndpointNotReachable` for
 a private endpoint queried across modules.
 
+`ResolveNetworkInstance` returns resolution errors with no instance, and
+`NetworkInstance` returns nil on those errors. `WithDefaultNetwork` is
+deprecated and has no effect: neither entrypoint substitutes a default address
+for an unavailable, external, forbidden, or invalid endpoint.
+
 ## Work Context: mint once, sealed, one implementation
 
 A module process obtains its credential once per execution, sealed to the build

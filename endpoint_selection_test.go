@@ -60,3 +60,31 @@ endpoints:
     `+declaration+"\n  - name: health\n    api: rest\n    visibility: public\n")
 	t.Chdir(root)
 }
+
+func TestDefaultNetworkCannotBypassEndpointRefusals(t *testing.T) {
+	for _, tc := range []struct {
+		name, declaration string
+		refusal           error
+	}{
+		{name: "external", declaration: "visibility: public\n    location: external"},
+		{name: "invalid visibility", declaration: "visibility: external", refusal: resources.ErrInvalidEndpointDeclaration},
+		{name: "private", declaration: "visibility: private", refusal: resources.ErrEndpointNotReachable},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			prepareEndpointSelectionWorkspace(t, "client", tc.declaration, "")
+			query := codefly.For(context.Background()).Module("producer").Service("records").Endpoint("rest").API("rest").WithDefaultNetwork()
+			t.Run("ResolveNetworkInstance", func(t *testing.T) {
+				instance, err := query.ResolveNetworkInstance()
+				if tc.refusal != nil {
+					require.ErrorIs(t, err, tc.refusal)
+				} else {
+					require.ErrorContains(t, err, "external endpoint cannot be resolved from the local native map")
+				}
+				require.Nil(t, instance)
+			})
+			t.Run("NetworkInstance", func(t *testing.T) {
+				require.Nil(t, query.NetworkInstance(), "the convenience entrypoint must also refuse")
+			})
+		})
+	}
+}
