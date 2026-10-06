@@ -4,10 +4,10 @@ go 1.27.0
 
 require (
 	connectrpc.com/connect v1.21.0
-	github.com/codefly-dev/core v0.5.11-0.20260927163352-ab6b5ba3865a
-	github.com/jackc/pgx/v5 v5.10.0
+	github.com/codefly-dev/core v0.7.1
+	github.com/jackc/pgx/v5 v5.11.0
 	github.com/stretchr/testify v1.12.1
-	google.golang.org/grpc v1.83.2
+	google.golang.org/grpc v1.84.0
 	google.golang.org/protobuf v1.36.12
 )
 
