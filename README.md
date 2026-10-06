@@ -15,18 +15,17 @@ visibility is `private`, `internal`, or `public`; an endpoint outside the system
 declares `location: external` independently of its visibility.
 
 `For(ctx).Module(...).Service(...).Endpoint(...).ResolveNetworkInstance()` uses
-runtime-injected endpoints first. In `local` or with no environment selected,
+core selection before looking up a runtime-injected address. In `local` or with no environment selected,
 it can fall back to core's deterministic native map. Core's `Endpoint.External()`
 predicate refuses that fallback for an external location. A public endpoint
 without an external location still resolves locally, even though public visibility
 also allocates an external instance.
 
-An endpoint-only query resolves its name and API through core's typed selector
-on the producer's declarations before reading the injected carrier. Ambiguous
-references are refused even if one candidate has an injected address. These
-queries require the workspace declarations; a deployed process without them
-must use the endpoint's explicit name and API. Fully qualified injected
-capabilities can be read without loading workspace files.
+Every query resolves its name and API through core's typed selector on the
+producer's declarations before reading the injected carrier, including queries
+with an explicit API. Ambiguous, forbidden, and API-mismatched references are
+refused even if a matching carrier exists. All endpoint queries require the
+workspace declarations: an address carrier alone cannot establish eligibility.
 
 The calling module is captured from the runtime identity when `For(ctx)` is
 created; `.Module(...)` selects the producer and cannot change that consumer.

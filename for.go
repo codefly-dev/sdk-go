@@ -89,10 +89,9 @@ func (q *Query) NetworkInstance() *resources.NetworkInstance {
 
 // ResolveNetworkInstance returns one typed endpoint or a diagnostic error.
 //
-// Endpoint-only queries first ask core to select the declared endpoint and API;
-// they require workspace declarations. Fully qualified injected capabilities
-// can be read without those files. Injected addresses precede native ones.
-// In Codefly LOCAL (and
+// Every query first asks core to select an eligible declared endpoint, using
+// workspace declarations. Injected addresses precede native ones only after
+// selection succeeds. In Codefly LOCAL (and
 // before an environment is explicitly selected), the SDK falls back to the
 // workspace's deterministic native endpoint map. This lets independently
 // loaded agents use the same address as `codefly endpoint` without parsing
@@ -108,32 +107,19 @@ func (q *Query) ResolveNetworkInstance() (*resources.NetworkInstance, error) {
 		API:     q.endpointApi,
 		Name:    q.endpointName,
 	}
-	// An endpoint name is not an API. Ask core which declaration it names
-	// before constructing a carrier key; the same selection is reused if the
-	// runtime has no address and a local native instance is needed.
-	var workspace *resources.Workspace
-	var selected *resources.Endpoint
-	if info.API == "" {
-		var err error
-		workspace, selected, err = q.selectEndpoint(info)
-		if err != nil {
-			return nil, err
-		}
-		info = selected.Information()
+	// The declaration decides eligibility before any carrier can supply an
+	// address. An explicit API is a qualifier core must judge, not a bypass.
+	workspace, selected, err := q.selectEndpoint(info)
+	if err != nil {
+		return nil, err
 	}
+	info = selected.Information()
 	instance, err := resources.FindNetworkInstanceInEnvironmentVariables(q.ctx, info, codeflyEnvironmentVariables())
 	if err == nil {
 		return instance, nil
 	}
 	if Environment() != "" && !IsLocal() {
 		return nil, err
-	}
-	if selected == nil {
-		var selectionErr error
-		workspace, selected, selectionErr = q.selectEndpoint(info)
-		if selectionErr != nil {
-			return nil, fmt.Errorf("runtime endpoint unavailable (%v); local endpoint unavailable (%w)", err, selectionErr)
-		}
 	}
 	local, localErr := q.localNetworkInstance(workspace, selected)
 	if localErr != nil {
