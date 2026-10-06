@@ -71,12 +71,6 @@ func (q *Query) Normalize() {
 	}
 }
 
-// WithDefaultNetwork no longer supplies a default address.
-// Deprecated: resolve a declared endpoint with ResolveNetworkInstance and handle its error.
-func (q *Query) WithDefaultNetwork() *Query {
-	return q
-}
-
 // NamingScope selects the same advanced local port namespace used by
 // `codefly run --naming-scope`. Leave empty for the normal interactive
 // workspace.

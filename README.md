@@ -37,9 +37,8 @@ Its refusal is returned to the caller, including `ErrEndpointNotReachable` for
 a private endpoint queried across modules.
 
 `ResolveNetworkInstance` returns resolution errors with no instance, and
-`NetworkInstance` returns nil on those errors. `WithDefaultNetwork` is
-deprecated and has no effect: neither entrypoint substitutes a default address
-for an unavailable, external, forbidden, or invalid endpoint.
+`NetworkInstance` returns nil on those errors. No entrypoint ever substitutes
+an address for an unavailable, external, forbidden, or invalid endpoint.
 
 ## Work Context: mint once, sealed, one implementation
 

@@ -37,12 +37,8 @@ func TestEnvironmentVariables(t *testing.T) {
 	err = os.Setenv("CODEFLY_SDK__LOGLEVEL", "trace")
 	assert.NoError(t, err)
 
-	// No default
+	// An unresolved endpoint has no instance.
 	net := codefly.For(ctx).API(standards.REST).NetworkInstance()
-	assert.Nil(t, net)
-
-	// Default addresses cannot bypass endpoint resolution failures.
-	net = codefly.For(ctx).API(standards.REST).WithDefaultNetwork().NetworkInstance()
 	assert.Nil(t, net)
 
 	// With API and no name

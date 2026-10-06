@@ -65,7 +65,7 @@ endpoints:
 	t.Chdir(root)
 }
 
-func TestDefaultNetworkCannotBypassEndpointRefusals(t *testing.T) {
+func TestNetworkEntrypointsPreserveEndpointRefusals(t *testing.T) {
 	for _, tc := range []struct {
 		name, declaration string
 		refusal           error
@@ -76,7 +76,7 @@ func TestDefaultNetworkCannotBypassEndpointRefusals(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			prepareEndpointSelectionWorkspace(t, "client", tc.declaration, "")
-			query := codefly.For(context.Background()).Module("producer").Service("records").Endpoint("rest").API("rest").WithDefaultNetwork()
+			query := codefly.For(context.Background()).Module("producer").Service("records").Endpoint("rest").API("rest")
 			t.Run("ResolveNetworkInstance", func(t *testing.T) {
 				instance, err := query.ResolveNetworkInstance()
 				if tc.refusal != nil {
