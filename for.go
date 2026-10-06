@@ -181,7 +181,7 @@ func (q *Query) resolveLocalNetworkInstance() (*resources.NetworkInstance, error
 			q.endpointApi,
 		)
 	}
-	if selected.Visibility == resources.VisibilityExternal {
+	if selected.External() {
 		return nil, errors.New("external endpoint cannot be resolved from the local native map")
 	}
 	api := selected.API
