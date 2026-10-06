@@ -8,6 +8,19 @@
 
 # codefly + go = sdk-go
 
+## Endpoint resolution with core v0.12.0
+
+Both SDK modules pin the core **v0.12.0** release tag (`060b2bd8`). Endpoint
+visibility is `private`, `internal`, or `public`; an endpoint outside the system
+declares `location: external` independently of its visibility.
+
+`For(ctx).Module(...).Service(...).Endpoint(...).ResolveNetworkInstance()` uses
+runtime-injected endpoints first. In `local` or with no environment selected,
+it can fall back to core's deterministic native map. Core's `Endpoint.External()`
+predicate refuses that fallback for an external location. A public endpoint
+without an external location still resolves locally, even though public visibility
+also allocates an external instance.
+
 ## Work Context: mint once, sealed, one implementation
 
 A module process obtains its credential once per execution, sealed to the build
@@ -58,3 +71,7 @@ Use `SweepTenant` for tenant-by-tenant retention. `Sweep` remains an unscoped,
 all-tenant operation and needs a role the table's policies admit. See the
 [receipts package documentation](receipts/doc.go) for the binding example
 and retention requirements.
+
+Core validates each marked operation when the receipts interceptor is built.
+Operation declarations must specify a completion mode; synchronous operations
+declare `COMPLETION_CALL`. An omitted mode is refused, not defaulted.
