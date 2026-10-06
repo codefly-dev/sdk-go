@@ -21,6 +21,13 @@ predicate refuses that fallback for an external location. A public endpoint
 without an external location still resolves locally, even though public visibility
 also allocates an external instance.
 
+An endpoint-only query resolves its name and API through core's typed selector
+on the producer's declarations before reading the injected carrier. Ambiguous
+references are refused even if one candidate has an injected address. These
+queries require the workspace declarations; a deployed process without them
+must use the endpoint's explicit name and API. Fully qualified injected
+capabilities can be read without loading workspace files.
+
 The calling module is captured from the runtime identity when `For(ctx)` is
 created; `.Module(...)` selects the producer and cannot change that consumer.
 An unidentified caller is refused. For local resolution, core loads the

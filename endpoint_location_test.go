@@ -80,3 +80,31 @@ endpoints:
 `)
 	t.Chdir(root)
 }
+
+func TestEndpointOnlyLookupUsesInjectedAddress(t *testing.T) {
+	for _, location := range []string{"", resources.LocationExternal} {
+		for _, environment := range []string{"", "local", "production"} {
+			for _, source := range []string{"runtime", "embedded"} {
+				t.Run("location="+location+"/environment="+environment+"/source="+source, func(t *testing.T) {
+					prepareEndpointLocationWorkspace(t, environment, location)
+					access := &resources.EndpointAccess{
+						Endpoint:        &basev0.Endpoint{Module: "platform", Service: "location-records", Name: "rest", Api: "rest", Visibility: resources.VisibilityPublic, Location: location},
+						NetworkInstance: &basev0.NetworkInstance{Address: "https://upstream.example:9443"},
+					}
+					if source == "embedded" {
+						require.NoError(t, codefly.InjectEndpoints(access))
+						t.Cleanup(func() { require.NoError(t, codefly.InjectEndpoints()) })
+					} else {
+						variable := resources.EndpointAsEnvironmentVariable(access)
+						t.Setenv(variable.Key, variable.ValueAsString())
+						require.NoError(t, codefly.LoadEnvironmentVariables())
+					}
+					instance, err := codefly.For(context.Background()).Module("platform").Service("location-records").Endpoint("rest").ResolveNetworkInstance()
+					require.NoError(t, err)
+					require.NotNil(t, instance)
+					require.Equal(t, access.NetworkInstance.Address, instance.Address)
+				})
+			}
+		}
+	}
+}

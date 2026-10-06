@@ -2,6 +2,10 @@ package codefly_test
 
 import (
 	"context"
+	"os"
+	"strings"
+
+	basev0 "github.com/codefly-dev/core/generated/go/codefly/base/v0"
 	"path/filepath"
 	"testing"
 
@@ -87,4 +91,34 @@ func TestDefaultNetworkCannotBypassEndpointRefusals(t *testing.T) {
 			})
 		})
 	}
+}
+
+func TestEndpointOnlySelectionRefusesAmbiguityBeforeInjection(t *testing.T) {
+	prepareEndpointSelectionWorkspace(t, "client", "api: rest\n    visibility: public", "")
+	path := filepath.Join("modules", "producer", "services", "records", "service.codefly.yaml")
+	declaration, err := os.ReadFile(path)
+	require.NoError(t, err)
+	writeFile(t, path, strings.Replace(string(declaration), "name: rest", "name: primary", 1))
+	require.NoError(t, codefly.InjectEndpoints(&resources.EndpointAccess{
+		Endpoint:        &basev0.Endpoint{Module: "producer", Service: "records", Name: "primary", Api: "rest"},
+		NetworkInstance: &basev0.NetworkInstance{Address: "https://upstream.example:9443"},
+	}))
+	t.Cleanup(func() { require.NoError(t, codefly.InjectEndpoints()) })
+	instance, err := codefly.For(context.Background()).Module("producer").Service("records").Endpoint("rest").ResolveNetworkInstance()
+	require.ErrorIs(t, err, resources.ErrAmbiguousEndpointReference)
+	require.Nil(t, instance)
+}
+
+func TestEndpointOnlySelectionUsesDeclaredAPI(t *testing.T) {
+	prepareEndpointSelectionWorkspace(t, "client", "visibility: public", "")
+	// health serves REST; its name is not its protocol. Exact name takes precedence
+	// over its REST sibling, and the selected declaration supplies the carrier API.
+	require.NoError(t, codefly.InjectEndpoints(&resources.EndpointAccess{
+		Endpoint:        &basev0.Endpoint{Module: "producer", Service: "records", Name: "health", Api: "rest"},
+		NetworkInstance: &basev0.NetworkInstance{Address: "https://health.example:9443"},
+	}))
+	t.Cleanup(func() { require.NoError(t, codefly.InjectEndpoints()) })
+	instance, err := codefly.For(context.Background()).Module("producer").Service("records").Endpoint("health").ResolveNetworkInstance()
+	require.NoError(t, err)
+	require.Equal(t, "https://health.example:9443", instance.Address)
 }
