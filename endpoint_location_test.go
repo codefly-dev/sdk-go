@@ -46,6 +46,31 @@ func TestPublicEndpointResolvesLocally(t *testing.T) {
 	}
 }
 
+func TestNonlocalMissingEndpointCarrierRefusesNativeFallback(t *testing.T) {
+	for _, environment := range []string{"production", "staging"} {
+		for _, api := range []string{"", "rest"} {
+			t.Run("environment="+environment+"/api="+api, func(t *testing.T) {
+				// Boot as client with a public, locally resolvable declaration.
+				// The helper removes the canonical carrier (not an empty value),
+				// reloads the snapshot, and registers environment/snapshot cleanup.
+				prepareEndpointLocationWorkspace(t, environment, "")
+				query := codefly.For(context.Background()).Module("platform").Service("location-records").Endpoint("rest")
+				if api != "" {
+					query = query.API(api)
+				}
+				t.Run("ResolveNetworkInstance", func(t *testing.T) {
+					instance, err := query.ResolveNetworkInstance()
+					require.Error(t, err)
+					require.Nil(t, instance)
+				})
+				t.Run("NetworkInstance", func(t *testing.T) {
+					require.Nil(t, query.NetworkInstance())
+				})
+			})
+		}
+	}
+}
+
 // Both endpoints are public: only their location decides local resolvability.
 func prepareEndpointLocationWorkspace(t *testing.T, environment, location string) {
 	t.Helper()
