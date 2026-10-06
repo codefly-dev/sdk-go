@@ -177,6 +177,8 @@ Loaded on demand rather than carried here — `.claude/skills/`:
 - `agentcontext_test.go` holds this file's length budget and each skill's
   frontmatter contract. It runs under `go test ./...`, so CI enforces it with no
   workflow change.
+- `TestQueryDoesNotExposeDefaultNetworkAPI` holds the deleted query API absent,
+  including inert methods or fields. Legacy means delete, not deprecate.
 - Keep this file under ~150 lines (hard cap 200). Push depth into a nested
   `AGENTS.md` beside what it describes, or into `.claude/skills/`.
 - `CLAUDE.md` is a pointer to this file. Keep one canonical source.
