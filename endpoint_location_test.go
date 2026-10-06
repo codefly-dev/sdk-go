@@ -91,14 +91,7 @@ func TestEndpointOnlyLookupUsesInjectedAddress(t *testing.T) {
 						Endpoint:        &basev0.Endpoint{Module: "platform", Service: "location-records", Name: "rest", Api: "rest", Visibility: resources.VisibilityPublic, Location: location},
 						NetworkInstance: &basev0.NetworkInstance{Address: "https://upstream.example:9443"},
 					}
-					if source == "embedded" {
-						require.NoError(t, codefly.InjectEndpoints(access))
-						t.Cleanup(func() { require.NoError(t, codefly.InjectEndpoints()) })
-					} else {
-						variable := resources.EndpointAsEnvironmentVariable(access)
-						t.Setenv(variable.Key, variable.ValueAsString())
-						require.NoError(t, codefly.LoadEnvironmentVariables())
-					}
+					injectEndpointForTest(t, source, access)
 					instance, err := codefly.For(context.Background()).Module("platform").Service("location-records").Endpoint("rest").ResolveNetworkInstance()
 					require.NoError(t, err)
 					require.NotNil(t, instance)
@@ -106,5 +99,38 @@ func TestEndpointOnlyLookupUsesInjectedAddress(t *testing.T) {
 				})
 			}
 		}
+	}
+}
+
+// Both choices exist: an injected runtime address and a resolvable native one.
+// An explicit API also exercises the direct carrier lookup, before selection.
+func TestInjectedAddressPrecedesLocalNativeAddress(t *testing.T) {
+	for _, environment := range []string{"", "local"} {
+		for _, source := range []string{"runtime", "embedded"} {
+			t.Run("environment="+environment+"/source="+source, func(t *testing.T) {
+				prepareEndpointLocationWorkspace(t, environment, "")
+				access := &resources.EndpointAccess{
+					Endpoint:        &basev0.Endpoint{Module: "platform", Service: "location-records", Name: "rest", Api: "rest", Visibility: resources.VisibilityPublic},
+					NetworkInstance: &basev0.NetworkInstance{Address: "http://runtime.example:43210"},
+				}
+				injectEndpointForTest(t, source, access)
+				instance, err := codefly.For(context.Background()).Module("platform").Service("location-records").Endpoint("rest").API("rest").ResolveNetworkInstance()
+				require.NoError(t, err)
+				require.NotNil(t, instance)
+				require.Equal(t, access.NetworkInstance.Address, instance.Address)
+			})
+		}
+	}
+}
+
+func injectEndpointForTest(t *testing.T, source string, access *resources.EndpointAccess) {
+	t.Helper()
+	if source == "embedded" {
+		require.NoError(t, codefly.InjectEndpoints(access))
+		t.Cleanup(func() { require.NoError(t, codefly.InjectEndpoints()) })
+	} else {
+		variable := resources.EndpointAsEnvironmentVariable(access)
+		t.Setenv(variable.Key, variable.ValueAsString())
+		require.NoError(t, codefly.LoadEnvironmentVariables())
 	}
 }
