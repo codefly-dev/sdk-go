@@ -41,6 +41,10 @@ a private endpoint queried across modules.
 `ResolveNetworkInstance` returns resolution errors with no instance, and
 `NetworkInstance` returns nil on those errors. No entrypoint ever substitutes
 an address for an unavailable, external, forbidden, or invalid endpoint.
+After selection, core's key/value lookup distinguishes an absent carrier from
+a present value. Only absence permits native fallback in unset or `local`
+environments. A present value is parsed by core; malformed or empty addresses
+are refused with no instance, even when a native address could be computed.
 
 ## Work Context: mint once, sealed, one implementation
 

@@ -114,16 +114,21 @@ func (q *Query) ResolveNetworkInstance() (*resources.NetworkInstance, error) {
 		return nil, err
 	}
 	info = selected.Information()
-	instance, err := resources.FindNetworkInstanceInEnvironmentVariables(q.ctx, info, codeflyEnvironmentVariables())
-	if err == nil {
+	key := resources.EndpointAsEnvironmentVariableKey(info)
+	address, lookupErr := resources.FindValueInEnvironmentVariables(q.ctx, key, codeflyEnvironmentVariables())
+	if lookupErr == nil {
+		instance, parseErr := resources.ParseAddress(address)
+		if parseErr != nil {
+			return nil, parseErr
+		}
 		return instance, nil
 	}
 	if Environment() != "" && !IsLocal() {
-		return nil, err
+		return nil, lookupErr
 	}
 	local, localErr := q.localNetworkInstance(workspace, selected)
 	if localErr != nil {
-		return nil, fmt.Errorf("runtime endpoint unavailable (%v); local endpoint unavailable (%w)", err, localErr)
+		return nil, fmt.Errorf("runtime endpoint unavailable (%v); local endpoint unavailable (%w)", lookupErr, localErr)
 	}
 	return local, nil
 }

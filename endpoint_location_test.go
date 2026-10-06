@@ -2,6 +2,7 @@ package codefly_test
 
 import (
 	"context"
+	"os"
 	"path/filepath"
 	"testing"
 
@@ -51,9 +52,11 @@ func prepareEndpointLocationWorkspace(t *testing.T, environment, location string
 	initEndpointConsumer(t, "client")
 	t.Cleanup(func() { require.NoError(t, codefly.LoadEnvironmentVariables()) })
 	t.Setenv("CODEFLY__ENVIRONMENT", environment)
-	t.Setenv(resources.EndpointAsEnvironmentVariableKey(&resources.EndpointInformation{
+	key := resources.EndpointAsEnvironmentVariableKey(&resources.EndpointInformation{
 		Module: "platform", Service: "location-records", Name: "rest", API: "rest",
-	}), "")
+	})
+	t.Setenv(key, "") // register cleanup before removing the carrier entirely
+	require.NoError(t, os.Unsetenv(key))
 	require.NoError(t, codefly.LoadEnvironmentVariables())
 	root := t.TempDir()
 	writeFile(t, filepath.Join(root, "workspace.codefly.yaml"), `name: sdk-location-test
