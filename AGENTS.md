@@ -110,6 +110,8 @@ see the skill below.
   exactly `private`/`internal`/`public`; `external` is a location. Local fallback
   uses core's `Endpoint.External()` predicate and still resolves public
   endpoints without an external location. Do not recreate removed visibility names.
+  Preserve the calling module separately from the queried producer; core's
+  `SelectEndpointForReference` owns selection on module-adjusted declarations.
 - **`CODEFLY__` is spelled in this repo, nowhere else.** A consumer needing a
   value gets a typed accessor here; the prefix constant lives in
   `runtime_value.go` for that reason.

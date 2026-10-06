@@ -217,6 +217,7 @@ agent:
 }
 
 func TestEndpointResolutionFallsBackToDeterministicLocalWorkspace(t *testing.T) {
+	t.Setenv(resources.ModulePrefix, "platform")
 	ctx := context.Background()
 	root := t.TempDir()
 	t.Setenv("CODEFLY__ENVIRONMENT", "")

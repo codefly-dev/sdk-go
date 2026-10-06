@@ -18,6 +18,7 @@ import (
 
 type Query struct {
 	module             string
+	consumerModule     string
 	service            string
 	endpointName       string
 	endpointApi        string
@@ -27,7 +28,7 @@ type Query struct {
 }
 
 func For(ctx context.Context) *Query {
-	q := &Query{ctx: ctx}
+	q := &Query{ctx: ctx, consumerModule: strings.TrimSpace(os.Getenv(resources.ModulePrefix))}
 	// The process environment is the runtime authority. Falling back to the
 	// values captured by Init preserves callers that construct a query after
 	// startup, while the direct read also makes early queries and runtime
@@ -106,6 +107,9 @@ func (q *Query) NetworkInstance() *resources.NetworkInstance {
 // loaded agents use the same address as `codefly endpoint` without parsing
 // Codefly environment carriers or shelling out to the CLI.
 func (q *Query) ResolveNetworkInstance() (*resources.NetworkInstance, error) {
+	if q.consumerModule == "" {
+		return nil, resources.ErrConsumerNotIdentified
+	}
 	q.Normalize()
 	info := &resources.EndpointInformation{
 		Module:  q.module,
@@ -149,38 +153,13 @@ func (q *Query) resolveLocalNetworkInstance() (*resources.NetworkInstance, error
 	if err != nil {
 		return nil, err
 	}
-	var selected *resources.Endpoint
-	for _, endpoint := range service.Endpoints {
-		api := endpoint.API
-		if api == "" && standards.IsSupportedAPI(endpoint.Name) == nil {
-			api = endpoint.Name
-		}
-		if q.endpointName != "" && !resources.Match(endpoint.Name, q.endpointName) {
-			continue
-		}
-		if q.endpointApi != "" && !resources.Match(api, q.endpointApi) {
-			continue
-		}
-		if selected != nil {
-			return nil, fmt.Errorf(
-				"multiple endpoints match %s/%s name=%q api=%q",
-				q.module,
-				q.service,
-				q.endpointName,
-				q.endpointApi,
-			)
-		}
-		selected = endpoint
+	selection, err := resources.SelectEndpointForReference(q.consumerModule, &resources.EndpointInformation{
+		Module: q.module, Service: q.service, Name: q.endpointName, API: q.endpointApi,
+	}, service.Endpoints)
+	if err != nil {
+		return nil, err
 	}
-	if selected == nil {
-		return nil, fmt.Errorf(
-			"no endpoint matches %s/%s name=%q api=%q",
-			q.module,
-			q.service,
-			q.endpointName,
-			q.endpointApi,
-		)
-	}
+	selected := selection.Endpoint
 	if selected.External() {
 		return nil, errors.New("external endpoint cannot be resolved from the local native map")
 	}

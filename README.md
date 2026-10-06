@@ -21,6 +21,14 @@ predicate refuses that fallback for an external location. A public endpoint
 without an external location still resolves locally, even though public visibility
 also allocates an external instance.
 
+The calling module is captured from the runtime identity when `For(ctx)` is
+created; `.Module(...)` selects the producer and cannot change that consumer.
+An unidentified caller is refused. For local resolution, core loads the
+producer's module-adjusted declarations and `SelectEndpointForReference` checks
+visibility, internal allowlists, exact names, API qualifiers, and ambiguity.
+Its refusal is returned to the caller, including `ErrEndpointNotReachable` for
+a private endpoint queried across modules.
+
 ## Work Context: mint once, sealed, one implementation
 
 A module process obtains its credential once per execution, sealed to the build
