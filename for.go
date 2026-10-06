@@ -26,7 +26,7 @@ type Query struct {
 }
 
 func For(ctx context.Context) *Query {
-	q := &Query{ctx: ctx, consumerModule: strings.TrimSpace(os.Getenv(resources.ModulePrefix))}
+	q := &Query{ctx: ctx, consumerModule: pinnedConsumerIdentity()}
 	// The process environment is the runtime authority. Falling back to the
 	// values captured by Init preserves callers that construct a query after
 	// startup, while the direct read also makes early queries and runtime
@@ -97,8 +97,8 @@ func (q *Query) NetworkInstance() *resources.NetworkInstance {
 // loaded agents use the same address as `codefly endpoint` without parsing
 // Codefly environment carriers or shelling out to the CLI.
 func (q *Query) ResolveNetworkInstance() (*resources.NetworkInstance, error) {
-	if q.consumerModule == "" {
-		return nil, resources.ErrConsumerNotIdentified
+	if err := checkConsumerIdentity(q.consumerModule); err != nil {
+		return nil, err
 	}
 	q.Normalize()
 	info := &resources.EndpointInformation{

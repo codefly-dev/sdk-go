@@ -41,11 +41,15 @@ func Init(ctx context.Context) (*wool.Provider, error) {
 	if err := LoadEnvironmentVariables(); err != nil {
 		return nil, err
 	}
+	identity := strings.TrimSpace(os.Getenv(resources.ModulePrefix))
+	if err := pinConsumerIdentity(identity); err != nil {
+		return nil, err
+	}
 	// For logging before we get the runningService
 	var provider *wool.Provider
 
 	service = os.Getenv(resources.ServicePrefix)
-	module = os.Getenv(resources.ModulePrefix)
+	module = identity
 
 	// Now update the provider
 	id := resources.ServiceIdentity{Name: service, Module: module}

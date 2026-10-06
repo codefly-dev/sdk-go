@@ -48,6 +48,7 @@ func TestPublicEndpointResolvesLocally(t *testing.T) {
 // Both endpoints are public: only their location decides local resolvability.
 func prepareEndpointLocationWorkspace(t *testing.T, environment, location string) {
 	t.Helper()
+	initEndpointConsumer(t, "client")
 	t.Cleanup(func() { require.NoError(t, codefly.LoadEnvironmentVariables()) })
 	t.Setenv("CODEFLY__ENVIRONMENT", environment)
 	t.Setenv(resources.EndpointAsEnvironmentVariableKey(&resources.EndpointInformation{

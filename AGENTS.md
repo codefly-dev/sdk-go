@@ -112,6 +112,7 @@ see the skill below.
   endpoints without an external location. Do not recreate removed visibility names.
   Preserve the calling module separately from the queried producer; core's
   `SelectEndpointForReference` owns selection on module-adjusted declarations.
+  `Init` pins that consumer once; endpoint resolution refuses identity drift.
 - **`CODEFLY__` is spelled in this repo, nowhere else.** A consumer needing a
   value gets a typed accessor here; the prefix constant lives in
   `runtime_value.go` for that reason.

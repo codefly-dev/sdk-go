@@ -45,7 +45,7 @@ func TestLocalEndpointSelectionUsesConsumerBoundary(t *testing.T) {
 func prepareEndpointSelectionWorkspace(t *testing.T, consumer, declaration, moduleInterface string) {
 	t.Helper()
 	t.Cleanup(func() { require.NoError(t, codefly.LoadEnvironmentVariables()) })
-	t.Setenv(resources.ModulePrefix, consumer)
+	initEndpointConsumer(t, consumer)
 	t.Setenv("CODEFLY__ENVIRONMENT", "local")
 	require.NoError(t, codefly.LoadEnvironmentVariables())
 	root := t.TempDir()

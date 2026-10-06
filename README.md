@@ -27,9 +27,12 @@ with an explicit API. Ambiguous, forbidden, and API-mismatched references are
 refused even if a matching carrier exists. All endpoint queries require the
 workspace declarations: an address carrier alone cannot establish eligibility.
 
-The calling module is captured from the runtime identity when `For(ctx)` is
-created; `.Module(...)` selects the producer and cannot change that consumer.
-An unidentified caller is refused. For local resolution, core loads the
+Call `codefly.Init(ctx)` at boot to pin the calling module from the runtime
+identity. Endpoint queries before initialization are refused. `.Module(...)`
+selects the producer and cannot change the consumer. Each resolution checks the
+live identity against the boot pin and returns `ErrAuthorityValueChanged` on
+drift, including for queries created before the change. Reloading the snapshot
+or calling `Init` again cannot adopt a different identity. Core loads the
 producer's module-adjusted declarations and `SelectEndpointForReference` checks
 visibility, internal allowlists, exact names, API qualifiers, and ambiguity.
 Its refusal is returned to the caller, including `ErrEndpointNotReachable` for

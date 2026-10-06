@@ -28,6 +28,7 @@ func Must[T any](obj T, err error) T {
 }
 
 func TestEnvironmentVariables(t *testing.T) {
+	initEndpointConsumer(t, "mod")
 	ctx := context.Background()
 	wool.SetGlobalLogLevel(wool.TRACE)
 
@@ -211,7 +212,7 @@ agent:
 }
 
 func TestEndpointResolutionFallsBackToDeterministicLocalWorkspace(t *testing.T) {
-	t.Setenv(resources.ModulePrefix, "platform")
+	initEndpointConsumer(t, "platform")
 	ctx := context.Background()
 	root := t.TempDir()
 	t.Setenv("CODEFLY__ENVIRONMENT", "")
@@ -441,6 +442,7 @@ func TestInjectConfigurationsDropsPriorInjectedValues(t *testing.T) {
 }
 
 func TestInjectEndpointsUsesTypedSnapshotAndRejectsInvalidReplacement(t *testing.T) {
+	initEndpointConsumer(t, "mod")
 	prepareDeclaredEndpointWorkspace(t, "embedded", "store", "tcp", "tcp")
 	ctx := context.Background()
 	t.Cleanup(func() {
