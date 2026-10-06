@@ -45,6 +45,7 @@ type Registry struct {
 // and the interceptor refuses to start over a method carrying such a policy.
 func Operation() *runnablev0.Operation {
 	return &runnablev0.Operation{
+		Completion:     basev0.RunnableExecution_COMPLETION_CALL,
 		AttemptTimeout: durationpb.New(10 * time.Second),
 		TotalTimeout:   durationpb.New(30 * time.Second),
 		MaxAttempts:    3,
