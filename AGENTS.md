@@ -114,12 +114,15 @@ see the skill below.
   `SelectEndpointForReference` owns selection on module-adjusted declarations.
   `Init` pins that consumer once; endpoint resolution refuses identity drift.
 - **A deployed process has no workspace, so its carriers are authoritative.**
-  The builder image ships the binary alone. Outside `local` with no workspace
+  The builder image ships the binary alone, including in local Kubernetes pods.
+  In any environment with no workspace
   on disk, `ResolveNetworkInstance` reads the carrier keyed by the query's
   canonical identity and refuses only absence (`ErrEndpointCarrierAbsent`) or a
   malformed value: the composition judged eligibility at render and the mesh
   enforces it. With a workspace, selection comes first in every environment.
-  No flag decides the path; the environment and the workspace's presence do.
+  No flag decides the path; the workspace's
+  presence does. Native fallback requires a workspace and a `local` or unset
+  environment.
 - **`CODEFLY__` is spelled in this repo, nowhere else.** A consumer needing a
   value gets a typed accessor here; the prefix constant lives in
   `runtime_value.go` for that reason.

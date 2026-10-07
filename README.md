@@ -25,21 +25,21 @@ allocates an external instance.
 With a workspace on disk, every query resolves its name and API through core's
 typed selector on the producer's declarations before reading the injected
 carrier, including queries with an explicit API. Ambiguous, forbidden, and
-API-mismatched references are refused even if a matching carrier exists. A
-local process without a workspace is refused with `ErrNoDeclaredEndpoints`: an
-address carrier alone cannot establish eligibility there.
+API-mismatched references are refused even if a matching carrier exists.
 
 A deployed process has no workspace: the builder image ships the binary alone.
-Outside `local`, with no workspace on disk, the carriers the composition
+In every environment, with no workspace on disk, the carriers the composition
 injected are the composition's judgement — the CLI's join decided at render
 which endpoints the consumer may reach, and the mesh enforces it on the cell.
 Such a process resolves from the carrier keyed by the query's canonical
 identity (module, service, name, API; a name that is a supported API serves
 that API, as core reads a declaration) and refuses only an absent carrier, with
 `ErrEndpointCarrierAbsent`, or a malformed one. It never computes a native
-address. A non-local process that does ship its workspace keeps selection
-first. Nothing selects the path but the environment and the presence of a
-workspace. A reference to an endpoint not named after its API must qualify the
+address. This includes Kubernetes pods in a `local` environment: the environment
+name does not mean the workspace is shipped in their image. A process that does
+ship its workspace keeps selection first. The workspace's presence determines
+the path; native fallback requires a workspace and a `local` or unset environment.
+A reference to an endpoint not named after its API must qualify the
 API with `.API(...)` there, since no declaration is on disk to supply it.
 
 Call `codefly.Init(ctx)` at boot to pin the calling module from the runtime
@@ -62,8 +62,9 @@ queried across modules.
 an address for an unavailable, external, forbidden, or invalid endpoint.
 After selection, core's key/value lookup distinguishes an absent carrier from
 a present value under the selected declaration's key. In unset or `local`
-environments only absence permits native fallback; outside `local`, absence is
-refused with `ErrEndpointCarrierAbsent`. A carrier keyed differently from the
+environments with a workspace only absence permits native fallback; without
+a workspace or outside `local`, absence is refused with
+`ErrEndpointCarrierAbsent`. A carrier keyed differently from the
 selected declaration — another API, or another spelling — is not found under
 that key and reads as absent, so in `local` the native fallback runs in its
 place until the declaration-aware carrier validator (core#716) lands with the

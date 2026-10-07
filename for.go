@@ -87,10 +87,10 @@ func (q *Query) NetworkInstance() *resources.NetworkInstance {
 	return nil
 }
 
-// ErrEndpointCarrierAbsent reports that a process outside the local
-// environment has no carrier for the endpoint the query names. The composition
-// injects a carrier for every endpoint it grants a consumer, so absence is the
-// composition's answer and nothing is substituted for it: a deployed process
+// ErrEndpointCarrierAbsent reports that a process has no carrier for the
+// endpoint the query names and cannot use a local workspace fallback.
+// The composition injects a carrier for every endpoint it grants a consumer,
+// so absence is its answer and nothing is substituted for it: a deployed process
 // has no workspace to compute a native address from, and a process that ships
 // its workspace never falls back outside local.
 var ErrEndpointCarrierAbsent = errors.New("codefly: no carrier for the endpoint the query names")
@@ -108,11 +108,12 @@ var ErrEndpointCarrierAbsent = errors.New("codefly: no carrier for the endpoint 
 // A deployed process has no workspace: the builder image ships the binary
 // alone. There the carriers the composition injected are the composition's
 // judgement — the CLI's join decided at render which endpoints this consumer
-// may reach, and the mesh enforces it on the cell — so a non-local process
+// may reach, and the mesh enforces it on the cell. A process in any environment
 // with no workspace resolves from the carrier keyed by the query's canonical
 // identity and refuses only an absent carrier (ErrEndpointCarrierAbsent) or a
 // malformed one. It never computes a native address. No flag selects the
-// path: the environment and the presence of a workspace decide.
+// path: the presence of a workspace decides. Native fallback requires a
+// workspace and a local or unset environment.
 func (q *Query) ResolveNetworkInstance() (*resources.NetworkInstance, error) {
 	if err := checkConsumerIdentity(q.consumerModule); err != nil {
 		return nil, err
@@ -126,9 +127,6 @@ func (q *Query) ResolveNetworkInstance() (*resources.NetworkInstance, error) {
 		return nil, err
 	}
 	if workspace == nil {
-		if !deployed() {
-			return nil, resources.ErrNoDeclaredEndpoints
-		}
 		return q.resolveFromAuthoritativeCarrier()
 	}
 	// The declaration decides eligibility before any carrier can supply an
@@ -147,7 +145,7 @@ func (q *Query) ResolveNetworkInstance() (*resources.NetworkInstance, error) {
 	if present {
 		return instance, err
 	}
-	if deployed() {
+	if Environment() != "" && !IsLocal() {
 		return nil, absentCarrier(info)
 	}
 	local, localErr := q.localNetworkInstance(workspace, selected)
@@ -157,15 +155,7 @@ func (q *Query) ResolveNetworkInstance() (*resources.NetworkInstance, error) {
 	return local, nil
 }
 
-// deployed reports whether this process runs in an explicit, non-local
-// environment: one the runtime composed and started, rather than one run from
-// a workspace. Environment reads the runtime's carrier live, as every
-// process-identity accessor does.
-func deployed() bool {
-	return Environment() != "" && !IsLocal()
-}
-
-// resolveFromAuthoritativeCarrier answers a deployed process from its carriers
+// resolveFromAuthoritativeCarrier answers a workspace-free process from its carriers
 // alone. The carrier is keyed by the query's canonical identity — the
 // declaration is not on disk to supply any part of it — and nothing is judged
 // here: the composition already decided, at render, that this consumer may
