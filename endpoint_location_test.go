@@ -105,6 +105,7 @@ agent:
 endpoints:
   - name: rest
     visibility: public
+    exposure: none
     location: "`+location+`"
 `)
 	t.Chdir(root)

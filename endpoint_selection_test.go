@@ -20,13 +20,19 @@ func TestLocalEndpointSelectionUsesConsumerBoundary(t *testing.T) {
 		refusal                                      error
 	}{
 		{name: "private foreign consumer", consumer: "client", declaration: "visibility: private", refusal: resources.ErrEndpointNotReachable},
-		{name: "unidentified", declaration: "visibility: public", refusal: resources.ErrConsumerNotIdentified},
-		{name: "whitespace consumer", consumer: " ", declaration: "visibility: public", refusal: resources.ErrConsumerNotIdentified},
+		{name: "unidentified", declaration: "visibility: public\n    exposure: none", refusal: resources.ErrConsumerNotIdentified},
+		{name: "whitespace consumer", consumer: " ", declaration: "visibility: public\n    exposure: none", refusal: resources.ErrConsumerNotIdentified},
 		{name: "private same module", consumer: "producer", declaration: "visibility: private"},
-		{name: "internal unlisted", consumer: "client", declaration: "visibility: internal\n    allow-modules: [other]", refusal: resources.ErrEndpointNotReachable},
-		{name: "internal listed", consumer: "client", declaration: "visibility: internal\n    allow-modules: [client]"},
-		{name: "module hides public", consumer: "client", declaration: "visibility: public", moduleInterface: "interface:\n  endpoints:\n    - service: records\n      endpoint: health\n      visibility: public\n", refusal: resources.ErrEndpointNotReachable},
-		{name: "module exports private", consumer: "client", declaration: "visibility: private", moduleInterface: "interface:\n  endpoints:\n    - service: records\n      endpoint: rest\n      visibility: internal\n      allow-modules: [client]\n"},
+		// Core deleted the authored allow-list: an endpoint never names its
+		// consumers, and `internal` means "reachable by whatever composes this
+		// module", so reach no longer varies by consumer and there is no
+		// "unlisted" refusal left to assert — a declaration that still authored
+		// one is refused when the manifest is read, which the external case
+		// below and core's own fixtures cover. The consumer boundary this test
+		// is about is now carried entirely by `private`, above.
+		{name: "internal across modules", consumer: "client", declaration: "visibility: internal"},
+		{name: "module hides public", consumer: "client", declaration: "visibility: public\n    exposure: none", moduleInterface: "interface:\n  endpoints:\n    - service: records\n      endpoint: health\n      visibility: public\n", refusal: resources.ErrEndpointNotReachable},
+		{name: "module exports private", consumer: "client", declaration: "visibility: private", moduleInterface: "interface:\n  endpoints:\n    - service: records\n      endpoint: rest\n      visibility: internal\n"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			prepareEndpointSelectionWorkspace(t, tc.consumer, tc.declaration, tc.moduleInterface)
@@ -61,7 +67,7 @@ agent:
   publisher: codefly.dev
 endpoints:
   - name: rest
-    `+declaration+"\n  - name: health\n    api: rest\n    visibility: public\n")
+    `+declaration+"\n  - name: health\n    api: rest\n    visibility: public\n    exposure: none\n")
 	t.Chdir(root)
 }
 
@@ -70,7 +76,7 @@ func TestNetworkEntrypointsPreserveEndpointRefusals(t *testing.T) {
 		name, declaration string
 		refusal           error
 	}{
-		{name: "external", declaration: "visibility: public\n    location: external"},
+		{name: "external", declaration: "visibility: public\n    location: external\n    exposure: none"},
 		{name: "invalid visibility", declaration: "visibility: external", refusal: resources.ErrInvalidEndpointDeclaration},
 		{name: "private", declaration: "visibility: private", refusal: resources.ErrEndpointNotReachable},
 	} {
@@ -94,7 +100,7 @@ func TestNetworkEntrypointsPreserveEndpointRefusals(t *testing.T) {
 }
 
 func TestEndpointOnlySelectionRefusesAmbiguityBeforeInjection(t *testing.T) {
-	prepareEndpointSelectionWorkspace(t, "client", "api: rest\n    visibility: public", "")
+	prepareEndpointSelectionWorkspace(t, "client", "api: rest\n    visibility: public\n    exposure: none", "")
 	path := filepath.Join("modules", "producer", "services", "records", "service.codefly.yaml")
 	declaration, err := os.ReadFile(path)
 	require.NoError(t, err)
@@ -110,7 +116,7 @@ func TestEndpointOnlySelectionRefusesAmbiguityBeforeInjection(t *testing.T) {
 }
 
 func TestEndpointOnlySelectionUsesDeclaredAPI(t *testing.T) {
-	prepareEndpointSelectionWorkspace(t, "client", "visibility: public", "")
+	prepareEndpointSelectionWorkspace(t, "client", "visibility: public\n    exposure: none", "")
 	// health serves REST; its name is not its protocol. Exact name takes precedence
 	// over its REST sibling, and the selected declaration supplies the carrier API.
 	require.NoError(t, codefly.InjectEndpoints(&resources.EndpointAccess{
