@@ -8,42 +8,66 @@
 
 # codefly + go = sdk-go
 
-## Endpoint resolution with core v0.12.0
+## Endpoint resolution with core v0.13.0
 
-Both SDK modules pin the core **v0.12.0** release tag (`060b2bd8`). Endpoint
+Both SDK modules pin the core **v0.13.0** release tag (`f2423c9c`). Endpoint
 visibility is `private`, `internal`, or `public`; an endpoint outside the system
 declares `location: external` independently of its visibility.
 
 `For(ctx).Module(...).Service(...).Endpoint(...).ResolveNetworkInstance()` uses
-core selection before looking up a runtime-injected address. In `local` or with no environment selected,
-it can fall back to core's deterministic native map. Core's `Endpoint.External()`
-predicate refuses that fallback for an external location. A public endpoint
-without an external location still resolves locally, even though public visibility
-also allocates an external instance.
+core selection before looking up a runtime-injected address wherever the
+workspace is on disk. In `local` or with no environment selected, it can fall
+back to core's deterministic native map. Core's `Endpoint.External()` predicate
+refuses that fallback for an external location. A public endpoint without an
+external location still resolves locally, even though public visibility also
+allocates an external instance.
 
-Every query resolves its name and API through core's typed selector on the
-producer's declarations before reading the injected carrier, including queries
-with an explicit API. Ambiguous, forbidden, and API-mismatched references are
-refused even if a matching carrier exists. All endpoint queries require the
-workspace declarations: an address carrier alone cannot establish eligibility.
+With a workspace on disk, every query resolves its name and API through core's
+typed selector on the producer's declarations before reading the injected
+carrier, including queries with an explicit API. Ambiguous, forbidden, and
+API-mismatched references are refused even if a matching carrier exists. A
+local process without a workspace is refused with `ErrNoDeclaredEndpoints`: an
+address carrier alone cannot establish eligibility there.
+
+A deployed process has no workspace: the builder image ships the binary alone.
+Outside `local`, with no workspace on disk, the carriers the composition
+injected are the composition's judgement — the CLI's join decided at render
+which endpoints the consumer may reach, and the mesh enforces it on the cell.
+Such a process resolves from the carrier keyed by the query's canonical
+identity (module, service, name, API; a name that is a supported API serves
+that API, as core reads a declaration) and refuses only an absent carrier, with
+`ErrEndpointCarrierAbsent`, or a malformed one. It never computes a native
+address. A non-local process that does ship its workspace keeps selection
+first. Nothing selects the path but the environment and the presence of a
+workspace. A reference to an endpoint not named after its API must qualify the
+API with `.API(...)` there, since no declaration is on disk to supply it.
 
 Call `codefly.Init(ctx)` at boot to pin the calling module from the runtime
-identity. Endpoint queries before initialization are refused. `.Module(...)`
-selects the producer and cannot change the consumer. Each resolution checks the
-live identity against the boot pin and returns `ErrAuthorityValueChanged` on
-drift, including for queries created before the change. Reloading the snapshot
-or calling `Init` again cannot adopt a different identity. Core loads the
-producer's module-adjusted declarations and `SelectEndpointForReference` checks
-visibility, internal allowlists, exact names, API qualifiers, and ambiguity.
-Its refusal is returned to the caller, including `ErrEndpointNotReachable` for
-a private endpoint queried across modules.
+identity. `Init` refuses a process whose runtime identity carrier is unset or
+blank with `ErrConsumerNotIdentified`. Every codefly-managed flow sets that
+carrier, and a process that fails `Init` must not serve, so the refusal gates
+configuration and secret reads as well as endpoints. Endpoint queries before
+initialization are refused. `.Module(...)` selects the producer and cannot
+change the consumer. Each resolution checks the live identity against the boot
+pin and returns `ErrAuthorityValueChanged` on drift, including for queries
+created before the change. Reloading the snapshot or calling `Init` again
+cannot adopt a different identity. Core loads the producer's module-adjusted
+declarations and `SelectEndpointForReference` checks visibility, internal
+allowlists, exact names, API qualifiers, and ambiguity. Its refusal is returned
+to the caller, including `ErrEndpointNotReachable` for a private endpoint
+queried across modules.
 
 `ResolveNetworkInstance` returns resolution errors with no instance, and
 `NetworkInstance` returns nil on those errors. No entrypoint ever substitutes
 an address for an unavailable, external, forbidden, or invalid endpoint.
 After selection, core's key/value lookup distinguishes an absent carrier from
-a present value. Only absence permits native fallback in unset or `local`
-environments. A present value is parsed by core; malformed or empty addresses
+a present value under the selected declaration's key. In unset or `local`
+environments only absence permits native fallback; outside `local`, absence is
+refused with `ErrEndpointCarrierAbsent`. A carrier keyed differently from the
+selected declaration — another API, or another spelling — is not found under
+that key and reads as absent, so in `local` the native fallback runs in its
+place until the declaration-aware carrier validator (core#716) lands with the
+v0.14.0 re-pin. A present value is parsed by core; malformed or empty addresses
 are refused with no instance, even when a native address could be computed.
 
 ## Work Context: mint once, sealed, one implementation

@@ -7,7 +7,7 @@ the capability and this module re-exports core's verifier by type alias, in
 `core.go`. Adding a dependency here is a design change — see
 `.claude/skills/dual-module-change`.
 
-Both modules pin core's **v0.12.0 release tag** (`060b2bd8`). Core owns the
+Both modules pin core's **v0.13.0 release tag** (`f2423c9c`). Core owns the
 endpoint vocabulary: visibility is `private`/`internal`/`public`, and
 `location: external` describes an endpoint outside the system. The root SDK
 uses core's location predicate for local resolution; public visibility alone

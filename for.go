@@ -87,76 +87,167 @@ func (q *Query) NetworkInstance() *resources.NetworkInstance {
 	return nil
 }
 
+// ErrEndpointCarrierAbsent reports that a process outside the local
+// environment has no carrier for the endpoint the query names. The composition
+// injects a carrier for every endpoint it grants a consumer, so absence is the
+// composition's answer and nothing is substituted for it: a deployed process
+// has no workspace to compute a native address from, and a process that ships
+// its workspace never falls back outside local.
+var ErrEndpointCarrierAbsent = errors.New("codefly: no carrier for the endpoint the query names")
+
 // ResolveNetworkInstance returns one typed endpoint or a diagnostic error.
 //
-// Every query first asks core to select an eligible declared endpoint, using
-// workspace declarations. Injected addresses precede native ones only after
-// selection succeeds. In Codefly LOCAL (and
-// before an environment is explicitly selected), the SDK falls back to the
-// workspace's deterministic native endpoint map. This lets independently
-// loaded agents use the same address as `codefly endpoint` without parsing
-// Codefly environment carriers or shelling out to the CLI.
+// With a workspace on disk, every query first asks core to select an eligible
+// declared endpoint for the calling module, and only then reads the carrier
+// keyed from the selected declaration. In Codefly LOCAL (and before an
+// environment is explicitly selected), an absent carrier falls back to the
+// workspace's deterministic native endpoint map, so independently loaded
+// agents use the same address as `codefly endpoint` without parsing Codefly
+// environment carriers or shelling out to the CLI.
+//
+// A deployed process has no workspace: the builder image ships the binary
+// alone. There the carriers the composition injected are the composition's
+// judgement — the CLI's join decided at render which endpoints this consumer
+// may reach, and the mesh enforces it on the cell — so a non-local process
+// with no workspace resolves from the carrier keyed by the query's canonical
+// identity and refuses only an absent carrier (ErrEndpointCarrierAbsent) or a
+// malformed one. It never computes a native address. No flag selects the
+// path: the environment and the presence of a workspace decide.
 func (q *Query) ResolveNetworkInstance() (*resources.NetworkInstance, error) {
 	if err := checkConsumerIdentity(q.consumerModule); err != nil {
 		return nil, err
 	}
 	q.Normalize()
-	info := &resources.EndpointInformation{
+	if strings.TrimSpace(q.module) == "" || strings.TrimSpace(q.service) == "" {
+		return nil, errors.New("module and service are required for endpoint selection")
+	}
+	workspace, err := resources.FindWorkspaceUp(q.ctx)
+	if err != nil {
+		return nil, err
+	}
+	if workspace == nil {
+		if !deployed() {
+			return nil, resources.ErrNoDeclaredEndpoints
+		}
+		return q.resolveFromAuthoritativeCarrier()
+	}
+	// The declaration decides eligibility before any carrier can supply an
+	// address. An explicit API is a qualifier core must judge, not a bypass.
+	selected, err := q.selectEndpoint(workspace, &resources.EndpointInformation{
 		Module:  q.module,
 		Service: q.service,
 		API:     q.endpointApi,
 		Name:    q.endpointName,
-	}
-	// The declaration decides eligibility before any carrier can supply an
-	// address. An explicit API is a qualifier core must judge, not a bypass.
-	workspace, selected, err := q.selectEndpoint(info)
+	})
 	if err != nil {
 		return nil, err
 	}
-	info = selected.Information()
-	key := resources.EndpointAsEnvironmentVariableKey(info)
-	address, lookupErr := resources.FindValueInEnvironmentVariables(q.ctx, key, codeflyEnvironmentVariables())
-	if lookupErr == nil {
-		instance, parseErr := resources.ParseAddress(address)
-		if parseErr != nil {
-			return nil, parseErr
-		}
-		return instance, nil
+	info := selected.Information()
+	instance, present, err := q.carrierInstance(info)
+	if present {
+		return instance, err
 	}
-	if Environment() != "" && !IsLocal() {
-		return nil, lookupErr
+	if deployed() {
+		return nil, absentCarrier(info)
 	}
 	local, localErr := q.localNetworkInstance(workspace, selected)
 	if localErr != nil {
-		return nil, fmt.Errorf("runtime endpoint unavailable (%v); local endpoint unavailable (%w)", lookupErr, localErr)
+		return nil, fmt.Errorf("%w; local endpoint unavailable (%w)", absentCarrier(info), localErr)
 	}
 	return local, nil
 }
 
-func (q *Query) selectEndpoint(info *resources.EndpointInformation) (*resources.Workspace, *resources.Endpoint, error) {
-	if strings.TrimSpace(q.module) == "" || strings.TrimSpace(q.service) == "" {
-		return nil, nil, errors.New("module and service are required for endpoint selection")
+// deployed reports whether this process runs in an explicit, non-local
+// environment: one the runtime composed and started, rather than one run from
+// a workspace. Environment reads the runtime's carrier live, as every
+// process-identity accessor does.
+func deployed() bool {
+	return Environment() != "" && !IsLocal()
+}
+
+// resolveFromAuthoritativeCarrier answers a deployed process from its carriers
+// alone. The carrier is keyed by the query's canonical identity — the
+// declaration is not on disk to supply any part of it — and nothing is judged
+// here: the composition already decided, at render, that this consumer may
+// reach what it injected.
+func (q *Query) resolveFromAuthoritativeCarrier() (*resources.NetworkInstance, error) {
+	info := q.canonicalInformation()
+	if strings.TrimSpace(info.Name) == "" {
+		return nil, fmt.Errorf("%w: the query names no endpoint", resources.ErrNoSuchEndpoint)
 	}
-	workspace, err := resources.FindWorkspaceUp(q.ctx)
+	if info.UnknownAPI() {
+		// Only the declaration could say which API an endpoint named this way
+		// serves, and there is none on disk; the carrier cannot be keyed.
+		return nil, fmt.Errorf("%w: %s does not qualify its API and no declaration is on disk to supply it; name it with API(...)",
+			ErrEndpointCarrierAbsent, endpointReference(info))
+	}
+	instance, present, err := q.carrierInstance(info)
+	if !present {
+		return nil, absentCarrier(info)
+	}
+	return instance, err
+}
+
+// canonicalInformation is the identity the query names, as the composition
+// keys the carrier: module, service, name and API. Normalize already lets the
+// API name the endpoint; the converse is core's own rule for a declaration
+// (Endpoint.postLoad): an endpoint named after a supported API serves that
+// API. Applied to the reference, Endpoint("rest") and API("rest") key the same
+// carrier, as they do once selection has read the declaration.
+func (q *Query) canonicalInformation() *resources.EndpointInformation {
+	info := &resources.EndpointInformation{
+		Module:  q.module,
+		Service: q.service,
+		Name:    q.endpointName,
+		API:     q.endpointApi,
+	}
+	if info.UnknownAPI() && standards.IsSupportedAPI(info.Name) == nil {
+		info.API = info.Name
+	}
+	return info
+}
+
+// carrierInstance reads the carrier keyed by info from the snapshot. It tells
+// an absent carrier (present false) from a present one whose value does not
+// parse (present true, err non-nil): core returns a partial instance beside a
+// parse error, and it is discarded here so that no entrypoint can hand it out.
+// A present but empty value is a malformed carrier, never an absent one.
+func (q *Query) carrierInstance(info *resources.EndpointInformation) (*resources.NetworkInstance, bool, error) {
+	key := resources.EndpointAsEnvironmentVariableKey(info)
+	address, err := resources.FindValueInEnvironmentVariables(q.ctx, key, codeflyEnvironmentVariables())
 	if err != nil {
-		return nil, nil, err
+		return nil, false, nil
 	}
-	if workspace == nil {
-		return nil, nil, resources.ErrNoDeclaredEndpoints
+	instance, err := resources.ParseAddress(address)
+	if err != nil {
+		return nil, true, fmt.Errorf("endpoint carrier %s for %s holds a malformed address: %w", key, endpointReference(info), err)
 	}
+	return instance, true, nil
+}
+
+func absentCarrier(info *resources.EndpointInformation) error {
+	return fmt.Errorf("%w: %s (carrier %s)", ErrEndpointCarrierAbsent, endpointReference(info), resources.EndpointAsEnvironmentVariableKey(info))
+}
+
+// endpointReference spells the identity as a reference, module/service/name::api.
+func endpointReference(info *resources.EndpointInformation) string {
+	return resources.ServiceUnique(info.Module, info.Service) + info.Identifier()
+}
+
+func (q *Query) selectEndpoint(workspace *resources.Workspace, info *resources.EndpointInformation) (*resources.Endpoint, error) {
 	module, err := workspace.LoadModuleFromName(q.ctx, q.module)
 	if err != nil {
-		return nil, nil, err
+		return nil, err
 	}
 	service, err := module.LoadServiceFromName(q.ctx, q.service)
 	if err != nil {
-		return nil, nil, err
+		return nil, err
 	}
 	selection, err := resources.SelectEndpointForReference(q.consumerModule, info, service.Endpoints)
 	if err != nil {
-		return nil, nil, err
+		return nil, err
 	}
-	return workspace, selection.Endpoint, nil
+	return selection.Endpoint, nil
 }
 
 func (q *Query) localNetworkInstance(workspace *resources.Workspace, selected *resources.Endpoint) (*resources.NetworkInstance, error) {
