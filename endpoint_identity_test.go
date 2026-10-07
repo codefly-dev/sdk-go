@@ -58,7 +58,7 @@ func TestConsumerIdentityCannotBeReinitialized(t *testing.T) {
 }
 
 func TestEndpointConsumerMustBeInitialized(t *testing.T) {
-	prepareEndpointSelectionWorkspace(t, "client", "visibility: public", "")
+	prepareEndpointSelectionWorkspace(t, "client", "visibility: public\n    exposure: none", "")
 	codefly.IsolateConsumerIdentityForTest(t)
 	query := codefly.For(context.Background()).Module("producer").Service("records").Endpoint("rest")
 	instance, err := query.ResolveNetworkInstance()

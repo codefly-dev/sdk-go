@@ -498,6 +498,6 @@ func prepareDeclaredEndpointWorkspace(t *testing.T, module, service, endpoint, a
 	root := t.TempDir()
 	writeFile(t, filepath.Join(root, "workspace.codefly.yaml"), "name: sdk-injection-test\nlayout: modules\nmodules:\n  - name: "+module+"\n")
 	writeFile(t, filepath.Join(root, "modules", module, "module.codefly.yaml"), "kind: module\nname: "+module+"\nservices:\n  - name: "+service+"\n")
-	writeFile(t, filepath.Join(root, "modules", module, "services", service, "service.codefly.yaml"), "kind: service\nname: "+service+"\nversion: 0.0.0\nagent:\n  kind: codefly:service\n  name: rust\n  version: 0.0.20\n  publisher: codefly.dev\nendpoints:\n  - name: "+endpoint+"\n    api: "+api+"\n    visibility: public\n")
+	writeFile(t, filepath.Join(root, "modules", module, "services", service, "service.codefly.yaml"), "kind: service\nname: "+service+"\nversion: 0.0.0\nagent:\n  kind: codefly:service\n  name: rust\n  version: 0.0.20\n  publisher: codefly.dev\nendpoints:\n  - name: "+endpoint+"\n    api: "+api+"\n    visibility: public\n    exposure: none\n")
 	t.Chdir(root)
 }

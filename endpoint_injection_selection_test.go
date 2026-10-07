@@ -15,8 +15,14 @@ func TestInjectedEndpointMustPassCoreSelection(t *testing.T) {
 		name, declaration, api string
 		refusal                error
 	}{
-		{"excluded consumer", "visibility: internal\n    allow-modules: [other]", "rest", resources.ErrEndpointNotReachable},
-		{"API mismatch", "visibility: public", "grpc", resources.ErrEndpointAPIMismatch},
+		// This table holds refusals. The case that stood here asserted an
+		// authored allow-list excluding a consumer, and core deleted that rule:
+		// an endpoint names no consumer, `internal` reaches whatever composes
+		// the module, and a declaration that still authors a list is refused
+		// when the manifest is read. Reach no longer varies by consumer, so
+		// there is no refusal left to assert here; `private` and the API
+		// mismatch are the ones that remain.
+		{"API mismatch", "visibility: public\n    exposure: none", "grpc", resources.ErrEndpointAPIMismatch},
 	} {
 		for _, source := range []string{"runtime", "embedded"} {
 			t.Run(tc.name+"/"+source, func(t *testing.T) {

@@ -173,8 +173,12 @@ func TestDeployedProcessWithAWorkspaceStillSelectsFirst(t *testing.T) {
 		refusal           error
 	}{
 		{"private across modules", "visibility: private", resources.ErrEndpointNotReachable},
-		{"internal unlisted", "visibility: internal\n    allow-modules: [other]", resources.ErrEndpointNotReachable},
-		{"API mismatch", "visibility: public\n    api: grpc", resources.ErrEndpointAPIMismatch},
+		// This table holds refusals. The case that stood here asserted an authored
+		// allow-list excluding a consumer, a rule core deleted: an endpoint
+		// names no consumer and `internal` reaches whatever composes the
+		// module, so a deployed process selects it rather than refusing. The
+		// refusals that remain are private, above, and the API mismatch below.
+		{"API mismatch", "visibility: public\n    api: grpc\n    exposure: none", resources.ErrEndpointAPIMismatch},
 	} {
 		for _, source := range []string{"runtime", "embedded"} {
 			t.Run(tc.name+"/source="+source, func(t *testing.T) {
