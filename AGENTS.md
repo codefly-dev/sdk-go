@@ -106,13 +106,20 @@ see the skill below.
 
 ## Rules that bite
 
-- **Core is pinned to the v0.12.0 tag in both modules.** Endpoint visibility is
+- **Core is pinned to the v0.13.0 tag in both modules.** Endpoint visibility is
   exactly `private`/`internal`/`public`; `external` is a location. Local fallback
   uses core's `Endpoint.External()` predicate and still resolves public
   endpoints without an external location. Do not recreate removed visibility names.
   Preserve the calling module separately from the queried producer; core's
   `SelectEndpointForReference` owns selection on module-adjusted declarations.
   `Init` pins that consumer once; endpoint resolution refuses identity drift.
+- **A deployed process has no workspace, so its carriers are authoritative.**
+  The builder image ships the binary alone. Outside `local` with no workspace
+  on disk, `ResolveNetworkInstance` reads the carrier keyed by the query's
+  canonical identity and refuses only absence (`ErrEndpointCarrierAbsent`) or a
+  malformed value: the composition judged eligibility at render and the mesh
+  enforces it. With a workspace, selection comes first in every environment.
+  No flag decides the path; the environment and the workspace's presence do.
 - **`CODEFLY__` is spelled in this repo, nowhere else.** A consumer needing a
   value gets a typed accessor here; the prefix constant lives in
   `runtime_value.go` for that reason.
