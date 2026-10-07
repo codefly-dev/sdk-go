@@ -26,7 +26,7 @@ import (
 // core's pointer type, and the gate below would be guarding a surface that had
 // already forked.
 var (
-	_ *corework.Verifier        = (*Verifier)(nil)
+	_ *corework.Verifier        = (*verifier)(nil)
 	_ *corework.Verified        = (*Verified)(nil)
 	_ corework.Seal             = Seal{}
 	_ corework.OperationBinding = OperationBinding{}
@@ -1896,7 +1896,7 @@ func parseSource(t *testing.T, path string, source string) sourceFile {
 // the misdiagnosis this whole rule exists to prevent.
 func TestWorkContextConformance(t *testing.T) {
 	settings := conformance.New(time.Now())
-	exported := &Verifier{
+	exported := &verifier{
 		Issuer:   settings.Issuer,
 		Audience: settings.Audience,
 		// Settings.Keys is map[string][]byte so holding settings needs no

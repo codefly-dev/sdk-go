@@ -10,8 +10,9 @@ import (
 // is a place a second behaviour grows, and the whole point of this file is that
 // there is nowhere for one to grow.
 
-// Verifier is the verification entry point — core's, unmodified. A consumer
-// that verifies a capability constructs one of these.
+// verifier is the verification entry point — core's, unmodified — and it is
+// UNEXPORTED, which is the one deliberate difference between this file and a
+// plain re-export.
 //
 // It is issuer-shaped by design, and that is load-bearing rather than
 // inconvenient: it refuses everything unless it is given the authorization
@@ -20,15 +21,29 @@ import (
 // easiest one to omit. A service that cannot answer those four is not in a
 // position to verify a capability itself; it presents its own and lets the
 // component that holds them decide.
-type Verifier = corework.Verifier
+//
+// Exported, it was a second way in: a struct whose every field has a usable
+// zero value, constructible beside the configuration that is supposed to be
+// required, so the correct wiring took two calls and only one was reachable
+// from the type system. That is the shape GuardStreams exists to avoid in this
+// module already. NewVerifier is the only constructor and *PinnedVerifier is
+// the only thing here with a Verify method, so a verifier that was never
+// pinned to an issuer, an audience and an acquired key set cannot be built.
+//
+// A component that genuinely is the issuer — one holding the revision, replay,
+// grant and seal state locally — imports github.com/codefly-dev/core/workcontext
+// directly, as it already does for the verify-only Authenticator. That is not a
+// gap: at that point it is not a client of the capability but a participant in
+// it, and core.go says the same about ErrNoSeal and ErrNoBinding.
+type verifier = corework.Verifier
 
-// Verified is a capability that passed every check. Only Verifier.Verify
+// Verified is a capability that passed every check. Only core's Verify
 // constructs one, so a value of this type cannot be a hand-built protobuf or a
 // token that was parsed and never verified.
 type Verified = corework.Verified
 
 // Seal is the live binding of a principal's authority to one installation and
-// one execution, as the issuer holds it. A Verifier compares a capability's
+// one execution, as the issuer holds it. A verifier compares a capability's
 // sealed values against it for exact equality.
 type Seal = corework.Seal
 
@@ -67,7 +82,7 @@ type SealedValues = basev0.WorkSealV1
 type SealSource = corework.SealSource
 
 // RevisionSource, ReplayStore and GrantSource are the other three sources a
-// Verifier requires.
+// verifier requires.
 type (
 	RevisionSource = corework.RevisionSource
 	ReplayStore    = corework.ReplayStore
@@ -142,7 +157,7 @@ var (
 	// on core's own instruction when asked:
 	//
 	//   - ErrNeedsIssuer comes only from core's verify-only Authenticator, when
-	//     a capability carries a grant hop. Verifier.Verify never returns it, so
+	//     a capability carries a grant hop. Verify never returns it, so
 	//     a client matching it would be writing a branch nothing reaches.
 	//   - ErrNoSeal and ErrNoBinding are what a SealSource IMPLEMENTATION
 	//     returns, not what a client matches.

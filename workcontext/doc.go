@@ -9,7 +9,12 @@
 // code that checks a signature, and the only encoding of either. This package
 // re-exports core's verification entry point rather than offering one of its
 // own, so a consumer that verifies through this module is verifying through
-// core.
+// core. What it adds around that is CONFIGURATION and never behaviour: core's
+// verifier is not re-exported, NewVerifier is the only constructor and it
+// refuses by name a verifier with no pinned issuer, no audience or no key set
+// acquired from an admitted endpoint. ResolveKeySetEndpoint is the one transport
+// guard — the host's own rule, so a plaintext hop is not a check each consumer
+// writes for itself.
 //
 // That is a rule and not a preference, because the alternative was tried. A
 // second implementation here once signed a hand-written JSON payload while
@@ -32,4 +37,8 @@
 //     which never spans an installation revision.
 //   - StreamGuard: a stream re-presents its credential before every message
 //     and terminates on refusal.
+//   - NewVerifier, ResolveKeySetEndpoint, AcquireKeySet and the mesh-transport
+//     rule beside them: the configuration a verifier is refused without — a
+//     pinned issuer and audience, and a key set fetched from a location admitted
+//     over a hop the composition accounts for.
 package workcontext

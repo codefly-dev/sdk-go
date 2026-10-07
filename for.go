@@ -231,6 +231,21 @@ func runtimeServiceConfigurationValue(ctx context.Context, candidates ...string)
 	return "", false, nil
 }
 
+// IsLocalRun reports whether the Codefly environment is local, as a METHOD so a
+// leaf module can require it through an interface rather than importing this
+// one.
+//
+// It is the same answer as the package-level IsLocal, and it exists because the
+// alternative is worse. A plaintext-transport admission decision needs two facts
+// — the composition's mesh assertion and whether this is a local run — and a
+// caller that passed the second as a boolean would be holding a per-service
+// opt-in that no address has to qualify for. With both on one object that this
+// SDK answers from the carriers, the only way to say a hop is safe is for the
+// composition to have said it. See workcontext.TransportSource.
+func (q *Query) IsLocalRun() bool {
+	return IsLocal()
+}
+
 // WorkspaceConfiguration returns one non-secret workspace configuration value.
 // Product services must use this API instead of depending on Codefly's environment
 // variable encoding, which is an SDK/runtime implementation detail.
@@ -268,6 +283,73 @@ func (q *Query) WorkspaceValue(name string, key string) (string, error) {
 	}
 	return pinned, nil
 }
+
+// WorkspaceValueIfSet resolves a workspace value and distinguishes the three
+// answers WorkspaceValue flattens into two: the value is set, the value is
+// genuinely not configured, or the lookup FAILED.
+//
+// WorkspaceValue reports "not configured" and "the delivery could not be read"
+// with the same error, because its callers want a value or nothing. A caller
+// deciding a posture question cannot live with that: a setting that must be
+// asserted before something is permitted has to treat an unreadable delivery,
+// and an authority-bearing value that has drifted, as a refusal rather than as
+// "the operator did not assert it". Absence is an answer; a failed read is not.
+//
+// So an unreadable file carrier, a value delivered both inline and by file, and
+// ErrAuthorityValueChanged all come back as errors here, and only a value no
+// namespace carries comes back as (", false, nil").
+func (q *Query) WorkspaceValueIfSet(name string, key string) (string, bool, error) {
+	addressed := AuthorityValueName{Name: name, Key: key}.canonical()
+	pinned, isPinned := authorityPin(addressed)
+	value, found, err := q.workspaceValueIfSetLive(name, key)
+	if err != nil {
+		return "", false, err
+	}
+	if !isPinned {
+		return value, found, nil
+	}
+	if !found || strings.TrimSpace(value) == "" {
+		return "", false, fmt.Errorf("%w: %s is no longer configured", ErrAuthorityValueChanged, addressed)
+	}
+	if value != pinned {
+		return "", false, fmt.Errorf("%w: %s", ErrAuthorityValueChanged, addressed)
+	}
+	return pinned, true, nil
+}
+
+// workspaceValueIfSetLive reads the public namespace and then the secret one,
+// returning a lookup failure rather than continuing past it. Continuing is what
+// makes an unreadable value indistinguishable from an absent one.
+func (q *Query) workspaceValueIfSetLive(name string, key string) (string, bool, error) {
+	for _, prefix := range []string{
+		resources.WorkspaceConfigurationPrefix,
+		resources.WorkspaceSecretConfigurationPrefix,
+	} {
+		value, err := q.workspaceConfigurationValue(prefix, name, key)
+		if err != nil {
+			if isWorkspaceValueAbsent(err) {
+				continue
+			}
+			return "", false, err
+		}
+		if value != "" {
+			return value, true, nil
+		}
+	}
+	return "", false, nil
+}
+
+// isWorkspaceValueAbsent reports whether err is the "nothing carries this name"
+// answer rather than a failure to read something that is there.
+func isWorkspaceValueAbsent(err error) bool {
+	return err != nil && strings.Contains(err.Error(), workspaceValueAbsentReason)
+}
+
+// workspaceValueAbsentReason is the text workspaceConfigurationValue returns
+// when no namespace carries the name. It is matched here because the lookup
+// reports absence with a wool error rather than a sentinel; a sentinel is the
+// better shape and this is where it would be read from if one lands.
+const workspaceValueAbsentReason = "no workspace configuration value for"
 
 func (q *Query) workspaceValueLive(name string, key string) (string, error) {
 	if value, err := q.WorkspaceConfiguration(name, key); err == nil && value != "" {

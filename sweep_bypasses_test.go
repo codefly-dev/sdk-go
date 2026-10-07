@@ -478,6 +478,27 @@ func TestTheImportScannerReadsOneLineOnce(t *testing.T) {
 		})
 	}
 
+	// A FILE THAT DOES NOT PARSE IS A FAILURE, NOT A FILE WITH NO IMPORTS —
+	// which is what the scanner's own comment claimed while it read imports
+	// ONLY.
+	//
+	// parser.ImportsOnly stops at the first non-import declaration, so a body
+	// that does not parse at all was never looked at and the file swept clean;
+	// and an import placed AFTER a declaration was never read, so a file could
+	// carry one invisibly. Three shapes, each of which swept green before the
+	// scanner was changed to parse the whole file.
+	for name, probe := range map[string]string{
+		"an unfinished function body": "package x\n\nimport \"fmt\"\n\nfunc f() {\n\tfmt.Println(\n",
+		"a missing expression":        "package x\n\nimport \"fmt\"\n\nvar _ = fmt.Sprint(\n",
+		"an import after a declaration": "package x\n\nvar first = 1\n\nimport \"crypto/ed25519\"\n\n" +
+			"var _ = ed25519.Sign\n",
+	} {
+		t.Run(name, func(t *testing.T) {
+			out, err := sweepOf(t, script, "unparsed.go", probe)
+			require.Error(t, err, "the sweep passed a file it could not parse:\n%s", out)
+		})
+	}
+
 	// THE DENY-BY-DEFAULT POLICY, THROUGH THE SCRIPT, IN TREE AND REF MODE.
 	//
 	// This is what had no test. The policy file is asserted not to LIST these

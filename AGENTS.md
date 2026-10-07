@@ -146,6 +146,16 @@ see the skill below.
   comes from `ReadAuthority` at boot. `WorkspaceValue` answers from that pin for
   a pinned name, so a drift is an error rather than a reload — the process has
   already minted a credential sealed to the old value.
+- **There is one way to get a verifier.** Core's verifier is not re-exported:
+  every field of it has a usable zero value, so `NewVerifier` is the only
+  constructor and `PinnedVerifier` the only type here that verifies. The
+  endpoint, the fetch and the verifier are one operation — `KeySet` has one
+  constructor and `NewVerifier` takes nothing else — so an admitted location and
+  the keys in use are one fact. `ResolveKeySetEndpoint` is the host's transport
+  rule: plaintext reaches an in-cluster Service address only under
+  `internal-transport/mesh-protected`, compared literally, and loopback only on a
+  local run. A failed read of that setting is a refusal, not absence. No refusal
+  echoes a configured value. `scripts/security-posture.sh` re-audits both rules.
 - **A receipt is written inside the transaction that commits its effect.** A
   receipt written after the commit leaves a window where the effect exists and
   the receipt does not, and a recovery landing there reads "no receipt" for an

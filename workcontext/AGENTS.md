@@ -157,6 +157,120 @@ read a refusal's sentinel off the fixture, never off a constant here, because
 three fixtures changed sentinel under us and the tests that did that needed no
 edit.
 
+## Configuration is this module's to refuse; verification is not
+
+**Core's verifier is NOT re-exported, and that is the one deliberate difference
+between `core.go` and a plain re-export.** `type verifier = corework.Verifier` is
+unexported; `PinnedVerifier` is the only type here with a `Verify` method and
+`NewVerifier` is its only constructor. Exported, core's verifier was a second way
+in: a struct whose every field has a usable zero value, constructible beside the
+configuration that is supposed to be required — the shape `GuardStreams` already
+exists to avoid in this module, where the correct wiring took two calls and only
+one was reachable from the type system. `TestEveryVerificationPathIsPinned` holds
+it: nothing exported here may name core's `Verifier`, and the only exported
+`Verify`/`Recheck` are `PinnedVerifier`'s.
+
+A component that genuinely IS the issuer imports `core/workcontext` directly, as
+`core.go` already says about `ErrNoSeal` and the verify-only `Authenticator`.
+That is not a gap; at that point it is a participant in the capability rather
+than a client of it.
+
+**The endpoint, the fetch and the verifier are one operation.** `KeySetEndpoint`
+and `KeySet` are opaque with one constructor each, `AcquireKeySet` is the only
+thing that produces a `KeySet`, and `NewVerifier` takes nothing else. So "this
+location was admitted" and "these are the keys in use" are one fact. They were
+two, and a checked endpoint sitting beside independently supplied keys is a
+check that establishes nothing.
+
+**The decoding is the CALLER'S and the keys cross as plain bytes.** Reading a key
+set means naming a signature primitive, which is the one thing this module may
+never do — `crypto/ed25519`, base64 DECODE and `encoding/json` outside `mint.go`
+are each refused by the allowlist, and that allowlist is the thing ten rounds of
+review built. `fillVerificationKeys` is generic so the element type is INFERRED
+from the field it fills: a conversion through a type parameter whose core type is
+`[]byte` names nothing.
+
+**Every field of core's verifier has a usable zero value**, so an incomplete
+configuration is expressible and the invariant requires it to be refused BY NAME.
+Each missing value is named separately, the four sources included, where core
+names all four in one message. Key material of the wrong length is refused here
+too — core refuses it per request, and a configuration fault belongs in a refusal
+before anything is served.
+
+**`verificationKeySize` is a number here and a call in core**, which is the
+`sealCarriesAnExecution` arrangement again and for the same reason. The number is
+stated once and a `_test.go` — where the import is legitimate — holds it to
+`ed25519.PublicKeySize`. If core grows a key-configuration validator this becomes
+a call and the number goes.
+
+## The transport rule is the host's, reimplemented, and this is the SDK's one copy
+
+In-cell transport security is the mesh's, so a composition asserts it with
+`internal-transport/mesh-protected` and a service accepts plaintext to an
+in-cluster Service address exactly under that assertion. Both halves are
+required: the assertion covers only what a mesh can cover, and a name alone is
+not evidence a mesh wraps the wire.
+
+- **`ClusterServiceHost` accepts `<service>.<namespace>.svc` or that followed by
+  `cluster.local` and nothing else**, with both leading labels held to DNS-1123.
+  The suffix is matched LITERALLY, because a name carrying an `svc` label in
+  another domain is an ordinary public name and an arbitrary suffix is not
+  evidence of a cluster domain.
+- **The assertion is compared LITERALLY.** `true` asserts; unset, empty and
+  `false` keep plaintext refused; every other value stops the process, a value
+  carrying whitespace included. An earlier revision trimmed first so a
+  file-delivered value would not be refused over its trailing newline — but
+  `TrimSpace` trims every Unicode space, so values that are not the assertion
+  asserted it. The delivery's shape is the delivery's to fix.
+- **A lookup failure is not absence.** A setting nothing carries is an answer; a
+  delivery that cannot be read, or an authority-bearing value that has drifted
+  from the one pinned at boot, is not. `TransportSource` requires
+  `WorkspaceValueIfSet` for exactly that: `WorkspaceValue` reports "not
+  configured" and "could not be read" with one error, and a failed read must not
+  decide a posture question. `(*Query).WorkspaceValueIfSet` is the root module's
+  three-valued accessor, added for this.
+- **Loopback is the LOCAL shape only.** A deployed runtime has one admission rule
+  and loopback is not an exception to it even with the assertion set, since a
+  mesh carries no hop that never leaves the pod.
+- **Both facts come from `TransportSource`, not from parameters.** A boolean
+  parameter is a per-service opt-in no address has to qualify for, which is the
+  shape the host deleted. `codefly.For(ctx)` satisfies the interface, and
+  `(*Query).IsLocalRun` exists so a leaf can require the runtime through an
+  interface rather than importing the root module.
+- **No refusal echoes a configured value** — not the URL, not the parser's own
+  message, and not the assertion, which is read from the secret namespace too.
+  Every plaintext refusal ends with `MeshTransportRemedy`.
+- **The fetch stays on the admitted address**: a redirect is refused rather than
+  followed, the body is bounded, and the HTTP client is this module's.
+
+## The posture checks are commands whose EXIT STATUS is the answer
+
+`scripts/security-posture.sh` is how SP-WC-01 and SP-WC-05 are re-audited here.
+It exists because the catalogue's own commands could not fail: they counted lines
+(`go test … | grep -c '^--- PASS'`), which answers 0 for a passing run without
+`-v`, 1 whatever the subtests did, and 0 for a test that no longer exists. **A
+check that cannot fail reports green forever, which is worse than no check** —
+the invariant stops being audited and nothing says so. So the script reads the
+exit status AND requires every named test to have run, and a renamed or deleted
+test is a failure rather than a silent pass.
+
+## A derived credential never outlives its parent, and the test for that lives here
+
+Core's `derive` clamps a derived expiry to the parent's and refuses a parent
+already past its own expiry; `TestDerivedContextNeverOutlivesParent` drives it
+over a matrix of parent lifetimes and requested windows, plus a chain, a grant
+capability and a widening hop. **The point of testing it from a module that
+derives nothing** is that the test binds the version of core THIS module resolves
+to, so the rule is required of whatever this module depends on rather than of
+core in general.
+
+What the test cannot assert, and says where it asserts the rest: a verifier holds
+the capability and not its parent, and `WorkContextV1` carries no
+absolute-deadline claim and no per-hop timestamp — so the verification half needs
+a claim, which is core's. A renewal in this module is not a derivation at all:
+`MintClient` presents the projected token for a fresh mint and never the
+credential it holds.
+
 ## A credential is sealed or it is not a credential, and core says what that means
 
 The seal and each actor hop's epoch are schema-required, so a missing one is a
