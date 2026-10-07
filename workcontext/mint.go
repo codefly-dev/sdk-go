@@ -53,7 +53,7 @@ const (
 	// WHAT THIS IS NOW FOR, because it is not what it was for. The argument
 	// that kept this check was that a mint client NEVER VERIFIES A SIGNATURE —
 	// it is the party the credential is minted FOR, not a receiver — so it
-	// reads its own window through corework.Inspect, which was structural and
+	// reads its own window through corework.Decode, which was structural and
 	// bounded no lifetime. Core's first two attempts bounded Authority.Start
 	// and then Verify alone, neither of which a holder can reach: a thirty-day
 	// capability that every Verify refuses was reported to its HOLDER as
@@ -1829,7 +1829,7 @@ func (c *MintClient) checkWindow(credential Credential) error {
 	}
 	if lifetime := credential.expiresAt.Sub(credential.notBefore); lifetime > c.options.MaxCredentialLifetime {
 		// A DEPLOYMENT POLICY, below core's absolute ceiling. Anything above
-		// that ceiling was refused by corework.Inspect before this ran, in
+		// that ceiling was refused by corework.Decode before this ran, in
 		// sealOf — so what is reachable here is a process that chose to hold a
 		// credential for less time than the platform permits.
 		return fmt.Errorf(

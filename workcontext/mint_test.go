@@ -730,7 +730,7 @@ func TestMintRefusesACredentialThatIsUnusableOnArrival(t *testing.T) {
 	// bounds covers:
 	//
 	// THIS CLIENT NEVER VERIFIES A SIGNATURE. It cannot: it is the party being
-	// minted for, not a receiver. It reads the window through corework.Inspect,
+	// minted for, not a receiver. It reads the window through corework.Decode,
 	// which is structural only and checks no signature. So core's Start bounds
 	// an honest MINTER and core's Verify bounds a RECEIVER on a current core;
 	// neither bounds what this process holds in memory and presents for the

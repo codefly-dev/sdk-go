@@ -539,7 +539,7 @@ func TestAMintedCredentialThatExpiresBeforeItIsValidIsRefused(t *testing.T) {
 func TestTheClientsDefaultCeilingIsCoresConstant(t *testing.T) {
 	// The structural read path the mint client uses, driven directly, so the
 	// entry point this depends on is exercised rather than assumed.
-	_, err := corework.Inspect(fixture(t, "session").Token)
+	_, err := corework.Decode(fixture(t, "session").Token)
 	require.NoError(t, err, "a sound capability still inspects")
 
 	require.Equal(t, corework.MaxTTLCeiling, defaultMaxCredentialLifetime,

@@ -174,7 +174,7 @@ incarnation starts at 1. `mint.go`'s echo cross-check asks about PRESENCE
 before comparing, because a host echoing `"0"` otherwise matched a capability
 sealing no execution — a host asserting an execution the issuer does not hold,
 passing the check that exists to catch that. `Attach` refuses an unsealed
-capability with `corework.Inspect`'s answer — false for a while precisely
+capability with `corework.Decode`'s answer — false for a while precisely
 because we answered it ourselves and never read the actor chain.
 
 **One sentinel for every structural seal defect, `ErrInvalid`.** `ErrUnsealed`
@@ -221,7 +221,7 @@ the most ordinary mid-stream refusal there is. `errStreamMisuse` wraps
 ## The mint client holds a credential it cannot verify
 
 It is the party the credential is minted FOR, not a receiver, so it reads the
-window through `corework.Inspect` and checks no signature. Three consequences
+window through `corework.Decode` and checks no signature. Three consequences
 that are easy to get backwards:
 
 - **The lifetime bound is CORE'S**, in `decodeClaims`, so `Inspect` carries it

@@ -42,6 +42,15 @@ var structurallyRefused = map[string]bool{
 	"seal-half-execution":       true, // ErrInvalid: half an execution is not one
 	"partial-operation-binding": true, // ErrInvalid: an id at no revision
 	"actor-without-epoch":       true, // ErrInvalid: a principal nobody can revoke
+	// An EMPTY audience is structural and an audience MISMATCH is not, which is
+	// why this one sits here while every other audience refusal is in the group
+	// below that must pass. The schema requires at least one character, so
+	// protovalidate reaches it inside core's Decode with no key and no network;
+	// deciding whether a NON-empty audience is the right one needs the route or
+	// the receiver, which a structural read cannot see. Arrived with core's
+	// non-consuming Inspect (core#723), and the comparison against core's own
+	// fixture list is what surfaced it rather than a constant here.
+	"empty-audience": true, // ErrInvalid: an audience of no characters
 
 	// The encoding itself. Core's Verify now refuses unknown fields
 	// recursively and non-canonical encodings, and Inspect reaches the same
