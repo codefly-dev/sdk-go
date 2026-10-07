@@ -94,7 +94,7 @@ var (
 	// envelopeDecoders are banned EXCEPT where a file is allowlisted below. A
 	// second parser applying its own seal rule was the last blocker here, and
 	// it needed exactly this: base64 to open the envelope by hand, and
-	// proto.Unmarshal to read it. corework.Inspect does both now and hands back
+	// proto.Unmarshal to read it. corework.Decode does both now and hands back
 	// the claims, so opening an envelope here has no honest use.
 	envelopeDecoders = []string{"encoding/base64"}
 
@@ -665,7 +665,7 @@ func inspectProtoMethodsRoute(file sourceFile) []string {
 				"A message's own marshal and unmarshal methods are a complete codec that names no\n"+
 				"codec package: ProtoReflect().ProtoMethods().Unmarshal(...) decodes a capability\n"+
 				"with no banned import and no type for an allowlist to key on. Reading a capability\n"+
-				"off the wire is corework.Inspect's job.",
+				"off the wire is corework.Decode's job.",
 			file.path))
 		return true
 	})
@@ -712,7 +712,7 @@ func inspectEnvelopeDecoding(file sourceFile, base64Names map[string]bool) []str
 			"%s calls %s.%s.%s.\n"+
 				"This file may ENCODE with base64 — it builds a cache key — and may never DECODE.\n"+
 				"base64 decoding plus proto.Unmarshal is the entire second parser this module\n"+
-				"deleted; corework.Inspect opens the envelope and hands back the claims. Only %v\n"+
+				"deleted; corework.Decode opens the envelope and hands back the claims. Only %v\n"+
 				"may be called here.",
 			file.path, qualifier.Name, receiver.Sel.Name, method.Sel.Name, envelopeEncodeOnly))
 		return true
@@ -842,7 +842,7 @@ func inspectImport(file sourceFile, name string, path string, plumbing map[strin
 			"%s imports %q.\n"+
 				"Opening a capability's envelope by hand is the beginning of a second parser, which\n"+
 				"is what this module last had to delete — its own seal rule disagreed with core's\n"+
-				"fixtures about three refusals. corework.Inspect opens the envelope and returns the\n"+
+				"fixtures about three refusals. corework.Decode opens the envelope and returns the\n"+
 				"claims. Only %v may reach for this, and only because %v.",
 			file.path, path, allowedEnvelopeDecoderFiles(), envelopeDecoderReasons())}
 	}
@@ -945,14 +945,14 @@ func inspectProtoEncoding(file sourceFile, protoNames map[string]bool) []string 
 		case "Unmarshal", "UnmarshalOptions":
 			// Unrestricted until now, and it is half of the defect that was the
 			// last blocker: a second unverified parser needs base64 to open the
-			// envelope and Unmarshal to read it. corework.Inspect does both, and
+			// envelope and Unmarshal to read it. corework.Decode does both, and
 			// hands back the claims, so nothing here needs either.
 			if codecArgumentIsPermitted(file, node, codecProto, "Unmarshal") {
 				return true
 			}
 			findings = append(findings, fmt.Sprintf(
 				"%s calls %s.%s.\n"+
-					"Reading a capability off the wire is corework.Inspect's job, and it returns the\n"+
+					"Reading a capability off the wire is corework.Decode's job, and it returns the\n"+
 					"claims it decoded. A decode here is the beginning of a second parser — which is\n"+
 					"what this module last had to delete, and its own seal rule disagreed with core's\n"+
 					"fixtures about three refusals.",
@@ -2211,7 +2211,7 @@ var codecIndirections = map[string][]string{
 	// The runtime's own documents, decoded into a caller's destination. The
 	// destination is the CALLER's type and the content is a configuration
 	// document, never a capability — a capability arrives as an opaque string
-	// and is read with corework.Inspect.
+	// and is read with corework.Decode.
 	"configuration_document.go": {"decodeDocument"},
 }
 

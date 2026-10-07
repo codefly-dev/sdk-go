@@ -160,7 +160,7 @@ This module needed no edit for that change, which is the argument for reading
 sentinels off core's kit rather than writing them down: three fixtures changed
 sentinel and the tests that assert `declared.Err` did not move.
 
-The fix was not to sync the rule. **`corework.Inspect` now owns every
+The fix was not to sync the rule. **`corework.Decode` now owns every
 structural decision** — shape, encoding, schema, attenuation, grant shape, a
 seal naming an installation, an epoch on every actor hop — and this module's
 `readClaims` runs after it, reads two values, and decides nothing. Core added
@@ -454,7 +454,7 @@ That last one is what matters here, and it is the third place core put this
 bound. The argument this module made twice for keeping a client-side ceiling was
 that **a mint client never verifies a signature** — it is the party the
 credential is minted *for*, not a receiver — so it reads its own window through
-`corework.Inspect`, which was structural and checked no lifetime. Core's first
+`corework.Decode`, which was structural and checked no lifetime. Core's first
 two attempts bounded `Authority.Start` and then `Verify` alone, neither of which
 this client can see. A thirty-day capability that every `Verify` refuses was
 reported to its **holder** as thirty days of validity: an absent bound tells a
@@ -945,7 +945,7 @@ execution at all — a host asserting an execution the issuer does not hold,
 passing the check whose job is to catch exactly that. Ask about presence before
 comparing.
 
-This module no longer reads a capability itself. `corework.Inspect` runs the
+This module no longer reads a capability itself. `corework.Decode` runs the
 size bound, the envelope, `CheckEncoding`, `proto.Unmarshal`, **protovalidate**
 and the full structural seal check, and returns the claims it decoded;
 `readClaims` (`carrier.go`) calls it and clones the result. There is no second

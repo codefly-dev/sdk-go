@@ -172,7 +172,7 @@ func inspectCodecUses(loaded *packages.Package, file *ast.File, path string) []s
 				findings = append(findings, fmt.Sprintf(
 					"%s applies %s to %s, which is or contains %s.\n"+
 						"A Work Context message passes through a codec only where a row names it.\n"+
-						"Reading one off the wire is corework.Inspect's job, and it returns the claims\n"+
+						"Reading one off the wire is corework.Decode's job, and it returns the claims\n"+
 						"it decoded. This catches it THROUGH a field as well: a *Claims embedded in\n"+
 						"mintRequest put a whole capability on the wire through a row written for two\n"+
 						"strings, and the alias lived in another file, so no syntactic rule could see it.",
@@ -241,7 +241,7 @@ func inspectCodecUses(loaded *packages.Package, file *ast.File, path string) []s
 			"%s calls %s.\n"+
 				"This file may ENCODE with base64 — it builds a cache key — and may never\n"+
 				"DECODE. base64 decoding plus proto.Unmarshal is the entire second parser this\n"+
-				"module deleted; corework.Inspect opens the envelope and hands back the claims.\n"+
+				"module deleted; corework.Decode opens the envelope and hands back the claims.\n"+
 				"Resolved as an OBJECT, so assigning the encoding to a variable first does not\n"+
 				"change the answer.",
 			path, method.FullName()))
@@ -270,7 +270,7 @@ func inspectCodecUses(loaded *packages.Package, file *ast.File, path string) []s
 					"document. The exemption is for the codec call inside it, not for handing it a\n"+
 					"capability: decodeDocument json-decodes into its destination, and a\n"+
 					"WorkContextV1's json tags are snake_case, which is the format this module\n"+
-					"deleted. corework.Inspect reads a capability.",
+					"deleted. corework.Decode reads a capability.",
 				path, kind, named, indirection))
 		}
 		return true
