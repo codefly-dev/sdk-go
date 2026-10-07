@@ -7,6 +7,12 @@ the capability and this module re-exports core's verifier by type alias, in
 `core.go`. Adding a dependency here is a design change — see
 `.claude/skills/dual-module-change`.
 
+Both modules pin core's **v0.12.0 release tag** (`060b2bd8`). Core owns the
+endpoint vocabulary: visibility is `private`/`internal`/`public`, and
+`location: external` describes an endpoint outside the system. The root SDK
+uses core's location predicate for local resolution; public visibility alone
+does not prevent it. Keep that resolution in the root SDK, outside this leaf.
+
 Depth that used to live in the root `AGENTS.md` and does not fit its 200-line
 budget. The root file carries the rule; this carries what the gates refuse.
 

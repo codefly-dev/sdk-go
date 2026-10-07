@@ -9,7 +9,6 @@ import (
 	"strings"
 
 	"github.com/codefly-dev/core/configurations"
-	basev0 "github.com/codefly-dev/core/generated/go/codefly/base/v0"
 	"github.com/codefly-dev/core/network"
 	"github.com/codefly-dev/core/resources"
 	"github.com/codefly-dev/core/standards"
@@ -17,17 +16,17 @@ import (
 )
 
 type Query struct {
-	module             string
-	service            string
-	endpointName       string
-	endpointApi        string
-	ctx                context.Context
-	withDefaultNetwork bool
-	namingScope        string
+	module         string
+	consumerModule string
+	service        string
+	endpointName   string
+	endpointApi    string
+	ctx            context.Context
+	namingScope    string
 }
 
 func For(ctx context.Context) *Query {
-	q := &Query{ctx: ctx}
+	q := &Query{ctx: ctx, consumerModule: pinnedConsumerIdentity()}
 	// The process environment is the runtime authority. Falling back to the
 	// values captured by Init preserves callers that construct a query after
 	// startup, while the direct read also makes early queries and runtime
@@ -72,11 +71,6 @@ func (q *Query) Normalize() {
 	}
 }
 
-func (q *Query) WithDefaultNetwork() *Query {
-	q.withDefaultNetwork = true
-	return q
-}
-
 // NamingScope selects the same advanced local port namespace used by
 // `codefly run --naming-scope`. Leave empty for the normal interactive
 // workspace.
@@ -90,22 +84,22 @@ func (q *Query) NetworkInstance() *resources.NetworkInstance {
 	if err == nil {
 		return instance
 	}
-	w := wool.Get(q.ctx).In("NetworkInstance")
-	if q.withDefaultNetwork {
-		w.Warn("Cannot find network instance, returning default", wool.Field("error", err))
-		return resources.DefaultNetworkInstance(q.endpointApi)
-	}
 	return nil
 }
 
 // ResolveNetworkInstance returns one typed endpoint or a diagnostic error.
 //
-// Runtime-injected endpoint capabilities always win. In Codefly LOCAL (and
+// Every query first asks core to select an eligible declared endpoint, using
+// workspace declarations. Injected addresses precede native ones only after
+// selection succeeds. In Codefly LOCAL (and
 // before an environment is explicitly selected), the SDK falls back to the
 // workspace's deterministic native endpoint map. This lets independently
 // loaded agents use the same address as `codefly endpoint` without parsing
 // Codefly environment carriers or shelling out to the CLI.
 func (q *Query) ResolveNetworkInstance() (*resources.NetworkInstance, error) {
+	if err := checkConsumerIdentity(q.consumerModule); err != nil {
+		return nil, err
+	}
 	q.Normalize()
 	info := &resources.EndpointInformation{
 		Module:  q.module,
@@ -113,96 +107,70 @@ func (q *Query) ResolveNetworkInstance() (*resources.NetworkInstance, error) {
 		API:     q.endpointApi,
 		Name:    q.endpointName,
 	}
-	instance, err := resources.FindNetworkInstanceInEnvironmentVariables(q.ctx, info, codeflyEnvironmentVariables())
-	if err == nil {
+	// The declaration decides eligibility before any carrier can supply an
+	// address. An explicit API is a qualifier core must judge, not a bypass.
+	workspace, selected, err := q.selectEndpoint(info)
+	if err != nil {
+		return nil, err
+	}
+	info = selected.Information()
+	key := resources.EndpointAsEnvironmentVariableKey(info)
+	address, lookupErr := resources.FindValueInEnvironmentVariables(q.ctx, key, codeflyEnvironmentVariables())
+	if lookupErr == nil {
+		instance, parseErr := resources.ParseAddress(address)
+		if parseErr != nil {
+			return nil, parseErr
+		}
 		return instance, nil
 	}
-	if Environment() == "" || IsLocal() {
-		local, localErr := q.resolveLocalNetworkInstance()
-		if localErr == nil {
-			return local, nil
-		}
-		err = fmt.Errorf("runtime endpoint unavailable (%v); local endpoint unavailable (%w)", err, localErr)
+	if Environment() != "" && !IsLocal() {
+		return nil, lookupErr
 	}
-	if q.withDefaultNetwork {
-		return resources.DefaultNetworkInstance(q.endpointApi), nil
+	local, localErr := q.localNetworkInstance(workspace, selected)
+	if localErr != nil {
+		return nil, fmt.Errorf("runtime endpoint unavailable (%v); local endpoint unavailable (%w)", lookupErr, localErr)
 	}
-	return nil, err
+	return local, nil
 }
 
-func (q *Query) resolveLocalNetworkInstance() (*resources.NetworkInstance, error) {
+func (q *Query) selectEndpoint(info *resources.EndpointInformation) (*resources.Workspace, *resources.Endpoint, error) {
 	if strings.TrimSpace(q.module) == "" || strings.TrimSpace(q.service) == "" {
-		return nil, errors.New("module and service are required for local endpoint resolution")
+		return nil, nil, errors.New("module and service are required for endpoint selection")
 	}
 	workspace, err := resources.FindWorkspaceUp(q.ctx)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	if workspace == nil {
-		return nil, errors.New("workspace not found")
+		return nil, nil, resources.ErrNoDeclaredEndpoints
 	}
 	module, err := workspace.LoadModuleFromName(q.ctx, q.module)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	service, err := module.LoadServiceFromName(q.ctx, q.service)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
-	var selected *resources.Endpoint
-	for _, endpoint := range service.Endpoints {
-		api := endpoint.API
-		if api == "" && standards.IsSupportedAPI(endpoint.Name) == nil {
-			api = endpoint.Name
-		}
-		if q.endpointName != "" && !resources.Match(endpoint.Name, q.endpointName) {
-			continue
-		}
-		if q.endpointApi != "" && !resources.Match(api, q.endpointApi) {
-			continue
-		}
-		if selected != nil {
-			return nil, fmt.Errorf(
-				"multiple endpoints match %s/%s name=%q api=%q",
-				q.module,
-				q.service,
-				q.endpointName,
-				q.endpointApi,
-			)
-		}
-		selected = endpoint
+	selection, err := resources.SelectEndpointForReference(q.consumerModule, info, service.Endpoints)
+	if err != nil {
+		return nil, nil, err
 	}
-	if selected == nil {
-		return nil, fmt.Errorf(
-			"no endpoint matches %s/%s name=%q api=%q",
-			q.module,
-			q.service,
-			q.endpointName,
-			q.endpointApi,
-		)
-	}
-	if selected.Visibility == resources.VisibilityExternal {
+	return workspace, selection.Endpoint, nil
+}
+
+func (q *Query) localNetworkInstance(workspace *resources.Workspace, selected *resources.Endpoint) (*resources.NetworkInstance, error) {
+	if selected.External() {
 		return nil, errors.New("external endpoint cannot be resolved from the local native map")
 	}
-	api := selected.API
-	if api == "" && standards.IsSupportedAPI(selected.Name) == nil {
-		api = selected.Name
+	endpoint, err := selected.Proto()
+	if err != nil {
+		return nil, err
 	}
-	if standards.IsSupportedAPI(api) != nil {
-		return nil, fmt.Errorf("endpoint API %q is not supported by the local native map", api)
+	if standards.IsSupportedAPI(endpoint.Api) != nil {
+		return nil, fmt.Errorf("endpoint API %q is not supported by the local native map", endpoint.Api)
 	}
-	native := network.NativeFor(
-		q.ctx,
-		workspace.Name,
-		q.module,
-		q.service,
-		q.namingScope,
-		&basev0.Endpoint{
-			Name:       selected.Name,
-			Api:        api,
-			Visibility: selected.Visibility,
-		},
-	)
+	native := network.NativeFor(q.ctx, workspace.Name, q.module, q.service, q.namingScope, endpoint)
 	if native.Port > uint32(^uint16(0)) {
 		return nil, fmt.Errorf("resolved endpoint port %d exceeds uint16", native.Port)
 	}

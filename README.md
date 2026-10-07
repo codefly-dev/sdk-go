@@ -8,6 +8,44 @@
 
 # codefly + go = sdk-go
 
+## Endpoint resolution with core v0.12.0
+
+Both SDK modules pin the core **v0.12.0** release tag (`060b2bd8`). Endpoint
+visibility is `private`, `internal`, or `public`; an endpoint outside the system
+declares `location: external` independently of its visibility.
+
+`For(ctx).Module(...).Service(...).Endpoint(...).ResolveNetworkInstance()` uses
+core selection before looking up a runtime-injected address. In `local` or with no environment selected,
+it can fall back to core's deterministic native map. Core's `Endpoint.External()`
+predicate refuses that fallback for an external location. A public endpoint
+without an external location still resolves locally, even though public visibility
+also allocates an external instance.
+
+Every query resolves its name and API through core's typed selector on the
+producer's declarations before reading the injected carrier, including queries
+with an explicit API. Ambiguous, forbidden, and API-mismatched references are
+refused even if a matching carrier exists. All endpoint queries require the
+workspace declarations: an address carrier alone cannot establish eligibility.
+
+Call `codefly.Init(ctx)` at boot to pin the calling module from the runtime
+identity. Endpoint queries before initialization are refused. `.Module(...)`
+selects the producer and cannot change the consumer. Each resolution checks the
+live identity against the boot pin and returns `ErrAuthorityValueChanged` on
+drift, including for queries created before the change. Reloading the snapshot
+or calling `Init` again cannot adopt a different identity. Core loads the
+producer's module-adjusted declarations and `SelectEndpointForReference` checks
+visibility, internal allowlists, exact names, API qualifiers, and ambiguity.
+Its refusal is returned to the caller, including `ErrEndpointNotReachable` for
+a private endpoint queried across modules.
+
+`ResolveNetworkInstance` returns resolution errors with no instance, and
+`NetworkInstance` returns nil on those errors. No entrypoint ever substitutes
+an address for an unavailable, external, forbidden, or invalid endpoint.
+After selection, core's key/value lookup distinguishes an absent carrier from
+a present value. Only absence permits native fallback in unset or `local`
+environments. A present value is parsed by core; malformed or empty addresses
+are refused with no instance, even when a native address could be computed.
+
 ## Work Context: mint once, sealed, one implementation
 
 A module process obtains its credential once per execution, sealed to the build
@@ -58,3 +96,7 @@ Use `SweepTenant` for tenant-by-tenant retention. `Sweep` remains an unscoped,
 all-tenant operation and needs a role the table's policies admit. See the
 [receipts package documentation](receipts/doc.go) for the binding example
 and retention requirements.
+
+Core validates each marked operation when the receipts interceptor is built.
+Operation declarations must specify a completion mode; synchronous operations
+declare `COMPLETION_CALL`. An omitted mode is refused, not defaulted.

@@ -28,6 +28,7 @@ func Must[T any](obj T, err error) T {
 }
 
 func TestEnvironmentVariables(t *testing.T) {
+	initEndpointConsumer(t, "mod")
 	ctx := context.Background()
 	wool.SetGlobalLogLevel(wool.TRACE)
 
@@ -37,18 +38,12 @@ func TestEnvironmentVariables(t *testing.T) {
 	err = os.Setenv("CODEFLY_SDK__LOGLEVEL", "trace")
 	assert.NoError(t, err)
 
-	// No default
+	// An unresolved endpoint has no instance.
 	net := codefly.For(ctx).API(standards.REST).NetworkInstance()
 	assert.Nil(t, net)
 
-	// With default
-	net = codefly.For(ctx).API(standards.REST).WithDefaultNetwork().NetworkInstance()
-	assert.NotNil(t, net)
-	assert.Equal(t, "localhost", net.Hostname)
-	assert.Equal(t, uint16(8080), net.Port)
-	assert.Equal(t, "http://localhost:8080", net.Address)
-
-	// With API and no name
+	// With API and no name, after core reads the producer declaration.
+	prepareDeclaredEndpointWorkspace(t, "mod", "svc", standards.HTTP, standards.HTTP)
 	env := resources.EndpointAsEnvironmentVariableKey(&resources.EndpointInformation{Module: "mod", Service: "svc", Name: standards.HTTP, API: standards.HTTP})
 	err = os.Setenv(env, "http://localhost:1234")
 	assert.NoError(t, err)
@@ -217,6 +212,7 @@ agent:
 }
 
 func TestEndpointResolutionFallsBackToDeterministicLocalWorkspace(t *testing.T) {
+	initEndpointConsumer(t, "platform")
 	ctx := context.Background()
 	root := t.TempDir()
 	t.Setenv("CODEFLY__ENVIRONMENT", "")
@@ -446,6 +442,8 @@ func TestInjectConfigurationsDropsPriorInjectedValues(t *testing.T) {
 }
 
 func TestInjectEndpointsUsesTypedSnapshotAndRejectsInvalidReplacement(t *testing.T) {
+	initEndpointConsumer(t, "mod")
+	prepareDeclaredEndpointWorkspace(t, "embedded", "store", "tcp", "tcp")
 	ctx := context.Background()
 	t.Cleanup(func() {
 		requireNoError(t, codefly.InjectEndpoints())
@@ -493,4 +491,13 @@ func requireNoError(t *testing.T, err error) {
 	if err != nil {
 		t.Fatal(err)
 	}
+}
+
+func prepareDeclaredEndpointWorkspace(t *testing.T, module, service, endpoint, api string) {
+	t.Helper()
+	root := t.TempDir()
+	writeFile(t, filepath.Join(root, "workspace.codefly.yaml"), "name: sdk-injection-test\nlayout: modules\nmodules:\n  - name: "+module+"\n")
+	writeFile(t, filepath.Join(root, "modules", module, "module.codefly.yaml"), "kind: module\nname: "+module+"\nservices:\n  - name: "+service+"\n")
+	writeFile(t, filepath.Join(root, "modules", module, "services", service, "service.codefly.yaml"), "kind: service\nname: "+service+"\nversion: 0.0.0\nagent:\n  kind: codefly:service\n  name: rust\n  version: 0.0.20\n  publisher: codefly.dev\nendpoints:\n  - name: "+endpoint+"\n    api: "+api+"\n    visibility: public\n")
+	t.Chdir(root)
 }

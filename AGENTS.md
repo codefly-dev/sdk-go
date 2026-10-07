@@ -106,6 +106,13 @@ see the skill below.
 
 ## Rules that bite
 
+- **Core is pinned to the v0.12.0 tag in both modules.** Endpoint visibility is
+  exactly `private`/`internal`/`public`; `external` is a location. Local fallback
+  uses core's `Endpoint.External()` predicate and still resolves public
+  endpoints without an external location. Do not recreate removed visibility names.
+  Preserve the calling module separately from the queried producer; core's
+  `SelectEndpointForReference` owns selection on module-adjusted declarations.
+  `Init` pins that consumer once; endpoint resolution refuses identity drift.
 - **`CODEFLY__` is spelled in this repo, nowhere else.** A consumer needing a
   value gets a typed accessor here; the prefix constant lives in
   `runtime_value.go` for that reason.
@@ -170,6 +177,8 @@ Loaded on demand rather than carried here — `.claude/skills/`:
 - `agentcontext_test.go` holds this file's length budget and each skill's
   frontmatter contract. It runs under `go test ./...`, so CI enforces it with no
   workflow change.
+- `TestQueryDoesNotExposeDefaultNetworkAPI` holds the deleted query API absent,
+  including inert methods or fields. Legacy means delete, not deprecate.
 - Keep this file under ~150 lines (hard cap 200). Push depth into a nested
   `AGENTS.md` beside what it describes, or into `.claude/skills/`.
 - `CLAUDE.md` is a pointer to this file. Keep one canonical source.

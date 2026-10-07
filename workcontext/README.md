@@ -902,54 +902,19 @@ root:
 ./scripts/check-one-implementation.sh
 ```
 
-### This module merges on a pseudo-version, deliberately
+### Core release dependency
 
-`workcontext/go.mod` pins **`v0.7.2-0.20261003161926-4051e4383635`** — core at
-`4051e438` — and not a release tag, because there is no tag to move to and will
-not be one before this merges. Core's `version/info.codefly.yaml` already says
-`0.8.0`, but its `version-tag.yml` cuts the tag from the **merge commit** of
-core#692 and core never tags by hand; core#692 is still open on two owner
-decisions. The latest published core tag is `v0.7.1`, dated 2026-09-30.
+Both `workcontext/go.mod` and the root SDK pin **core v0.12.0**, the release
+tag at `060b2bd8cfc4b03086190045676ec3fa2b36d67f`. This tag supplies the sealed
+Work Context implementation, `Inspect`, verification and re-check entrypoints,
+the lifetime ceiling, and the conformance kit exercised by this module. No
+unreleased core pin is required.
 
-**What `v0.7.1` does and does not carry**, because the imprecise version of this
-("no released core has the Work Context") is both wrong and misleading — it
-invites the answer "then nothing is worse off by waiting". Measured against the
-tag, not inferred:
-
-| At `v0.7.1` | |
-| --- | --- |
-| present | `Authority.Start`, `Verifier.Verify`, `Verified`, `Grant`, `replay.go`, `scope.go` — an **unsealed** mint and verify |
-| absent | `Seal` and `SealSource`, so no installation, epoch or build binding and no revocation through the seal |
-| absent | `Inspect` — the structural entrypoint this module reads every capability through |
-| absent | `Verifier.Recheck` — the non-consuming re-check the stream guard is built on |
-| absent | `Authenticator` — the verify-only entrypoint |
-| absent | `MaxTTLCeiling` — `v0.7.1` has the unbounded-lifetime behaviour this module measured and refused to trust |
-| absent | **the whole `workcontext/conformance` directory** — the kit this module's suite runs, and the import gate that proves it did not reimplement core |
-
-So the accurate statement is: **there is no released core carrying the sealed
-capability, the conformance kit, or either verification entrypoint as they now
-stand.** A consumer that needs only unsealed mint-and-verify has `v0.7.1` and is
-not blocked. A consumer that owes an import gate — which is every consumer of
-this contract — has nothing tagged to run it against.
-
-A pseudo-version is a *pin*, not a workaround: it is reproducible for anyone who
-checks the branch out, and `go.sum` records the hashes. What it is not is a
-release line, which matters for a consumer in two ways:
-
-- **`go get -u` will not move you off it**, and nothing will warn you. The pin
-  is the version.
-- **Do not cut a consumer release whose only Work Context dependency is this
-  pseudo-version** unless you accept the same unreleased dependency. Pinning
-  this module from a branch is fine for integration; publishing it as stable is
-  the thing to hold.
-
-Core will say when `v0.8.0` lands. The follow-up is a one-line `go get` and a
-`go mod tidy` in this module, and it is **not** a merge precondition for this
-pull request: holding a finished change behind somebody else's release is how a
-branch rots, and the pin names an exact commit either way.
-
-What the tag will add is nothing functional — `67ee7220` is the content — so
-re-pinning is bookkeeping, not an upgrade.
+The core dependency version is separate from the SDK leaf's own version:
+Go releases this module with a `workcontext/vX.Y.Z` tag. A root SDK tag does not
+release the leaf. Release through `codefly publish`, which owns the tags and
+pre-flight gates; use the resulting leaf tag or its resolved pseudo-version
+when pinning a consumer.
 
 ## The wire
 
