@@ -16,8 +16,9 @@ import (
 // the composition's judgement — the CLI's join decided at render which
 // endpoints this consumer may reach, and the mesh enforces it on the cell — so
 // the SDK resolves from the carrier keyed by the query's canonical identity and
-// refuses only an absent carrier or a malformed one. The environment and the
-// presence of a workspace decide the path; no flag does.
+// refuses only an absent carrier or a malformed one. This also describes pods
+// deployed into a local environment: the workspace's presence, not its
+// environment name, determines whether declarations can be checked on disk.
 
 var carriedEndpoint = resources.EndpointInformation{
 	Module: "platform", Service: "location-records", Name: "rest", API: "rest",
@@ -65,7 +66,7 @@ var referenceForms = []struct {
 }
 
 func TestDeployedProcessResolvesItsCarrierWithoutAWorkspace(t *testing.T) {
-	for _, environment := range []string{"production", "staging"} {
+	for _, environment := range []string{"production", "staging", "local", ""} {
 		for _, source := range []string{"runtime", "embedded"} {
 			for _, form := range referenceForms {
 				t.Run("environment="+environment+"/source="+source+"/"+form.name, func(t *testing.T) {
@@ -87,7 +88,7 @@ func TestDeployedProcessResolvesItsCarrierWithoutAWorkspace(t *testing.T) {
 }
 
 func TestDeployedProcessRefusesAnAbsentCarrierWithTheSentinel(t *testing.T) {
-	for _, environment := range []string{"production", "staging"} {
+	for _, environment := range []string{"production", "staging", "local", ""} {
 		for _, form := range referenceForms {
 			t.Run("environment="+environment+"/"+form.name, func(t *testing.T) {
 				prepareProcessWithoutWorkspace(t, environment)
@@ -209,21 +210,24 @@ func TestNonlocalProcessWithAWorkspaceRefusesAbsenceWithTheSentinel(t *testing.T
 	require.Nil(t, instance)
 }
 
-// In local, or before an environment is selected, the declarations are the
-// authority and a process without them is refused as #57 built it. A carrier
-// alone establishes nothing there.
-func TestLocalProcessWithoutAWorkspaceStillRequiresDeclarations(t *testing.T) {
+// Local Kubernetes pods carry cluster service addresses but ship no workspace.
+// A malformed injected address is refused; a missing workspace must not hide it
+// behind a declaration error or permit a native address to be substituted.
+func TestLocalProcessWithoutAWorkspaceRefusesAMalformedCarrier(t *testing.T) {
 	for _, environment := range []string{"", "local"} {
-		for _, form := range referenceForms {
-			t.Run("environment="+environment+"/"+form.name, func(t *testing.T) {
-				prepareProcessWithoutWorkspace(t, environment)
-				injectEndpointForTest(t, "embedded", carrierFor("rest", "rest", "https://upstream.example:9443"))
-				query := form.query(queryCarriedService())
-				instance, err := query.ResolveNetworkInstance()
-				require.ErrorIs(t, err, resources.ErrNoDeclaredEndpoints)
-				require.Nil(t, instance)
-				require.Nil(t, query.NetworkInstance())
-			})
+		for _, source := range []string{"runtime", "embedded"} {
+			for _, form := range referenceForms {
+				t.Run("environment="+environment+"/source="+source+"/"+form.name, func(t *testing.T) {
+					prepareProcessWithoutWorkspace(t, environment)
+					injectEndpointForTest(t, source, carrierFor("rest", "rest", "localhost:not-a-port"))
+					query := form.query(queryCarriedService())
+					instance, err := query.ResolveNetworkInstance()
+					require.ErrorContains(t, err, "malformed address")
+					require.NotErrorIs(t, err, codefly.ErrEndpointCarrierAbsent)
+					require.Nil(t, instance)
+					require.Nil(t, query.NetworkInstance())
+				})
+			}
 		}
 	}
 }
