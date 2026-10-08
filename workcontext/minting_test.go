@@ -126,10 +126,10 @@ func newAuthorityOver(t *testing.T, seals *corework.MemorySealSource) *authority
 
 // verifier is core's verifier configured for this authority — the module's only
 // verification entry point, reached through the alias in core.go.
-func (a *authority) verifier(t *testing.T) *Verifier {
+func (a *authority) verifier(t *testing.T) *verifier {
 	t.Helper()
 	public, _ := corework.FixtureKeyPair()
-	return &Verifier{
+	return &verifier{
 		Issuer:    testIssuer,
 		Audience:  testAudience,
 		Keys:      map[string]ed25519.PublicKey{testKeyID: public},

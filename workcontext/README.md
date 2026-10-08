@@ -239,6 +239,33 @@ required. A capability missing one does not verify, and `Attach` refuses to put
 it on a request at all — there is no request on which an unsealed credential is
 better than no credential.
 
+### A derived credential never outlives its parent
+
+A credential derived from another — a child session, or the capability that
+carries an approval — expires **no later than its parent**, and a chain of them
+never refreshes a lifetime past the root's. Core's `derive` clamps it, and a
+parent already past its own expiry derives nothing at all. The chain narrows in
+the other dimension too: a hop holds a subset of the hop before it, refused at
+the mint and again in core's `checkStructure` at every verification.
+
+**This module derives nothing, and the property is pinned here anyway.**
+`TestDerivedContextNeverOutlivesParent` drives core's own minter over a matrix of
+parent lifetimes and requested windows, so the version of core *this* module
+resolves to is held to the clamp. The rule is then required of whatever this
+module depends on, rather than of core in general.
+
+Two halves of the rule are not this module's to enforce, and the test says so
+where it asserts them:
+
+- **At verification** a verifier holds the capability and not its parent, and
+  `codefly.base.v0.WorkContextV1` carries no absolute-deadline claim and no
+  per-hop timestamp — so "no later than its parent" is not a question the wire
+  lets a verifier ask. That claim, and the check that reads it, are core's.
+- **A renewal here is not a derivation.** `MintClient` renews by presenting the
+  projected service-account token for a fresh mint, never the credential it
+  holds, so each renewal is a root the host re-authorizes rather than a window
+  extended from the last one.
+
 ## Obtaining the credential
 
 ```go
@@ -530,29 +557,147 @@ while the request carried two contradictory installations.
 
 ## Verifying
 
-Verification is core's, and what this module exports is core's:
+Verification is core's. What this module hands out is a verifier that cannot
+exist without its configuration:
 
 ```go
-// workcontext.Verifier IS github.com/codefly-dev/core/workcontext.Verifier.
 verified, err := verifier.Verify(ctx, token) // *workcontext.Verified, or a refusal
 ```
 
-```go
-verifier := &workcontext.Verifier{
-    Issuer:    issuer,
-    Audience:  myAudience,
-    Keys:      publicKeysByKeyID,
+`verifier` is a `*workcontext.PinnedVerifier`, and `NewVerifier` is the only way
+to get one. All four of core's sources are required: a verifier missing one
+refuses everything rather than skipping that check, because a verifier that
+silently skipped the seal check would make the strongest check in the model the
+easiest one to omit.
 
-    // All four are required. A verifier missing one refuses everything rather
-    // than skipping that check, because a verifier that silently skipped the
-    // seal check would make the strongest check in the model the easiest one
-    // to omit.
-    Revisions: revisions, // the issuer's authorization revision
-    Replay:    replay,    // consumes single-use capabilities
-    Grants:    grants,    // resolves an approval a grant capability claims
-    Seals:     seals,     // the live installation, epoch, build and binding state
+### Settle the verifier: admit the location, fetch the keys, pin the rest
+
+**There is one way to get a verifier and it is this one.** Core's verifier is a
+struct whose every field has a usable zero value, so this module does not
+re-export it: `PinnedVerifier` is the only type here with a `Verify` method, and
+`NewVerifier` is its only constructor.
+
+```go
+// 1. Admit the location. codefly.For(ctx) answers the composition's mesh
+//    assertion and whether this is a local run.
+endpoint, err := workcontext.ResolveKeySetEndpoint(rawKeySetURL, codefly.For(ctx))
+
+// 2. Fetch the keys FROM that location. The decoding is yours — a key set's
+//    encoding is the issuer's format, and reading one means naming a signature
+//    primitive, which this module may never do.
+keys, err := workcontext.AcquireKeySet(ctx, endpoint, func(payload []byte) (map[string][]byte, error) {
+    return myJWKS(payload) // ids to raw public-key bytes
+})
+
+// 3. Settle the verifier on them.
+verifier, err := workcontext.NewVerifier(workcontext.VerifierSettings{
+    Issuer:    issuer,     // required; compared byte for byte, so whitespace is refused
+    Audience:  myAudience, // required
+    Revisions: revisions, Replay: replay, Grants: grants, Seals: seals,
+}, keys)
+if err != nil {
+    return err // a configuration fault, named, at boot — not an auth error later
 }
 ```
+
+**The steps are one operation, not three a consumer could do separately and then
+ignore.** `KeySetEndpoint` and `KeySet` are opaque with one constructor each, and
+`NewVerifier` takes nothing but a `KeySet`, so "this location was admitted" and
+"these are the keys in use" are the same fact. An endpoint that was checked while
+the keys came from somewhere else is two facts presented as one.
+
+`NewVerifier` refuses, naming each: an unset issuer or audience, either carrying
+surrounding whitespace, a key set that was never acquired, a key set holding no
+key or key material of the wrong length, and each of the four sources separately
+by its own name.
+
+A component that genuinely **is** the issuer — one holding the revision, replay,
+grant and seal state locally — imports `github.com/codefly-dev/core/workcontext`
+directly, as it already does for the verify-only `Authenticator`. At that point
+it is not a client of the capability but a participant in it.
+
+#### The transport contract
+
+In-cell transport security is the mesh's. A composition asserts it with
+`internal-transport/mesh-protected=true`, and a service accepts plaintext to an
+in-cluster Service address exactly under that assertion. This is the same rule,
+group, key and remedy sentence the host and the composed modules apply to their
+own in-cluster hops — reimplemented rather than imported, because a module never
+imports another module's internals, so the shared thing is the contract.
+**This is the SDK's one copy, which is what lets a consumer route every plaintext
+hop it has through one check.**
+
+| Address | Admitted |
+| --- | --- |
+| `https://` any host | yes, with or without the assertion |
+| `http://<service>.<namespace>.svc[.cluster.local]` | only with `mesh-protected=true` |
+| `http://` any other host | no, assertion or not |
+| `http://` loopback | only on a local run |
+
+**Both halves are required.** The assertion covers only what a mesh can cover, so
+a plaintext URL to any other host stays refused with it set; and a name is not
+evidence a mesh wraps the wire, so an in-cluster address without the assertion is
+refused too. `ClusterServiceHost` accepts `<service>.<namespace>.svc` or that
+followed by `cluster.local` and nothing else, with both leading labels held to
+DNS-1123. **The suffix is matched literally**: a name carrying an `svc` label in
+another domain is an ordinary public name, and an arbitrary suffix is not
+evidence of a cluster domain. A cell with a custom cluster domain uses the
+unqualified `<service>.<namespace>.svc` form, which resolves in-cluster under any
+domain.
+
+**The assertion is compared literally.** `true` asserts it. Unset, empty and
+`false` keep plaintext refused. **Every other value stops the process**, a value
+carrying whitespace included — `" true"` and `"true\n"` are not the assertion. An
+earlier revision trimmed first, so that a value delivered by file would not be
+refused over its trailing newline; but `TrimSpace` trims every Unicode space, so
+values that are not the assertion asserted it. A delivery's shape is the
+delivery's to fix, and the refusal names what the value must be.
+
+**A lookup failure is not absence.** A setting nothing carries is an answer — the
+mesh is not asserted. A delivery that cannot be read, or an authority-bearing
+value that has drifted from the one pinned at boot, is not an answer at all, and
+is refused. That is why `TransportSource` requires `WorkspaceValueIfSet` rather
+than `WorkspaceValue`: the latter reports "not configured" and "could not be
+read" with one error, and a failed read must not quietly decide a posture
+question.
+
+**Loopback is the local shape only.** A deployed runtime has one admission rule
+and loopback is not an exception to it, not even with the assertion set: a mesh
+carries no hop that never leaves the pod.
+
+Both facts come from `TransportSource`, which `codefly.For(ctx)` satisfies,
+rather than from parameters. A boolean parameter would be a per-service opt-in
+that no address has to qualify for; with both answers coming from the runtime,
+the only way to say a hop may be plaintext is for the composition to have said
+it.
+
+**No refusal echoes a configured value.** Not the URL, not the parser's own
+message (whose text embeds the input), and not the assertion — `WorkspaceValueIfSet`
+reads the secret namespace too, so that value may be a credential, and a
+configuration error reaches boot-time logging. Every plaintext refusal ends with
+`MeshTransportRemedy`, so an operator reads the supported way through off the
+error.
+
+**The fetch stays on the admitted address.** A redirect is refused rather than
+followed, the body is bounded, a non-200 is an `ErrKeySetUnavailable` rather than
+a configuration fault, and the HTTP client is this module's — a caller supplies
+none, on the same terms as the mint client's.
+
+#### Re-auditing this
+
+`scripts/security-posture.sh` is the re-runnable check, and its exit status is
+the answer:
+
+```bash
+./scripts/security-posture.sh SP-WC-01   # a derived context never outlives its parent
+./scripts/security-posture.sh SP-WC-05   # every verifier pins issuer and audience
+./scripts/security-posture.sh            # both
+```
+
+It reads the exit status and separately requires every named test to have run, so
+a rule whose test was renamed, deleted or filtered out by a `-run` pattern fails
+rather than passing silently. A check that cannot fail reports green forever,
+which is worse than no check.
 
 **That shape is issuer-shaped, and it is a real cost for a consumer.** A
 component that holds those four locally — the host — supplies them from its own

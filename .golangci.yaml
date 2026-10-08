@@ -21,7 +21,7 @@ linters:
       # proper noun: every sentinel in these files begins with "Codefly".
       - linters:
           - staticcheck
-        path: (^|/)(runtime_environment_file|mint|stream)\.go$
+        path: (^|/)(runtime_environment_file|mint|stream|verifier)\.go$
         text: "ST1005:"
     paths:
       - .*\.pb\.go

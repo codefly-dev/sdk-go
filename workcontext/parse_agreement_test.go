@@ -79,7 +79,7 @@ var structurallyRefused = map[string]bool{
 // rather than quietly dropping out of coverage.
 //
 // This is the test the conformance test is not. Driving fixtures through
-// `&Verifier{}` exercises core, because Verifier is an alias of core's type —
+// core.s verifier directly exercises core, because this package.s is an alias —
 // it is core testing core, and it would have passed unchanged beside the
 // implementation this PR deletes. The SDK's own decision paths are
 // readClaims/sealOf, SealedInstallation, FromHeaders and credentialFrom, and that

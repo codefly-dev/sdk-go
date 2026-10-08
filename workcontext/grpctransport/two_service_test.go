@@ -3,8 +3,12 @@ package grpctransport_test
 import (
 	"context"
 	"crypto/ed25519"
+	"encoding/hex"
 	"errors"
 	"net"
+	"net/http"
+	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -117,20 +121,61 @@ func newHopAuthority(t *testing.T) *hopAuthority {
 	}
 }
 
-// verifier is core's, configured for one service's audience. A verifier is
-// given all four of core's sources because a verifier missing one refuses
-// everything rather than skipping that check.
-func (a *hopAuthority) verifier(audience string) *workcontext.Verifier {
-	return &workcontext.Verifier{
+// verifier is built the way a CONSUMER has to build one, which is the only way
+// there is: the key-set location is admitted, the keys are fetched from it, and
+// the verifier is settled on the result. A verifier is given all four of core's
+// sources because one missing a source refuses everything rather than skipping
+// that check.
+//
+// It goes through a real loopback endpoint rather than a stub, because the
+// binding under test is that the keys a verifier holds are the keys an admitted
+// endpoint served — a fake that handed the keys over directly would be testing
+// the shape of the API and not the binding.
+func (a *hopAuthority) verifier(t *testing.T, audience string) *workcontext.PinnedVerifier {
+	t.Helper()
+	endpoint := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+		_, _ = writer.Write([]byte(hopKeyID + " " + hex.EncodeToString(a.publicKey)))
+	}))
+	t.Cleanup(endpoint.Close)
+
+	admitted, err := workcontext.ResolveKeySetEndpoint(endpoint.URL, hopTransport{})
+	require.NoError(t, err)
+	keys, err := workcontext.AcquireKeySet(t.Context(), admitted, hopDecodeKeySet)
+	require.NoError(t, err)
+
+	verifier, err := workcontext.NewVerifier(workcontext.VerifierSettings{
 		Issuer:    hopIssuer,
 		Audience:  audience,
-		Keys:      map[string]ed25519.PublicKey{hopKeyID: a.publicKey},
 		Revisions: corework.FixedRevision(hopRevision),
 		Replay:    a.replay,
 		Grants:    hopNoGrants{},
 		Seals:     a.seals,
 		Now:       func() time.Time { return hopNow },
+	}, keys)
+	require.NoError(t, err)
+	return verifier
+}
+
+// hopTransport is a local run with no mesh assertion, which is what an
+// httptest server on loopback is.
+type hopTransport struct{}
+
+func (hopTransport) WorkspaceValueIfSet(string, string) (string, bool, error) { return "", false, nil }
+func (hopTransport) IsLocalRun() bool                                         { return true }
+
+// hopDecodeKeySet is the consumer's decoder: the key set's encoding is the
+// issuer's format, and reading it is the consumer's job because it is where
+// naming a signature primitive is legitimate.
+func hopDecodeKeySet(payload []byte) (map[string][]byte, error) {
+	id, encoded, found := strings.Cut(string(payload), " ")
+	if !found {
+		return nil, errors.New("not a key set")
 	}
+	key, err := hex.DecodeString(encoded)
+	if err != nil {
+		return nil, err
+	}
+	return map[string][]byte{id: key}, nil
 }
 
 type hopNoGrants struct{}
@@ -143,7 +188,7 @@ func (hopNoGrants) Grant(context.Context, string) (*corework.Grant, error) {
 // carrier from gRPC metadata, verified for this service's own audience.
 func verifyIncoming(
 	ctx context.Context,
-	verifier *workcontext.Verifier,
+	verifier *workcontext.PinnedVerifier,
 ) (grpctransport.ExecutionContext, *workcontext.Verified, error) {
 	execution, err := grpctransport.GRPCExecutionContextFromIncoming(ctx)
 	if err != nil {
@@ -157,7 +202,7 @@ func verifyIncoming(
 }
 
 type serviceB struct {
-	verifier *workcontext.Verifier
+	verifier *workcontext.PinnedVerifier
 	accepted chan *workcontext.Verified
 }
 
@@ -171,7 +216,7 @@ func (s *serviceB) call(ctx context.Context, _ *healthv1.HealthCheckRequest) (*h
 }
 
 type serviceA struct {
-	verifier  *workcontext.Verifier
+	verifier  *workcontext.PinnedVerifier
 	authority *hopAuthority
 	b         grpc.ClientConnInterface
 	accepted  chan *workcontext.Verified
@@ -282,9 +327,9 @@ func newHopTopology(t *testing.T) *hopTopology {
 		atA:       make(chan *workcontext.Verified, 1),
 		atB:       make(chan *workcontext.Verified, 1),
 	}
-	topology.b = serveHop(t, &serviceB{verifier: authority.verifier(audienceB), accepted: topology.atB})
+	topology.b = serveHop(t, &serviceB{verifier: authority.verifier(t, audienceB), accepted: topology.atB})
 	topology.a = serveHop(t, &serviceA{
-		verifier: authority.verifier(audienceA), authority: authority, b: topology.b, accepted: topology.atA,
+		verifier: authority.verifier(t, audienceA), authority: authority, b: topology.b, accepted: topology.atA,
 	})
 	return topology
 }

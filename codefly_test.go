@@ -13,6 +13,7 @@ import (
 	"github.com/codefly-dev/core/wool"
 	codefly "github.com/codefly-dev/sdk-go"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func init() {
@@ -500,4 +501,115 @@ func prepareDeclaredEndpointWorkspace(t *testing.T, module, service, endpoint, a
 	writeFile(t, filepath.Join(root, "modules", module, "module.codefly.yaml"), "kind: module\nname: "+module+"\nservices:\n  - name: "+service+"\n")
 	writeFile(t, filepath.Join(root, "modules", module, "services", service, "service.codefly.yaml"), "kind: service\nname: "+service+"\nversion: 0.0.0\nagent:\n  kind: codefly:service\n  name: rust\n  version: 0.0.20\n  publisher: codefly.dev\nendpoints:\n  - name: "+endpoint+"\n    api: "+api+"\n    visibility: public\n    exposure: none\n")
 	t.Chdir(root)
+}
+
+// IsLocalRun is the Query's answer to the question the package-level IsLocal
+// answers, as a method so a leaf module can require it through an interface
+// instead of importing this one — workcontext.TransportSource does, to decide
+// whether a plaintext hop to a loopback host is a local run.
+//
+// It is tested through the carrier rather than by asserting that it delegates,
+// because what a consumer depends on is that the answer comes from the Codefly
+// environment and not from a value the consumer chose.
+func TestIsLocalRunAnswersFromTheEnvironment(t *testing.T) {
+	ctx := t.Context()
+
+	t.Run("a local environment", func(t *testing.T) {
+		t.Setenv(resources.EnvironmentPrefix, resources.LocalEnvironment().Name)
+
+		assert.True(t, codefly.For(ctx).IsLocalRun())
+		assert.Equal(t, codefly.IsLocal(), codefly.For(ctx).IsLocalRun())
+	})
+
+	t.Run("a deployed environment", func(t *testing.T) {
+		t.Setenv(resources.EnvironmentPrefix, "staging")
+
+		assert.False(t, codefly.For(ctx).IsLocalRun())
+		assert.Equal(t, codefly.IsLocal(), codefly.For(ctx).IsLocalRun())
+	})
+
+	t.Run("no environment at all is not a local run", func(t *testing.T) {
+		t.Setenv(resources.EnvironmentPrefix, "")
+
+		assert.False(t, codefly.For(ctx).IsLocalRun())
+	})
+}
+
+// WorkspaceValueIfSet separates the three answers WorkspaceValue flattens into
+// two: the value is set, nothing carries it, or the lookup FAILED.
+//
+// A caller deciding a posture question — "may this hop be plaintext" — cannot
+// live with the flattening. An unreadable delivery, or an authority-bearing
+// value that has drifted from the one pinned at boot, read as "the operator did
+// not assert it" is a failed read quietly answering a question it did not ask.
+// Absence is an answer; a failed read is not.
+func TestWorkspaceValueIfSetSeparatesAbsenceFromFailure(t *testing.T) {
+	ctx := t.Context()
+
+	t.Run("a value that is set", func(t *testing.T) {
+		t.Setenv("CODEFLY__WORKSPACE_CONFIGURATION__INTERNAL_TRANSPORT__MESH_PROTECTED", "true")
+
+		value, set, err := codefly.For(ctx).WorkspaceValueIfSet("internal-transport", "mesh-protected")
+
+		assert.NoError(t, err)
+		assert.True(t, set)
+		assert.Equal(t, "true", value)
+	})
+
+	t.Run("a value carried only by the secret namespace", func(t *testing.T) {
+		t.Setenv("CODEFLY__WORKSPACE_SECRET_CONFIGURATION__INTERNAL_TRANSPORT__MESH_PROTECTED", "true")
+
+		value, set, err := codefly.For(ctx).WorkspaceValueIfSet("internal-transport", "mesh-protected")
+
+		assert.NoError(t, err)
+		assert.True(t, set)
+		assert.Equal(t, "true", value)
+	})
+
+	t.Run("nothing carries it", func(t *testing.T) {
+		value, set, err := codefly.For(ctx).WorkspaceValueIfSet("internal-transport", "absent-here")
+
+		assert.NoError(t, err, "absence is an answer, not a failure")
+		assert.False(t, set)
+		assert.Empty(t, value)
+	})
+
+	t.Run("a delivery that cannot be read", func(t *testing.T) {
+		key := "CODEFLY__WORKSPACE_CONFIGURATION__INTERNAL_TRANSPORT__UNREADABLE"
+		t.Setenv(resources.FileCarrierKey(key), filepath.Join(t.TempDir(), "absent"))
+
+		_, set, err := codefly.For(ctx).WorkspaceValueIfSet("internal-transport", "unreadable")
+
+		assert.Error(t, err, "a delivery that is there and cannot be read is not absence")
+		assert.False(t, set)
+	})
+
+	t.Run("a delivery that is both inline and by file", func(t *testing.T) {
+		key := "CODEFLY__WORKSPACE_CONFIGURATION__INTERNAL_TRANSPORT__DOUBLED"
+		path := filepath.Join(t.TempDir(), "value")
+		require.NoError(t, os.WriteFile(path, []byte("true"), 0o600))
+		t.Setenv(key, "true")
+		t.Setenv(resources.FileCarrierKey(key), path)
+
+		_, set, err := codefly.For(ctx).WorkspaceValueIfSet("internal-transport", "doubled")
+
+		assert.Error(t, err)
+		assert.False(t, set)
+	})
+
+	// An authority-bearing value that has drifted is the decisive case: it is
+	// the one where the setting IS configured, the read fails, and reading the
+	// failure as absence would let a drifted value answer as "not asserted".
+	t.Run("an authority-bearing value that has drifted", func(t *testing.T) {
+		t.Setenv("CODEFLY__WORKSPACE_CONFIGURATION__MESH_PIN__MESH_PROTECTED", "true")
+		_, err := codefly.ReadAuthority(ctx, codefly.AuthorityValueName{Name: "mesh-pin", Key: "mesh-protected"})
+		require.NoError(t, err)
+
+		t.Setenv("CODEFLY__WORKSPACE_CONFIGURATION__MESH_PIN__MESH_PROTECTED", "false")
+
+		_, set, err := codefly.For(ctx).WorkspaceValueIfSet("mesh-pin", "mesh-protected")
+
+		assert.ErrorIs(t, err, codefly.ErrAuthorityValueChanged)
+		assert.False(t, set)
+	})
 }
