@@ -237,15 +237,10 @@ func ServiceVersion() string {
 	return os.Getenv(resources.VersionPrefix)
 }
 
-// Fixture returns the fixture selected by the Codefly runtime. Product code
-// must not depend on the runtime's environment-variable representation.
-func Fixture() FixtureSelection {
-	return FixtureSelection(os.Getenv(resources.FixturePrefix))
-}
-
-func WithFixture(fixture string) bool {
-	return resources.Match(string(Fixture()), fixture)
-}
+// The fixture API moved to the sdk-go/fixture package: it was the only thing in
+// this root package that needed core/composition, and composition carries a
+// GitHub release resolver, so every service importing codefly for its own
+// address linked a GitHub API client it never calls. Use fixture.Selected().
 
 // Environment returns the Codefly environment selected for this process. The
 // representation is owned by the SDK; product code must not read its carrier.
