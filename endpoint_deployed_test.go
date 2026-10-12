@@ -231,3 +231,25 @@ func TestLocalProcessWithoutAWorkspaceRefusesAMalformedCarrier(t *testing.T) {
 		}
 	}
 }
+
+// A module run from its own checkout inside a larger composition finds its
+// repository's workspace on disk, which declares the module under its own name,
+// not the name the composition gave it. That workspace is not the
+// composition, so the process resolves from the carrier the composition's CLI
+// injected, as a workspace-free process does, rather than refusing every
+// endpoint because its repository does not know the composition's name.
+func TestAComposedModuleRunFromItsOwnCheckoutResolvesItsCarrier(t *testing.T) {
+	prepareProcessWithoutWorkspace(t, "local")
+	checkout := t.TempDir()
+	require.NoError(t, os.WriteFile(checkout+"/workspace.codefly.yaml",
+		[]byte("name: module-own-dev\nlayout: modules\nmodules:\n  - name: module-own-name\n"), 0o600))
+	t.Chdir(checkout)
+	workspace, err := resources.FindWorkspaceUp(context.Background())
+	require.NoError(t, err)
+	require.NotNil(t, workspace, "the test needs the module repository's own workspace on disk")
+	access := carrierFor("rest", "rest", "http://localhost:24601")
+	injectEndpointForTest(t, "runtime", access)
+	instance, err := queryCarriedService().API("rest").ResolveNetworkInstance()
+	require.NoError(t, err)
+	require.Equal(t, uint16(24601), instance.Port)
+}

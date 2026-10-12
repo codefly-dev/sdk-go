@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 
 	"github.com/codefly-dev/core/configurations"
@@ -126,7 +127,7 @@ func (q *Query) ResolveNetworkInstance() (*resources.NetworkInstance, error) {
 	if err != nil {
 		return nil, err
 	}
-	if workspace == nil {
+	if workspace == nil || !composes(workspace, q.module) {
 		return q.resolveFromAuthoritativeCarrier()
 	}
 	// The declaration decides eligibility before any carrier can supply an
@@ -153,6 +154,20 @@ func (q *Query) ResolveNetworkInstance() (*resources.NetworkInstance, error) {
 		return nil, fmt.Errorf("%w; local endpoint unavailable (%w)", absentCarrier(info), localErr)
 	}
 	return local, nil
+}
+
+// composes reports whether the workspace found on disk is the composition
+// this process runs in: it declares the module the query names. A module run
+// from its own checkout inside a larger composition finds its repository's
+// workspace, which knows the module by its own name, not by the name the
+// composition gave it; reading eligibility from it would refuse every
+// endpoint. That process is answered as a workspace-free one is — from the
+// carriers the composition's CLI judged and injected at run time.
+func composes(workspace *resources.Workspace, module string) bool {
+	if workspace.Name == module {
+		return true
+	}
+	return slices.Contains(workspace.ModulesNames(), module)
 }
 
 // resolveFromAuthoritativeCarrier answers a workspace-free process from its carriers
