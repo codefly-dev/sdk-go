@@ -164,10 +164,10 @@ The fix was not to sync the rule. **`corework.Decode` now owns every
 structural decision** — shape, encoding, schema, attenuation, grant shape, a
 seal naming an installation, an epoch on every actor hop — and this module's
 `readClaims` runs after it, reads two values, and decides nothing. Core added
-`Inspect` for this, when asked; the twelve structural refusals must reach core's
+`Decode` (first named `Inspect`) for this, when asked; the twelve structural refusals must reach core's
 sentinel here, and every other fixture must **pass**, because an unverified
 inspection that refused a signature or a live-state failure would be claiming to
-have verified something it cannot see. `Inspect` checks no signature at all —
+have verified something it cannot see. `Decode` checks no signature at all —
 core's own test asserts a token re-signed with a key nobody holds passes it — so
 nil means *shaped right*, never *permitted*.
 
@@ -475,7 +475,7 @@ not a rate limit.
 option is a deployment policy.** Core's `MaxTTLCeiling` (24h) is absolute:
 `Authority.maxTTL` clamps to it, `Start` refuses a TTL beyond it, and — since
 core `67ee7220` — `decodeClaims` refuses a capability whose window is wider,
-so `Verify`, `Authenticate` **and `Inspect`** all refuse it with one message.
+so `Verify`, `Authenticate` **and `Decode`** all refuse it with one message.
 
 That last one is what matters here, and it is the third place core put this
 bound. The argument this module made twice for keeping a client-side ceiling was
@@ -486,7 +486,7 @@ two attempts bounded `Authority.Start` and then `Verify` alone, neither of which
 this client can see. A thirty-day capability that every `Verify` refuses was
 reported to its **holder** as thirty days of validity: an absent bound tells a
 caller nothing, and that one told it something false about the only field it
-calls `Inspect` to read.
+calls `Decode` to read.
 
 With the bound in `decodeClaims`, an over-ceiling lifetime is refused in this
 client's own read path before `checkWindow` runs. So the net is core's.
@@ -1049,9 +1049,9 @@ root:
 
 ### Core release dependency
 
-Both `workcontext/go.mod` and the root SDK pin **core v0.13.0**, the release
-tag at `f2423c9c7f71481952e246dcda0652e1fe97f2f4`. This tag supplies the sealed
-Work Context implementation, `Inspect`, verification and re-check entrypoints,
+Both `workcontext/go.mod` and the root SDK pin **core v0.19.1**, the release
+tag at `7f78302f4ac82932c83a6e43375cee4da73f7b9d`. This tag supplies the sealed
+Work Context implementation, `Decode`, verification and re-check entrypoints,
 the lifetime ceiling, and the conformance kit exercised by this module. No
 unreleased core pin is required.
 
@@ -1095,7 +1095,7 @@ size bound, the envelope, `CheckEncoding`, `proto.Unmarshal`, **protovalidate**
 and the full structural seal check, and returns the claims it decoded;
 `readClaims` (`carrier.go`) calls it and clones the result. There is no second
 decode, no local rule, and **no signature check** — core's own test asserts a
-token re-signed with a key nobody holds passes `Inspect`, so nil means "shaped
+token re-signed with a key nobody holds passes `Decode`, so nil means "shaped
 like a sealed capability" and never "permitted". That is sound only because
 nothing trusts it: it fills the pre-check carriers and tells the mint client
 when its own freshly issued credential expires, and a receiver that preferred a

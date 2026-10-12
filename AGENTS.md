@@ -99,7 +99,7 @@ see the skill below.
 
 ## Rules that bite
 
-- **Core is pinned to the v0.13.0 tag in both modules.** Endpoint visibility is
+- **Core is pinned to the v0.19.1 tag in both modules.** Endpoint visibility is
   exactly `private`/`internal`/`public`; `external` is a location. Local fallback
   uses core's `Endpoint.External()` predicate and still resolves public
   endpoints without an external location. Do not recreate removed visibility names.
@@ -130,7 +130,7 @@ see the skill below.
   so it cannot shadow the configuration a caller falls back to. Keep that.
 - **The Work Context has exactly one implementation and it is not here.**
   `core/workcontext` signs, verifies, and answers the *structural* question
-  through `Inspect`. Nothing here may sign, check a signature, encode a
+  through `Decode`. Nothing here may sign, check a signature, encode a
   capability **or decide what a capability is** — a local seal rule is a second
   implementation even when it signs nothing, and ours disagreed with core's own
   fixtures about which sentinel three refusals earn. **Four gates hold that, and

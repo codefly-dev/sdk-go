@@ -59,7 +59,7 @@ const (
 	// capability that every Verify refuses was reported to its HOLDER as
 	// thirty days of validity.
 	//
-	// Core 67ee7220 moved the bound into decodeClaims, which Inspect uses, so
+	// Core 67ee7220 moved the bound into decodeClaims, which Decode uses, so
 	// an over-ceiling lifetime is refused IN THIS CLIENT'S OWN READ PATH —
 	// inside sealOf, before checkWindow runs at all.
 	//
@@ -1816,7 +1816,7 @@ func (c *MintClient) credentialFrom(payload []byte, audience string) (Credential
 // against, and a host that sets them apart would have had a credential accepted
 // here and refused everywhere. And it bounds the lifetime to what this
 // DEPLOYMENT chose to hold — below core's absolute ceiling, which core refuses
-// inside Inspect, the call sealOf already makes.
+// inside Decode, the call sealOf already makes.
 //
 // The tolerance is core's own skew, so this client is never stricter than the
 // verifier that will accept the credential.
@@ -1896,7 +1896,7 @@ func answeredFromElsewhere(response *http.Response, configured string) string {
 // This module had a second definition — it tested PRESENCE
 // (seal.BuildIncarnation == nil) while core tests VALUES — and two definitions
 // of "carries an execution" is one too many whether or not they currently
-// agree. They agree for anything that survives Inspect, because the schema
+// agree. They agree for anything that survives Decode, because the schema
 // requires the pair; they would disagree about a seal carrying a digest with
 // no incarnation, which is exactly the kind of case a protovalidate rule gets
 // relaxed out from under.
