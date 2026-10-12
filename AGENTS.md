@@ -72,16 +72,9 @@ Run each of those a second time from `workcontext/` — it is a separate module
 with its own `go.mod` and `go.sum`, so nothing at the root covers it. Lint finds
 the root `.golangci.yaml` by walking up, so it needs no config of its own.
 
-Coverage thresholds differ by module and are not interchangeable:
-
-| Module | Gate | Where |
-| --- | --- | --- |
-| root | total ≥ 75%, per-file and per-package 0 | `.testcoverage.yaml` |
-| `workcontext` | module total ≥ 75%, via `awk` in CI | `go.yml`, `coverage` job |
-
-The `workcontext` gate is on the **module total** across both its packages, so
-`grpctransport` sitting low is carried by the verifier. Read the total, not a
-package line.
+Coverage gates differ by module and are not interchangeable — root
+`.testcoverage.yaml`, `workcontext` an `awk` on the **module total** in `go.yml`.
+The `dual-module-change` skill has the table and the command.
 
 ## Where things live
 
@@ -115,14 +108,16 @@ see the skill below.
   `Init` pins that consumer once; endpoint resolution refuses identity drift.
 - **A deployed process has no workspace, so its carriers are authoritative.**
   The builder image ships the binary alone, including in local Kubernetes pods.
-  In any environment with no workspace
-  on disk, `ResolveNetworkInstance` reads the carrier keyed by the query's
-  canonical identity and refuses only absence (`ErrEndpointCarrierAbsent`) or a
-  malformed value: the composition judged eligibility at render and the mesh
-  enforces it. With a workspace, selection comes first in every environment.
-  No flag decides the path; the workspace's
+  In any environment with no workspace on disk, `ResolveNetworkInstance` reads
+  the carrier keyed by the query's canonical identity and refuses only absence
+  (`ErrEndpointCarrierAbsent`) or a malformed value: the composition judged
+  eligibility at render and the mesh enforces it. With a workspace, selection
+  comes first in every environment. No flag decides the path; the workspace's
   presence does. Native fallback requires a workspace and a `local` or unset
-  environment.
+  environment. A workspace counts only if it carries the queried module (core's
+  `Workspace.Member`): a module's own checkout and its cached release tag ship
+  the producer's workspace under the producer's name, so that process is
+  answered from its carriers too (#66).
 - **`CODEFLY__` is spelled in this repo, nowhere else.** A consumer needing a
   value gets a typed accessor here; the prefix constant lives in
   `runtime_value.go` for that reason.

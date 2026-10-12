@@ -42,6 +42,17 @@ the path; native fallback requires a workspace and a `local` or unset environmen
 A reference to an endpoint not named after its API must qualify the
 API with `.API(...)` there, since no declaration is on disk to supply it.
 
+A workspace found above the process is the process's composition only if it
+carries the queried module, by core's `Workspace.Member`. A composed module run
+from its own checkout, or a released tag resolved into `CODEFLY_MODULE_CACHE`,
+finds the producer's own `workspace.codefly.yaml`, which declares the module
+under the producer's name (`saas-starter` in `saas-starter-dev`) rather than the
+name the composition gave it (`saas`). That workspace is not consulted: the
+process resolves from its injected carriers exactly as a workspace-free process
+does, and refuses an absent one with `ErrEndpointCarrierAbsent`. It never
+selects against the producer's declarations or computes a native address from
+them.
+
 Call `codefly.Init(ctx)` at boot to pin the calling module from the runtime
 identity. `Init` refuses a process whose runtime identity carrier is unset or
 blank with `ErrConsumerNotIdentified`. Every codefly-managed flow sets that

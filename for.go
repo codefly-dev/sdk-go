@@ -114,6 +114,14 @@ var ErrEndpointCarrierAbsent = errors.New("codefly: no carrier for the endpoint 
 // malformed one. It never computes a native address. No flag selects the
 // path: the presence of a workspace decides. Native fallback requires a
 // workspace and a local or unset environment.
+//
+// The workspace found above the process is only the process's composition if
+// it carries the queried module. One that does not — a module run from its own
+// checkout inside a larger composition, or a released tag resolved into the
+// module cache, both of which carry the producer's own workspace under the
+// producer's own module name — is answered exactly as a process with no
+// workspace is: from the carriers, never from that workspace's declarations or
+// native map.
 func (q *Query) ResolveNetworkInstance() (*resources.NetworkInstance, error) {
 	if err := checkConsumerIdentity(q.consumerModule); err != nil {
 		return nil, err
@@ -126,7 +134,7 @@ func (q *Query) ResolveNetworkInstance() (*resources.NetworkInstance, error) {
 	if err != nil {
 		return nil, err
 	}
-	if workspace == nil {
+	if workspace == nil || !carries(workspace, q.module) {
 		return q.resolveFromAuthoritativeCarrier()
 	}
 	// The declaration decides eligibility before any carrier can supply an
@@ -153,6 +161,16 @@ func (q *Query) ResolveNetworkInstance() (*resources.NetworkInstance, error) {
 		return nil, fmt.Errorf("%w; local endpoint unavailable (%w)", absentCarrier(info), localErr)
 	}
 	return local, nil
+}
+
+// carries reports whether workspace is the composition the queried module runs
+// in, by core's own membership rule — the one LoadModuleFromName resolves
+// through. A module's checkout and its cached release tag both ship the
+// producer's workspace, which knows the module by the producer's name, not by
+// the name the composition gave it; selecting against it refuses every query.
+func carries(workspace *resources.Workspace, module string) bool {
+	_, carried := workspace.Member(module)
+	return carried
 }
 
 // resolveFromAuthoritativeCarrier answers a workspace-free process from its carriers
