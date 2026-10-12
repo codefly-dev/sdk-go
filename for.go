@@ -133,12 +133,17 @@ func (q *Query) ResolveNetworkInstance() (*resources.NetworkInstance, error) {
 	if strings.TrimSpace(q.module) == "" || strings.TrimSpace(q.service) == "" {
 		return nil, errors.New("module and service are required for endpoint selection")
 	}
-	workspace, err := enclosing.Composition(q.ctx)
+	workspace, unreadable, err := enclosing.Composition(q.ctx)
 	if err != nil {
 		return nil, err
 	}
 	if workspace == nil {
-		return q.resolveFromAuthoritativeCarrier()
+		instance, carrierErr := q.resolveFromAuthoritativeCarrier()
+		if unreadable != nil && errors.Is(carrierErr, ErrEndpointCarrierAbsent) {
+			return nil, fmt.Errorf("%w; the workspace file in %s could not be read, so it was not taken for the composition %q: %w",
+				carrierErr, unreadable.Dir, enclosing.Injected(), unreadable.Err)
+		}
+		return instance, carrierErr
 	}
 	if !carries(workspace, q.module) {
 		return q.resolveUncomposedFromCarrier(workspace)
@@ -514,9 +519,13 @@ func (q *Query) localConfigurationValue(infoName string, key string, secret bool
 	// Only the process's own composition holds its local configuration files: a
 	// producer's workspace above a composed module's checkout or cached tag
 	// holds the producer's, under a module name that may even match.
-	workspace, workspaceErr := enclosing.Composition(q.ctx)
+	workspace, unreadable, workspaceErr := enclosing.Composition(q.ctx)
 	if workspaceErr != nil {
 		return "", workspaceErr
+	}
+	if unreadable != nil {
+		return "", w.NewError("no %s value for %s/%s in service %s: the workspace file in %s could not be read, so it was not taken for the composition %q: %s",
+			localValueKind(secret), infoName, key, q.service, unreadable.Dir, enclosing.Injected(), unreadable.Err)
 	}
 	if workspace == nil {
 		return "", w.NewError("no %s value for %s/%s in service %s: no workspace on disk is this process's composition",

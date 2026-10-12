@@ -228,3 +228,46 @@ func TestAProcessNoCompositionStartedUsesTheWorkspaceAsFound(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, "the-producers-own-value", value)
 }
+
+// A workspace file that does not decode names nothing, so under an injected
+// composition it does not count and the injected carrier answers. When nothing
+// was injected for the query either, that file may have been the composition's
+// own, and the refusal carries its decode error rather than dropping it. With
+// no composition injected, the decode error is the answer, as it always was.
+func TestAnUndecodableWorkspaceFileIsReportedNotTrusted(t *testing.T) {
+	const yamlError = "did not find expected node content"
+	prepare := func(t *testing.T, injected string) {
+		t.Helper()
+		prepareProcessWithoutWorkspace(t, "local")
+		t.Setenv(resources.WorkspacePrefix, injected)
+		root := t.TempDir()
+		writeFile(t, filepath.Join(root, "workspace.codefly.yaml"), "name: "+composition+"\nmodules: [\n")
+		t.Chdir(root)
+	}
+	query := func() *codefly.Query { return queryCarriedService().Endpoint("rest").API("rest") }
+
+	t.Run("injected, carrier present", func(t *testing.T) {
+		prepare(t, composition)
+		injectEndpointForTest(t, "runtime", carrierFor("rest", "rest", "http://localhost:24601"))
+		instance, err := query().ResolveNetworkInstance()
+		require.NoError(t, err, "an unreadable file is not loaded, so it cannot stop the carrier")
+		require.Equal(t, "http://localhost:24601", instance.Address)
+	})
+	t.Run("injected, carrier absent", func(t *testing.T) {
+		prepare(t, composition)
+		instance, err := query().ResolveNetworkInstance()
+		require.ErrorIs(t, err, codefly.ErrEndpointCarrierAbsent)
+		require.ErrorContains(t, err, "could not be read")
+		require.ErrorContains(t, err, yamlError)
+		require.Nil(t, instance)
+		_, err = queryCarriedService().Configuration("api", "url")
+		require.ErrorContains(t, err, yamlError, "the configuration fallback says why too")
+	})
+	t.Run("nothing injected", func(t *testing.T) {
+		prepare(t, "")
+		instance, err := query().ResolveNetworkInstance()
+		require.ErrorContains(t, err, yamlError)
+		require.NotErrorIs(t, err, codefly.ErrEndpointCarrierAbsent)
+		require.Nil(t, instance)
+	})
+}

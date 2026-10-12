@@ -61,9 +61,15 @@ is computed under the composition's name. A module it does not carry is
 answered from the carriers, and an absent carrier's refusal names the modules
 the workspace does carry.
 
-With no injected identity, no composition started the process (a local tool, a
-test, `go run`), and the workspace found is the only one there is: it is used
-as found.
+`codefly run` and `codefly test` both inject that identity. With none injected,
+no composition started the process (a local tool, a plain `go test` or `go
+run`), and the workspace found is the only one there is: it is used as found.
+
+A workspace file that cannot be decoded cannot name itself, so under an
+injected identity it does not count and the injected carrier still answers. If
+no carrier was injected either, the refusal carries the decode error, since that
+file may have been the composition's own. With no identity injected, the decode
+error is returned as it always was.
 
 The same rule decides every other read that falls back to the workspace on
 disk: the local configuration and secret files behind `Configuration` and

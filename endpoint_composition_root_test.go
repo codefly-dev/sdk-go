@@ -129,3 +129,18 @@ func TestACompositionRootNamesWhatItCarriesWhenAModuleIsUnknown(t *testing.T) {
 		})
 	}
 }
+
+// The injected name is compared as written. A workspace whose name differs from
+// it only in case is another workspace: it is not judged, and the injected
+// carrier answers, where the composition's own declarations would refuse.
+func TestACompositionRootCountsOnlyUnderTheExactInjectedName(t *testing.T) {
+	prepareCompositionRoot(t, "PLATFORM-OBIN")
+	injectEndpointForTest(t, "runtime", &resources.EndpointAccess{
+		Endpoint:        &basev0.Endpoint{Module: "producer", Service: "records", Name: "rest", Api: "rest"},
+		NetworkInstance: &basev0.NetworkInstance{Address: "http://localhost:24601"},
+	})
+	instance, err := codefly.For(context.Background()).Module("producer").Service("records").
+		Endpoint("rest").API("rest").ResolveNetworkInstance()
+	require.NoError(t, err, "a case-folded match would have judged the private endpoint and refused it")
+	require.Equal(t, "http://localhost:24601", instance.Address)
+}
