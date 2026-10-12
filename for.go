@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"slices"
 	"strings"
 
 	"github.com/codefly-dev/core/configurations"
@@ -167,7 +166,12 @@ func composes(workspace *resources.Workspace, module string) bool {
 	if workspace.Name == module {
 		return true
 	}
-	return slices.Contains(workspace.ModulesNames(), module)
+	for _, declared := range workspace.ModulesNames() {
+		if declared == module {
+			return true
+		}
+	}
+	return false
 }
 
 // resolveFromAuthoritativeCarrier answers a workspace-free process from its carriers
