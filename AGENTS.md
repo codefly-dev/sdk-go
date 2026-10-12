@@ -72,16 +72,8 @@ Run each of those a second time from `workcontext/` — it is a separate module
 with its own `go.mod` and `go.sum`, so nothing at the root covers it. Lint finds
 the root `.golangci.yaml` by walking up, so it needs no config of its own.
 
-Coverage thresholds differ by module and are not interchangeable:
-
-| Module | Gate | Where |
-| --- | --- | --- |
-| root | total ≥ 75%, per-file and per-package 0 | `.testcoverage.yaml` |
-| `workcontext` | module total ≥ 75%, via `awk` in CI | `go.yml`, `coverage` job |
-
-The `workcontext` gate is on the **module total** across both its packages, so
-`grpctransport` sitting low is carried by the verifier. Read the total, not a
-package line.
+Coverage gates differ by module: the root's is `.testcoverage.yaml` (total ≥ 75%);
+the `workcontext` module's is described in `workcontext/AGENTS.md`.
 
 ## Where things live
 
