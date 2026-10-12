@@ -93,10 +93,11 @@ percentage will mislead you in both directions.
 ## Versioning
 
 A Go submodule is released under its own tag path — `workcontext/vX.Y.Z`, not
-the root's `vX.Y.Z`. This repo publishes root tags (`v0.1.66` and below) and no
-`workcontext/*` tag, so a consumer today resolves the leaf module to a
-pseudo-version of a commit rather than to a release.
+the root's `vX.Y.Z`. A root tag does not release the leaf: the leaf's first
+release is `workcontext/v0.1.0` (at `1ce8b27`), and every earlier version a
+consumer can resolve is a pseudo-version that `workcontext/go.mod` retracts.
 
-If you are asked to cut a release of `workcontext`, that is the first thing to
-establish, and it is a question for whoever owns the release process — not
-something to infer from the root tags. Do not hand-tag to find out.
+Whether a change needs a new leaf tag is a question for whoever owns the
+release process, who cuts both tag paths with `codefly publish` — not something
+to infer from the root tags. Answer it in the PR with evidence: what the leaf's
+released `go.mod` requires, and whether its source changed. Do not hand-tag.

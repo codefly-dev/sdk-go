@@ -4,7 +4,7 @@ go 1.27.0
 
 require (
 	connectrpc.com/connect v1.21.0
-	github.com/codefly-dev/core v0.15.0
+	github.com/codefly-dev/core v0.19.1
 	github.com/jackc/pgx/v5 v5.10.0
 	github.com/stretchr/testify v1.12.1
 	google.golang.org/grpc v1.83.2
@@ -49,10 +49,11 @@ require (
 	github.com/oklog/ulid/v2 v2.1.2 // indirect
 	github.com/pkg/errors v0.9.1 // indirect
 	github.com/rogpeppe/go-internal v1.14.1 // indirect
+	github.com/santhosh-tekuri/jsonschema/v6 v6.0.3 // indirect
 	github.com/yoheimuta/go-protoparser/v4 v4.14.2 // indirect
 	go.yaml.in/yaml/v3 v3.0.5 // indirect
 	golang.org/x/exp v0.0.0-20260820142414-ca536658362e // indirect
-	golang.org/x/net v0.59.0 // indirect
+	golang.org/x/net v0.60.0 // indirect
 	golang.org/x/sync v0.23.0 // indirect
 	golang.org/x/sys v0.48.0 // indirect
 	golang.org/x/term v0.46.0 // indirect

@@ -8,9 +8,9 @@
 
 # codefly + go = sdk-go
 
-## Endpoint resolution with core v0.13.0
+## Endpoint resolution with core v0.19.1
 
-Both SDK modules pin the core **v0.13.0** release tag (`f2423c9c`). Endpoint
+Both SDK modules pin the core **v0.19.1** release tag (`7f78302f`). Endpoint
 visibility is `private`, `internal`, or `public`; an endpoint outside the system
 declares `location: external` independently of its visibility.
 
@@ -102,8 +102,9 @@ a workspace or outside `local`, absence is refused with
 `ErrEndpointCarrierAbsent`. A carrier keyed differently from the
 selected declaration — another API, or another spelling — is not found under
 that key and reads as absent, so in `local` the native fallback runs in its
-place until the declaration-aware carrier validator (core#716) lands with the
-v0.14.0 re-pin. A present value is parsed by core; malformed or empty addresses
+place. Core has shipped the declaration-aware carrier validator
+(`resources.ValidateEndpointCarriers`, core#716) since v0.14.0; this SDK does
+not call it yet, so that gap is open here, not in core. A present value is parsed by core; malformed or empty addresses
 are refused with no instance, even when a native address could be computed.
 
 ## Work Context: mint once, sealed, one implementation

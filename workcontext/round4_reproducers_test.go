@@ -503,8 +503,8 @@ func TestAMintedCredentialThatExpiresBeforeItIsValidIsRefused(t *testing.T) {
 	require.ErrorContains(t, client.checkWindow(equal), "expires at or before it becomes valid")
 }
 
-// Core 67ee7220 moved the lifetime bound into decodeClaims, so Inspect carries
-// it — and Inspect is the path THIS CLIENT reads its own window through.
+// Core 67ee7220 moved the lifetime bound into decodeClaims, so Decode carries
+// it — and Decode is the path THIS CLIENT reads its own window through.
 //
 // That is the condition this module named twice when it declined to drop
 // MintOptions.MaxCredentialLifetime, and it is now met in the right place. Core

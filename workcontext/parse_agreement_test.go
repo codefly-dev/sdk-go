@@ -48,12 +48,12 @@ var structurallyRefused = map[string]bool{
 	// protovalidate reaches it inside core's Decode with no key and no network;
 	// deciding whether a NON-empty audience is the right one needs the route or
 	// the receiver, which a structural read cannot see. Arrived with core's
-	// non-consuming Inspect (core#723), and the comparison against core's own
+	// non-consuming Decode (core#723, then named Inspect), and the comparison against core's own
 	// fixture list is what surfaced it rather than a constant here.
 	"empty-audience": true, // ErrInvalid: an audience of no characters
 
 	// The encoding itself. Core's Verify now refuses unknown fields
-	// recursively and non-canonical encodings, and Inspect reaches the same
+	// recursively and non-canonical encodings, and Decode reaches the same
 	// answer — so a capability with a field appended and re-signed is refused
 	// here too, with no key and no network. This fixture arrived with the
 	// settled surface and the exactness assertion below is what found it,
@@ -69,11 +69,11 @@ var structurallyRefused = map[string]bool{
 // issuer, audience, WINDOW and live-state refusals — must PASS: a structural
 // check that refused them would be claiming to have verified something it
 // cannot see. Expired and not-yet-valid are in that second group, which is
-// worth stating because it surprises: Inspect checks no window at all, and the
+// worth stating because it surprises: Decode checks no window at all, and the
 // mint client's own checkWindow is what refuses a credential that arrives
 // unusable.
 //
-// The list is not derived from Inspect's behaviour, deliberately — that would
+// The list is not derived from Decode's behaviour, deliberately — that would
 // be a tautology. It is written down, and the test requires every name on it to
 // be a fixture that exists, so a fixture core renames or retires fails here
 // rather than quietly dropping out of coverage.
@@ -107,8 +107,8 @@ var structurallyRefused = map[string]bool{
 // rather than surfacing as a mismatched sentinel in somebody's gateway.
 //
 // It does not make this module's reading correct by construction — core's
-// Inspect does that, and this test is what holds the two in agreement. Core
-// built Inspect when it was asked for; this module applies no structural rule
+// Decode does that, and this test is what holds the two in agreement. Core
+// built Decode (first named Inspect) when it was asked for; this module applies no structural rule
 // of its own any more.
 func TestTheSDKParsePathsAgreeWithCore(t *testing.T) {
 	fixtures, err := corework.Fixtures(time.Now())

@@ -7,7 +7,7 @@ the capability and this module re-exports core's verifier by type alias, in
 `core.go`. Adding a dependency here is a design change — see
 `.claude/skills/dual-module-change`.
 
-Both modules pin core's **v0.13.0 release tag** (`f2423c9c`). Core owns the
+Both modules pin core's **v0.19.1 release tag** (`7f78302f`). Core owns the
 endpoint vocabulary: visibility is `private`/`internal`/`public`, and
 `location: external` describes an endpoint outside the system. The root SDK
 uses core's location predicate for local resolution; public visibility alone
@@ -338,8 +338,8 @@ It is the party the credential is minted FOR, not a receiver, so it reads the
 window through `corework.Decode` and checks no signature. Three consequences
 that are easy to get backwards:
 
-- **The lifetime bound is CORE'S**, in `decodeClaims`, so `Inspect` carries it
-  — and `Inspect` is this client's read path. Core's first two attempts bounded
+- **The lifetime bound is CORE'S**, in `decodeClaims`, so `Decode` carries it
+  — and `Decode` is this client's read path. Core's first two attempts bounded
   `Authority.Start` and then `Verify` alone, neither of which a holder can see,
   so a thirty-day capability every `Verify` refuses was reported to its holder
   as thirty days of validity. `MaxCredentialLifetime` survives as a DEPLOYMENT
