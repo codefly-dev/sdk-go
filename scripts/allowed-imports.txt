@@ -67,6 +67,7 @@ root github.com/codefly-dev/core/runnable
 root github.com/codefly-dev/core/standards
 root github.com/codefly-dev/core/wool
 root github.com/codefly-dev/sdk-go/receipts
+root github.com/codefly-dev/sdk-go/internal/enclosing
 root go/parser
 root go/token
 root google.golang.org/grpc

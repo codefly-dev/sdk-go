@@ -48,6 +48,7 @@ func composingWorkspace(t *testing.T) {
 	writeFile(t, filepath.Join(root, "modules", "starter", "services", ".keep"), "")
 	writeFile(t, filepath.Join(root, "modules", "plain", "services", ".keep"), "")
 	t.Chdir(root)
+	t.Setenv(resources.WorkspacePrefix, "")
 }
 
 func TestFixturePrincipalResolvesByRole(t *testing.T) {
@@ -130,6 +131,28 @@ func TestFixturePrincipalNamesPinnedModulesItCannotRead(t *testing.T) {
 	assert.Contains(t, err.Error(), "pinned",
 		"and must say that it is PINNED, which is the diagnosis: an unknown-fixture "+
 			"error here has meant a pinned module the SDK never read, not a wrong name")
+}
+
+// The fixtures a process seeds are its composition's. Under a workspace that is
+// not the composition the runtime names — a composed module's checkout or
+// cached tag ships its producer's — the producer's packages are not read, even
+// though they would resolve.
+func TestFixturePrincipalReadsOnlyTheInjectedComposition(t *testing.T) {
+	composingWorkspace(t)
+	t.Setenv(resources.FixturePrefix, "dev-admin")
+
+	t.Run("another composition", func(t *testing.T) {
+		t.Setenv(resources.WorkspacePrefix, "platform-core")
+		_, err := fixture.Selected().Principal(t.Context(), "super_admin")
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), `no workspace on disk is the composition "platform-core"`)
+	})
+	t.Run("this composition", func(t *testing.T) {
+		t.Setenv(resources.WorkspacePrefix, "solution")
+		principal, err := fixture.Selected().Principal(t.Context(), "super_admin")
+		require.NoError(t, err)
+		assert.Equal(t, "dev-admin", principal.ID)
+	})
 }
 
 func writeFile(t *testing.T, path string, content string) {

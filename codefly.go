@@ -13,6 +13,7 @@ import (
 	basev0 "github.com/codefly-dev/core/generated/go/codefly/base/v0"
 	"github.com/codefly-dev/core/resources"
 	"github.com/codefly-dev/core/wool"
+	"github.com/codefly-dev/sdk-go/internal/enclosing"
 )
 
 var service string
@@ -250,23 +251,22 @@ func Environment() string {
 
 // Workspace returns the Codefly workspace identity for the current process.
 // A runtime-injected identity is authoritative. Local tools that are not
-// launched as a service fall back to the enclosing workspace resource, keeping
-// product code independent from Codefly's environment-variable carriers.
+// launched as a service fall back to the name the enclosing workspace file
+// declares — read, not composed, so a workspace whose imports only the CLI can
+// resolve still names itself — keeping product code independent from Codefly's
+// environment-variable carriers.
 func Workspace(ctx context.Context) (string, error) {
-	if name := strings.TrimSpace(os.Getenv(resources.WorkspacePrefix)); name != "" {
-		return name, nil
-	}
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	workspace, err := resources.FindWorkspaceUp(ctx)
+	name, err := enclosing.Name(ctx)
 	if err != nil {
 		return "", fmt.Errorf("resolve Codefly workspace: %w", err)
 	}
-	if workspace == nil || strings.TrimSpace(workspace.Name) == "" {
+	if name == "" {
 		return "", fmt.Errorf("resolve Codefly workspace: no enclosing workspace")
 	}
-	return workspace.Name, nil
+	return name, nil
 }
 
 // IsLocal reports whether the current Codefly environment is local.
