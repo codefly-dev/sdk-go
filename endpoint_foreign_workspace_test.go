@@ -16,64 +16,138 @@ import (
 // `saas-starter` in `saas-starter-dev`. A process run from that repository —
 // its checkout, or a released tag resolved into the module cache, which ships
 // the same workspace file — finds the producer's workspace above it. That
-// workspace does not carry the module the composition queries, so it is not
-// the process's composition and the process is answered from the carriers the
-// composition's CLI injected, exactly as a process with no workspace is.
+// workspace is not the process's composition: the runtime names the
+// composition (CODEFLY__WORKSPACE), and the producer's workspace declares
+// another name. The process is answered from the carriers the composition's
+// CLI injected, exactly as a process with no workspace is.
 
-// producerWorkspace is the workspace module-saas-starter ships, scaled down: it
-// declares the module under the repository's own name, never the composition's.
-const producerWorkspace = "name: platform-starter-dev\nlayout: modules\nmodules:\n  - name: platform-starter\n"
+// composition is the name the runtime injects, as platform-core's run does.
+const composition = "platform-core"
 
-// foreignWorkspaceLayouts are the two places a composed module's process runs
-// from with the producer's workspace above it. Each returns the directory the
-// process runs in.
-var foreignWorkspaceLayouts = []struct {
-	name   string
+type foreignLayout struct {
+	name string
+	// layout writes the producer's tree and returns the directory the process
+	// runs in.
 	layout func(t *testing.T) string
-}{
-	{"module checkout", func(t *testing.T) string {
-		checkout := t.TempDir()
-		writeProducerModule(t, checkout)
-		return filepath.Join(checkout, "module", "services", carriedEndpoint.Service, "code")
-	}},
-	{"module cache tag", func(t *testing.T) string {
-		tag := filepath.Join(t.TempDir(), "codefly-dev", "module-platform-starter", "v0.0.94")
-		writeProducerModule(t, tag)
-		return filepath.Join(tag, "module", "services", carriedEndpoint.Service, "code")
-	}},
+	// premise holds what makes the layout a case worth testing: what trusting
+	// the found workspace would do.
+	premise func(t *testing.T)
+	// identified lists the injected compositions the layout is answered from
+	// carriers under. A layout listed only with an injected name is one that,
+	// with nothing injected, is the only workspace there is (see
+	// TestAProcessNoCompositionStartedUsesTheWorkspaceAsFound).
+	identified []string
 }
 
-func writeProducerModule(t *testing.T, root string) {
+// premiseRefusesTheModule: the producer's workspace does not carry the
+// composition's module name, so trusting it refuses every query (#66).
+func premiseRefusesTheModule(t *testing.T) {
 	t.Helper()
-	writeFile(t, filepath.Join(root, "workspace.codefly.yaml"), producerWorkspace)
-	writeFile(t, filepath.Join(root, "module", "module.codefly.yaml"),
-		"kind: module\nname: platform-starter\nservices:\n  - name: "+carriedEndpoint.Service+"\n")
-	writeFile(t, filepath.Join(root, "module", "services", carriedEndpoint.Service, "service.codefly.yaml"),
-		"kind: service\nname: "+carriedEndpoint.Service+"\nversion: 0.0.0\nendpoints:\n  - name: rest\n    api: rest\n    visibility: public\n")
-	writeFile(t, filepath.Join(root, "module", "services", carriedEndpoint.Service, "code", "main.go"), "package main\n")
-}
-
-// prepareProcessUnderAForeignWorkspace boots the process as a workspace-free
-// one, then moves it under the producer's workspace, and holds the premise: the
-// workspace is found, and it would refuse the query by module name.
-func prepareProcessUnderAForeignWorkspace(t *testing.T, environment string, layout func(*testing.T) string) {
-	t.Helper()
-	prepareProcessWithoutWorkspace(t, environment)
-	t.Chdir(layout(t))
-	workspace, err := resources.FindWorkspaceUp(context.Background())
-	require.NoError(t, err)
-	require.NotNil(t, workspace, "the test needs the producer's workspace above the process")
-	_, err = workspace.LoadModuleFromName(context.Background(), carriedEndpoint.Module)
+	workspace := foundWorkspace(t)
+	_, err := workspace.LoadModuleFromName(context.Background(), carriedEndpoint.Module)
 	require.ErrorContains(t, err, "cannot find module", "the producer's workspace must not carry the composition's module name")
 }
 
+// premiseCarriesTheModule: the producer's workspace names the module exactly as
+// the composition does (robin, annotations, documents, model and runtime in
+// platform-core), so trusting it selects against the producer's declarations
+// and computes a native address from the producer's workspace name.
+func premiseCarriesTheModule(t *testing.T) {
+	t.Helper()
+	workspace := foundWorkspace(t)
+	_, carried := workspace.Member(carriedEndpoint.Module)
+	require.True(t, carried, "the producer's workspace must carry the composition's module name")
+	require.NotEqual(t, composition, workspace.Name)
+}
+
+// premiseCannotLoad: a solution's tag imports its platform by release, which
+// only the CLI can resolve, so loading the workspace fails before any carrier
+// is read.
+func premiseCannotLoad(t *testing.T) {
+	t.Helper()
+	_, err := resources.FindWorkspaceUp(context.Background())
+	require.ErrorContains(t, err, "requires host resolution")
+}
+
+func foundWorkspace(t *testing.T) *resources.Workspace {
+	t.Helper()
+	workspace, err := resources.FindWorkspaceUp(context.Background())
+	require.NoError(t, err)
+	require.NotNil(t, workspace, "the test needs the producer's workspace above the process")
+	return workspace
+}
+
+var foreignLayouts = []foreignLayout{
+	{"module checkout", func(t *testing.T) string {
+		return writeRenamedProducer(t, t.TempDir())
+	}, premiseRefusesTheModule, []string{composition, ""}},
+	{"module cache tag", func(t *testing.T) string {
+		return writeRenamedProducer(t, filepath.Join(t.TempDir(), "codefly-dev", "module-platform-starter", "v0.0.94"))
+	}, premiseRefusesTheModule, []string{composition, ""}},
+	{"same-name producer tag", func(t *testing.T) string {
+		root := filepath.Join(t.TempDir(), "obin-ai", "module-platform", "v0.1.22")
+		writeFile(t, filepath.Join(root, "workspace.codefly.yaml"),
+			"name: platform-dev\nlayout: modules\nmodules:\n  - name: "+carriedEndpoint.Module+"\n")
+		return writeProducerModule(t, filepath.Join(root, "modules", carriedEndpoint.Module), carriedEndpoint.Module)
+	}, premiseCarriesTheModule, []string{composition}},
+	{"solution tag importing its platform by release", func(t *testing.T) string {
+		root := filepath.Join(t.TempDir(), "obin-ai", "core-solutions", "v0.0.17", "solutions", "proposals")
+		writeFile(t, filepath.Join(root, "workspace.codefly.yaml"),
+			"name: proposals\nlayout: modules\nworkspaces:\n  - name: platform-core\n    source: obin-ai/platform-core\n    version: \"0.0.3\"\nmodules:\n  - name: proposals\n    path: .\n")
+		return writeProducerModule(t, root, "proposals")
+	}, premiseCannotLoad, []string{"platform-obin"}},
+}
+
+// writeRenamedProducer lays out the workspace module-saas-starter ships, scaled
+// down: it declares the module under the repository's own name, never the
+// composition's.
+func writeRenamedProducer(t *testing.T, root string) string {
+	t.Helper()
+	writeFile(t, filepath.Join(root, "workspace.codefly.yaml"),
+		"name: platform-starter-dev\nlayout: modules\nmodules:\n  - name: platform-starter\n    path: module\n")
+	return writeProducerModule(t, filepath.Join(root, "module"), "platform-starter")
+}
+
+// writeProducerModule writes a module declaring the carried service with a
+// public rest endpoint, and returns the service's code directory.
+func writeProducerModule(t *testing.T, dir, name string) string {
+	t.Helper()
+	writeFile(t, filepath.Join(dir, "module.codefly.yaml"),
+		"kind: module\nname: "+name+"\nservices:\n  - name: "+carriedEndpoint.Service+"\n")
+	service := filepath.Join(dir, "services", carriedEndpoint.Service)
+	writeFile(t, filepath.Join(service, "service.codefly.yaml"),
+		"kind: service\nname: "+carriedEndpoint.Service+"\nversion: 0.0.0\nendpoints:\n  - name: rest\n    api: rest\n    visibility: public\n    exposure: public\n")
+	writeFile(t, filepath.Join(service, "configurations", "local", "api.env"), "URL=the-producers-own-value\n")
+	writeFile(t, filepath.Join(service, "code", "main.go"), "package main\n")
+	return filepath.Join(service, "code")
+}
+
+// prepareProcessUnderAForeignWorkspace boots the process as a workspace-free
+// one in the composition the runtime names, then moves it under the producer's
+// workspace, and holds the layout's premise.
+func prepareProcessUnderAForeignWorkspace(t *testing.T, environment, injected string, layout foreignLayout) {
+	t.Helper()
+	prepareProcessWithoutWorkspace(t, environment)
+	t.Setenv(resources.WorkspacePrefix, injected)
+	t.Chdir(layout.layout(t))
+	layout.premise(t)
+}
+
+func forEachForeignLayout(t *testing.T, run func(t *testing.T, injected string, layout foreignLayout)) {
+	for _, layout := range foreignLayouts {
+		for _, injected := range layout.identified {
+			t.Run(layout.name+"/composition="+injected, func(t *testing.T) { run(t, injected, layout) })
+		}
+	}
+}
+
 func TestAComposedModuleUnderItsOwnWorkspaceResolvesItsCarrier(t *testing.T) {
-	for _, layout := range foreignWorkspaceLayouts {
+	forEachForeignLayout(t, func(t *testing.T, injected string, layout foreignLayout) {
 		for _, environment := range []string{"local", "", "production"} {
 			for _, source := range []string{"runtime", "embedded"} {
 				for _, form := range referenceForms {
-					t.Run(layout.name+"/environment="+environment+"/source="+source+"/"+form.name, func(t *testing.T) {
-						prepareProcessUnderAForeignWorkspace(t, environment, layout.layout)
+					t.Run("environment="+environment+"/source="+source+"/"+form.name, func(t *testing.T) {
+						prepareProcessUnderAForeignWorkspace(t, environment, injected, layout)
 						access := carrierFor("rest", "rest", "http://localhost:24601")
 						injectEndpointForTest(t, source, access)
 						query := form.query(queryCarriedService())
@@ -86,18 +160,19 @@ func TestAComposedModuleUnderItsOwnWorkspaceResolvesItsCarrier(t *testing.T) {
 				}
 			}
 		}
-	}
+	})
 }
 
 // Neither the composition's workspace nor a carrier: the typed refusal, never
-// the producer workspace's declarations and never a native address computed
-// from it — even in local, where a carrying workspace would fall back.
+// the producer workspace's declarations, its load failure, or a native address
+// computed from its name — even in local, where the composition's own
+// workspace would fall back.
 func TestAComposedModuleUnderItsOwnWorkspaceRefusesAnAbsentCarrier(t *testing.T) {
-	for _, layout := range foreignWorkspaceLayouts {
+	forEachForeignLayout(t, func(t *testing.T, injected string, layout foreignLayout) {
 		for _, environment := range []string{"local", "", "production"} {
 			for _, form := range referenceForms {
-				t.Run(layout.name+"/environment="+environment+"/"+form.name, func(t *testing.T) {
-					prepareProcessUnderAForeignWorkspace(t, environment, layout.layout)
+				t.Run("environment="+environment+"/"+form.name, func(t *testing.T) {
+					prepareProcessUnderAForeignWorkspace(t, environment, injected, layout)
 					query := form.query(queryCarriedService())
 					instance, err := query.ResolveNetworkInstance()
 					require.ErrorIs(t, err, codefly.ErrEndpointCarrierAbsent)
@@ -107,20 +182,49 @@ func TestAComposedModuleUnderItsOwnWorkspaceRefusesAnAbsentCarrier(t *testing.T)
 				})
 			}
 		}
-	}
+	})
 }
 
-// A malformed carrier is refused as one, not hidden behind the producer
-// workspace's "cannot find module".
+// A malformed carrier is refused as one, not hidden behind anything the
+// producer's workspace would have said.
 func TestAComposedModuleUnderItsOwnWorkspaceRefusesAMalformedCarrier(t *testing.T) {
-	for _, layout := range foreignWorkspaceLayouts {
-		t.Run(layout.name, func(t *testing.T) {
-			prepareProcessUnderAForeignWorkspace(t, "local", layout.layout)
-			injectEndpointForTest(t, "runtime", carrierFor("rest", "rest", "localhost:not-a-port"))
-			instance, err := queryCarriedService().Endpoint("rest").API("rest").ResolveNetworkInstance()
-			require.ErrorContains(t, err, "malformed address")
-			require.NotErrorIs(t, err, codefly.ErrEndpointCarrierAbsent)
-			require.Nil(t, instance)
-		})
-	}
+	forEachForeignLayout(t, func(t *testing.T, injected string, layout foreignLayout) {
+		prepareProcessUnderAForeignWorkspace(t, "local", injected, layout)
+		injectEndpointForTest(t, "runtime", carrierFor("rest", "rest", "localhost:not-a-port"))
+		instance, err := queryCarriedService().Endpoint("rest").API("rest").ResolveNetworkInstance()
+		require.ErrorContains(t, err, "malformed address")
+		require.NotErrorIs(t, err, codefly.ErrEndpointCarrierAbsent)
+		require.Nil(t, instance)
+	})
+}
+
+// The producer's local configuration files are the producer's: a composed
+// module's process never reads them, even when the producer names the module
+// as the composition does.
+func TestAComposedModuleUnderItsOwnWorkspaceReadsNoProducerConfiguration(t *testing.T) {
+	forEachForeignLayout(t, func(t *testing.T, injected string, layout foreignLayout) {
+		prepareProcessUnderAForeignWorkspace(t, "local", injected, layout)
+		value, err := queryCarriedService().Configuration("api", "url")
+		require.Error(t, err)
+		require.NotContains(t, err.Error(), "cannot find module", "absence, not the producer's module list")
+		require.NotContains(t, err.Error(), "requires host resolution", "absence, not the producer's load failure")
+		require.Empty(t, value)
+	})
+}
+
+// With nothing injected, no composition started the process, and the workspace
+// above it is the only one there is: a local tool under a same-name producer
+// reads that producer's declarations, as it did before composition identity
+// was consulted. This is the boundary F1's rule draws, held so a change to it
+// is a decision rather than a drift.
+func TestAProcessNoCompositionStartedUsesTheWorkspaceAsFound(t *testing.T) {
+	layout := foreignLayouts[2]
+	require.Equal(t, "same-name producer tag", layout.name)
+	prepareProcessUnderAForeignWorkspace(t, "local", "", layout)
+	instance, err := queryCarriedService().Endpoint("rest").API("rest").ResolveNetworkInstance()
+	require.NoError(t, err, "selection and the native map answer from the workspace found")
+	require.NotNil(t, instance)
+	value, err := queryCarriedService().Configuration("api", "url")
+	require.NoError(t, err)
+	require.Equal(t, "the-producers-own-value", value)
 }

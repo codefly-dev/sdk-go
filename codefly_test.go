@@ -248,7 +248,10 @@ endpoints:
 		Service("records").
 		Endpoint("rest").
 		ResolveNetworkInstance()
-	assert.NoError(t, err)
+	// require, not assert: a nil instance must fail this test, not panic and
+	// abort the package run with every other failure unreported.
+	require.NoError(t, err)
+	require.NotNil(t, instance)
 	expected := network.NativeFor(
 		ctx,
 		"sdk-endpoint-test",
@@ -267,7 +270,8 @@ endpoints:
 		Endpoint("rest").
 		NamingScope("agent-test").
 		ResolveNetworkInstance()
-	assert.NoError(t, err)
+	require.NoError(t, err)
+	require.NotNil(t, scoped)
 	assert.NotEqual(t, instance.Port, scoped.Port)
 }
 
@@ -330,6 +334,25 @@ func TestWorkspaceFallsBackToEnclosingResource(t *testing.T) {
 
 	assert.NoError(t, err)
 	assert.Equal(t, "local-workspace", name)
+}
+
+// A workspace that imports its platform by release can only be composed by the
+// CLI. Its name is still its name: the fallback reads the file, it does not
+// compose it, so a local tool under a solution's tag is not refused for an
+// import it never needed.
+func TestWorkspaceNamesAWorkspaceOnlyTheCLICanCompose(t *testing.T) {
+	root := t.TempDir()
+	writeFile(t, filepath.Join(root, "workspace.codefly.yaml"),
+		"name: proposals\nlayout: modules\nworkspaces:\n  - name: platform-core\n    source: obin-ai/platform-core\n    version: \"0.0.3\"\nmodules:\n  - name: proposals\n    path: .\n")
+	t.Chdir(root)
+	t.Setenv(resources.WorkspacePrefix, "")
+	_, err := resources.FindWorkspaceUp(t.Context())
+	require.ErrorContains(t, err, "requires host resolution", "the premise: composing it fails here")
+
+	name, err := codefly.Workspace(t.Context())
+
+	require.NoError(t, err)
+	assert.Equal(t, "proposals", name)
 }
 
 func TestEnvironmentReloadDropsRemovedValues(t *testing.T) {

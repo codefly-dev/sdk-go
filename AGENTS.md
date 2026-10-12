@@ -85,7 +85,7 @@ The `dual-module-change` skill has the table and the command.
 | `authority.go` | authority-bearing values, read once at boot; a drift is refused, never reloaded |
 | `runtime_value.go` | `RuntimeValue`, for values the runtime injects directly |
 | `runtime_environment_file.go` | loading a runtime-written env file |
-| `fixture.go` | the selected fixture, and resolving its principals by role |
+| `fixture/` | the selected fixture, and resolving its principals by role |
 | `tls.go` | workload leaf certificates, reloaded on rotation |
 | `receipts/` | effect receipts: the store, the digest, the replay/conflict interceptor |
 | `receipts/grpctransport/`, `receipts/connecttransport/` | the two transport adapters, split so neither drags the other's dependency in |
@@ -114,10 +114,10 @@ see the skill below.
   eligibility at render and the mesh enforces it. With a workspace, selection
   comes first in every environment. No flag decides the path; the workspace's
   presence does. Native fallback requires a workspace and a `local` or unset
-  environment. A workspace counts only if it carries the queried module (core's
-  `Workspace.Member`): a module's own checkout and its cached release tag ship
-  the producer's workspace under the producer's name, so that process is
-  answered from its carriers too (#66).
+  environment. A workspace that is not this process's composition counts as none
+  (`internal/enclosing`, #66): with `CODEFLY__WORKSPACE` injected only that name
+  counts, and another is never even loaded; it must also carry the queried
+  module. With nothing injected, the workspace found is used as found.
 - **`CODEFLY__` is spelled in this repo, nowhere else.** A consumer needing a
   value gets a typed accessor here; the prefix constant lives in
   `runtime_value.go` for that reason.

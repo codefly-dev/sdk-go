@@ -19,6 +19,7 @@ import (
 
 	"github.com/codefly-dev/core/composition"
 	"github.com/codefly-dev/core/resources"
+	"github.com/codefly-dev/sdk-go/internal/enclosing"
 )
 
 // Selection is the fixture the Codefly runtime selected for this
@@ -66,11 +67,17 @@ func composedPackages(ctx context.Context) ([]*composition.PackageManifest, []st
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	workspace, err := resources.FindWorkspaceUp(ctx)
+	// Only the process's own composition says which packages it composes. A
+	// producer's workspace above a composed module's checkout or cached tag
+	// would resolve the producer's fixtures, not the composition's.
+	workspace, err := enclosing.Composition(ctx)
 	if err != nil {
 		return nil, nil, fmt.Errorf("resolve Codefly workspace: %w", err)
 	}
 	if workspace == nil {
+		if injected := enclosing.Injected(); injected != "" {
+			return nil, nil, fmt.Errorf("resolve Codefly workspace: no workspace on disk is the composition %q this process runs in", injected)
+		}
 		return nil, nil, errors.New("resolve Codefly workspace: no enclosing workspace")
 	}
 	resolutions, err := workspace.ResolveModules(ctx)

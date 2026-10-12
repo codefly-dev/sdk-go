@@ -13,6 +13,7 @@ import (
 	"github.com/codefly-dev/core/resources"
 	"github.com/codefly-dev/core/standards"
 	"github.com/codefly-dev/core/wool"
+	"github.com/codefly-dev/sdk-go/internal/enclosing"
 )
 
 type Query struct {
@@ -115,13 +116,15 @@ var ErrEndpointCarrierAbsent = errors.New("codefly: no carrier for the endpoint 
 // path: the presence of a workspace decides. Native fallback requires a
 // workspace and a local or unset environment.
 //
-// The workspace found above the process is only the process's composition if
-// it carries the queried module. One that does not — a module run from its own
-// checkout inside a larger composition, or a released tag resolved into the
-// module cache, both of which carry the producer's own workspace under the
-// producer's own module name — is answered exactly as a process with no
-// workspace is: from the carriers, never from that workspace's declarations or
-// native map.
+// The workspace found above the process is only consulted if it is the
+// process's composition (internal/enclosing): its declared name is the one the
+// runtime injected, and it carries the queried module. A module run from its
+// own checkout, a released tag in the module cache and a solution's tag all
+// ship the producer's workspace, under a name that is not the composition's;
+// that workspace is never loaded, and the process is answered exactly as one
+// with no workspace is — from the carriers, never from that workspace's
+// declarations or native map. With no injected composition, the enclosing
+// workspace is the only one there is and is used as found.
 func (q *Query) ResolveNetworkInstance() (*resources.NetworkInstance, error) {
 	if err := checkConsumerIdentity(q.consumerModule); err != nil {
 		return nil, err
@@ -130,12 +133,15 @@ func (q *Query) ResolveNetworkInstance() (*resources.NetworkInstance, error) {
 	if strings.TrimSpace(q.module) == "" || strings.TrimSpace(q.service) == "" {
 		return nil, errors.New("module and service are required for endpoint selection")
 	}
-	workspace, err := resources.FindWorkspaceUp(q.ctx)
+	workspace, err := enclosing.Composition(q.ctx)
 	if err != nil {
 		return nil, err
 	}
-	if workspace == nil || !carries(workspace, q.module) {
+	if workspace == nil {
 		return q.resolveFromAuthoritativeCarrier()
+	}
+	if !carries(workspace, q.module) {
+		return q.resolveUncomposedFromCarrier(workspace)
 	}
 	// The declaration decides eligibility before any carrier can supply an
 	// address. An explicit API is a qualifier core must judge, not a bypass.
@@ -163,14 +169,27 @@ func (q *Query) ResolveNetworkInstance() (*resources.NetworkInstance, error) {
 	return local, nil
 }
 
-// carries reports whether workspace is the composition the queried module runs
-// in, by core's own membership rule — the one LoadModuleFromName resolves
-// through. A module's checkout and its cached release tag both ship the
-// producer's workspace, which knows the module by the producer's name, not by
-// the name the composition gave it; selecting against it refuses every query.
+// carries reports whether the composition carries the queried module, by core's
+// own membership rule — the one LoadModuleFromName resolves through, which sees
+// modules composed through `workspaces:` and `solutions:` and aliases.
 func carries(workspace *resources.Workspace, module string) bool {
 	_, carried := workspace.Member(module)
 	return carried
+}
+
+// resolveUncomposedFromCarrier answers a query for a module the workspace on
+// disk does not carry. With nothing injected to compare its name against, that
+// workspace may be a producer's own, so its declarations are not judged and
+// the carrier answers. An absent carrier keeps what the workspace did say —
+// which modules it carries — because a mistyped module name at a composition
+// root lands here too.
+func (q *Query) resolveUncomposedFromCarrier(workspace *resources.Workspace) (*resources.NetworkInstance, error) {
+	instance, err := q.resolveFromAuthoritativeCarrier()
+	if errors.Is(err, ErrEndpointCarrierAbsent) {
+		return nil, fmt.Errorf("%w; workspace <%s> does not compose module <%s>, present: %v",
+			err, workspace.Name, q.module, workspace.ModulesNames())
+	}
+	return instance, err
 }
 
 // resolveFromAuthoritativeCarrier answers a workspace-free process from its carriers
@@ -492,16 +511,24 @@ func (q *Query) localConfigurationValue(infoName string, key string, secret bool
 	if q.service == "" {
 		return "", w.NewError("service is not set")
 	}
-	workspace, workspaceErr := resources.FindWorkspaceUp(q.ctx)
+	// Only the process's own composition holds its local configuration files: a
+	// producer's workspace above a composed module's checkout or cached tag
+	// holds the producer's, under a module name that may even match.
+	workspace, workspaceErr := enclosing.Composition(q.ctx)
 	if workspaceErr != nil {
 		return "", workspaceErr
 	}
 	if workspace == nil {
-		return "", w.NewError("workspace not found")
+		return "", w.NewError("no %s value for %s/%s in service %s: no workspace on disk is this process's composition",
+			localValueKind(secret), infoName, key, q.service)
 	}
 
 	var svc *resources.Service
 	if q.module != "" {
+		if !carries(workspace, q.module) {
+			return "", w.NewError("no %s value for %s/%s in service %s: workspace <%s> does not compose module <%s>, present: %v",
+				localValueKind(secret), infoName, key, q.service, workspace.Name, q.module, workspace.ModulesNames())
+		}
 		mod, moduleErr := workspace.LoadModuleFromName(q.ctx, q.module)
 		if moduleErr != nil {
 			return "", moduleErr
@@ -534,12 +561,15 @@ func (q *Query) localConfigurationValue(infoName string, key string, secret bool
 			}
 		}
 	}
-	kind := "configuration"
-	if secret {
-		kind = "secret"
-	}
 	return "", w.NewError("no %s value for %s/%s in service %s (env=%s)",
-		kind, infoName, key, q.service, envName)
+		localValueKind(secret), infoName, key, q.service, envName)
+}
+
+func localValueKind(secret bool) string {
+	if secret {
+		return "secret"
+	}
+	return "configuration"
 }
 
 func localConfigurationEnvironmentName() string {

@@ -42,16 +42,34 @@ the path; native fallback requires a workspace and a `local` or unset environmen
 A reference to an endpoint not named after its API must qualify the
 API with `.API(...)` there, since no declaration is on disk to supply it.
 
-A workspace found above the process is the process's composition only if it
-carries the queried module, by core's `Workspace.Member`. A composed module run
-from its own checkout, or a released tag resolved into `CODEFLY_MODULE_CACHE`,
-finds the producer's own `workspace.codefly.yaml`, which declares the module
-under the producer's name (`saas-starter` in `saas-starter-dev`) rather than the
-name the composition gave it (`saas`). That workspace is not consulted: the
-process resolves from its injected carriers exactly as a workspace-free process
-does, and refuses an absent one with `ErrEndpointCarrierAbsent`. It never
-selects against the producer's declarations or computes a native address from
-them.
+A workspace found above the process counts only if it is the process's
+composition. The runtime names the composition: every service `codefly run`
+starts carries it as the injected workspace identity. A composed module run from
+its own checkout, a released tag resolved into `CODEFLY_MODULE_CACHE`, or a
+solution's tag finds its producer's own `workspace.codefly.yaml` first. That file
+declares another name (`saas-starter-dev`, not `platform-core`), so it is treated
+as no workspace at all. It is never loaded, which matters for a solution's tag
+whose workspace imports its platform by release and cannot be composed outside
+the CLI. Even when the producer names the module exactly as the composition does
+(`robin` in its own repository and in `platform-core`), the process resolves
+from its injected carriers, refuses an absent one with
+`ErrEndpointCarrierAbsent`, and never selects against the producer's
+declarations or computes a native address from its name. A workspace that does
+match must also carry the queried module, by core's `Workspace.Member`: modules
+it composes through `workspaces:` or `solutions:` count, and the native address
+is computed under the composition's name. A module it does not carry is
+answered from the carriers, and an absent carrier's refusal names the modules
+the workspace does carry.
+
+With no injected identity, no composition started the process (a local tool, a
+test, `go run`), and the workspace found is the only one there is: it is used
+as found.
+
+The same rule decides every other read that falls back to the workspace on
+disk: the local configuration and secret files behind `Configuration` and
+`Secret`, the packages `fixture.Selected().Principal` resolves, and the name
+`codefly.Workspace` reports when no identity is injected. That name is read from
+the file, without composing it.
 
 Call `codefly.Init(ctx)` at boot to pin the calling module from the runtime
 identity. `Init` refuses a process whose runtime identity carrier is unset or

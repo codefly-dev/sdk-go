@@ -34,6 +34,9 @@ func initEndpointConsumer(t *testing.T, identity string) {
 	codefly.IsolateConsumerIdentityForTest(t)
 	t.Cleanup(func() { require.NoError(t, codefly.LoadEnvironmentVariables()) })
 	t.Setenv(resources.ModulePrefix, identity)
+	// No composition is injected unless a test injects one: an ambient value
+	// from a shell codefly started would decide which workspace counts.
+	t.Setenv(resources.WorkspacePrefix, "")
 	if strings.TrimSpace(identity) != "" {
 		_, err := codefly.Init(context.Background())
 		require.NoError(t, err)
