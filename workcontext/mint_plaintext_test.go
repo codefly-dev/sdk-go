@@ -190,3 +190,28 @@ func TestEveryPlaintextMintPresentsTheProjectionReadForIt(t *testing.T) {
 		require.True(t, arrival.close, "no connection is reused across mints")
 	}
 }
+
+// AdmitEndpoint is exported for the URLs a consumer dials that are neither the
+// key set nor the mint endpoint, so its boot refusal is this rule and not a copy.
+// The label names the URL and never the value; the URL comes back only admitted.
+func TestAdmitEndpointIsTheExportedRuleForAConsumersOwnURL(t *testing.T) {
+	admitted, err := AdmitEndpoint("http://gateway.platform.svc:8081/", meshed, "gateway")
+	require.NoError(t, err)
+	require.Equal(t, "http", admitted.Scheme)
+	require.Equal(t, "gateway.platform.svc:8081", admitted.Host)
+
+	local, err := AdmitEndpoint(" http://127.0.0.1:8081 ", localRun, "")
+	require.NoError(t, err)
+	require.Equal(t, "http://127.0.0.1:8081", local.String(), "trimmed and canonical")
+
+	const marker = "zzmarkerzz"
+	refused, err := AdmitEndpoint("http://"+marker+".example/", meshed, "gateway")
+	require.Nil(t, refused, "nothing comes back refused")
+	require.ErrorIs(t, err, ErrInvalid)
+	require.ErrorContains(t, err, "the gateway URL")
+	require.ErrorContains(t, err, "not an in-cluster Service address")
+	require.NotContains(t, err.Error(), marker)
+
+	_, err = AdmitEndpoint("http://127.0.0.1:8081/", unasserted, "")
+	require.ErrorContains(t, err, "the endpoint URL", "an empty label still names the URL")
+}

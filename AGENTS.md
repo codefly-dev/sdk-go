@@ -156,11 +156,11 @@ see the skill below.
   constructor and `PinnedVerifier` the only type here that verifies. The
   endpoint, the fetch and the verifier are one operation — `KeySet` has one
   constructor and `NewVerifier` takes nothing else — so an admitted location and
-  the keys in use are one fact. One transport rule admits the key-set URL and
-  the mint URL (`MintOptions.Transport`; nil keeps https only): plaintext reaches
-  an in-cluster Service address only under `internal-transport/mesh-protected`,
-  compared literally, loopback only on a local run; a failed read is a refusal,
-  not absence; no refusal echoes a value. `scripts/security-posture.sh` re-audits.
+  the keys in use are one fact. `AdmitEndpoint` is the one transport rule, for the
+  key-set URL, the mint URL (`MintOptions.Transport`; nil keeps https only) and a
+  consumer's own: plaintext reaches an in-cluster Service address only under
+  `internal-transport/mesh-protected`, compared literally, loopback only locally; a
+  failed read refuses, not absence; no refusal echoes a value. `scripts/security-posture.sh` re-audits.
 - **A receipt is written inside the transaction that commits its effect.** A
   receipt written after the commit leaves a window where the effect exists and
   the receipt does not, and a recovery landing there reads "no receipt" for an

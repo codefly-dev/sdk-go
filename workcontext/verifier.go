@@ -219,23 +219,30 @@ func (e KeySetEndpoint) String() string { return e.url }
 //
 // A verifier's key set decides which signatures it accepts, so the hop it
 // arrives over is part of the verifier's configuration rather than a detail of
-// how it was fetched. The decision is admitEndpoint's, which is the one copy of
+// how it was fetched. The decision is AdmitEndpoint's, which is the one copy of
 // the transport rule in this module; a consumer that writes its own is a second
 // copy of a rule whose whole value is that there is one.
 func ResolveKeySetEndpoint(raw string, source TransportSource) (KeySetEndpoint, error) {
-	parsed, err := admitEndpoint(raw, source, "key set")
+	parsed, err := AdmitEndpoint(raw, source, "key set")
 	if err != nil {
 		return KeySetEndpoint{}, err
 	}
 	return KeySetEndpoint{url: parsed.String()}, nil
 }
 
-// admitEndpoint is THE transport rule, and every URL this module dials goes
+// AdmitEndpoint is THE transport rule, and every URL this module dials goes
 // through it: ResolveKeySetEndpoint for a verifier's key set and the mint
 // client's validateMintURL for the endpoint the projected token is presented
-// to. `what` names which, so a refusal says what it refused without a second
-// copy of the rule to say it. The rule is the one the host and the composed
-// modules apply to platform/gateway-endpoint; it is not a variant of it.
+// to. It is exported for the URLs a consumer dials that are neither — a
+// runtime calling the gateway on the origin it mints against, for one — so a
+// consumer's boot-time refusal of a plaintext address is this rule and not a
+// copy of it. The rule is the one the host and the composed modules apply to
+// platform/gateway-endpoint; it is not a variant of it.
+//
+// `what` names the URL in a refusal ("gateway", "key set") so the refusal says
+// what it refused; it is a label and never the value, and an empty one reads
+// "endpoint". The returned URL is the admitted address, parsed and canonical,
+// and is returned only on admission.
 //
 // What is admitted:
 //
@@ -258,7 +265,10 @@ func ResolveKeySetEndpoint(raw string, source TransportSource) (KeySetEndpoint, 
 // configuration error reaches boot-time logging, and a URL is a place a
 // credential or a token gets written by mistake; every refusal names the setting
 // and the remedy instead.
-func admitEndpoint(raw string, source TransportSource, what string) (*url.URL, error) {
+func AdmitEndpoint(raw string, source TransportSource, what string) (*url.URL, error) {
+	if what == "" {
+		what = "endpoint"
+	}
 	protected, err := MeshProtected(source)
 	if err != nil {
 		return nil, err

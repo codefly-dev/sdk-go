@@ -651,11 +651,19 @@ group, key and remedy sentence the host and the composed modules apply to their
 own in-cluster hops — reimplemented rather than imported, because a module never
 imports another module's internals, so the shared thing is the contract.
 **This is the SDK's one copy, which is what lets a consumer route every plaintext
-hop it has through one check.** Inside this module it is one function with two
-call sites: `ResolveKeySetEndpoint` admits a verifier's key-set URL through it,
-and `NewMintClient` admits `MintOptions.URL` through it, with
-`MintOptions.Transport` as the `TransportSource`. A test drives every branch of
-the rule through both and requires the same answer in the same words.
+hop it has through one check.** It is one exported function, `AdmitEndpoint`,
+with two call sites in this module: `ResolveKeySetEndpoint` admits a verifier's
+key-set URL through it, and `NewMintClient` admits `MintOptions.URL` through it,
+with `MintOptions.Transport` as the `TransportSource`. A test drives every branch
+of the rule through both and requires the same answer in the same words. A
+consumer with a URL that is neither — a runtime calling the gateway on the origin
+it mints against — admits it with the same call:
+
+```go
+// The label names the URL in a refusal and is never the value; the URL is
+// returned only on admission, parsed and canonical.
+gateway, err := workcontext.AdmitEndpoint(gatewayURL, codefly.For(ctx), "gateway")
+```
 
 | Address | Admitted |
 | --- | --- |
