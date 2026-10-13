@@ -99,7 +99,10 @@ see the skill below.
 
 ## Rules that bite
 
-- **Core is pinned to the v0.19.1 tag in both modules.** Endpoint visibility is
+- **Each module's go.mod owns its Core pin.** The root currently uses the
+  candidate live endpoint contract at `886d218d`; the Work Context module
+  remains on v0.19.1. Candidate source checks are not released-pin
+  qualification. Endpoint visibility is
   exactly `private`/`internal`/`public`; `external` is a location. Local fallback
   uses core's `Endpoint.External()` predicate and still resolves public
   endpoints without an external location. Do not recreate removed visibility names.

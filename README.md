@@ -161,3 +161,19 @@ and retention requirements.
 Core validates each marked operation when the receipts interceptor is built.
 Operation declarations must specify a completion mode; synchronous operations
 declare `COMPLETION_CALL`. An omitted mode is refused, not defaulted.
+
+
+### Live host route delivery
+
+A host resolving a declared component uses
+`For(ctx).Module(...).Service(...).Endpoint(...).API(...).ResolveDeliveredNetworkInstance(applied)`.
+Pass the presence document the host has applied, not a desired declaration.
+Core validates the CLI's replaceable endpoint projection against that whole
+canonical document; the SDK reads the current file on every resolution. New
+components and relocated endpoints can therefore be discovered without reloading
+the host environment. The CLI supplies the stable directory.
+
+Missing, malformed, withdrawn or mismatched delivery returns
+`ErrEndpointDeliveryUnavailable`. This API never falls back to a startup carrier
+or a locally computed port, including during an upgrade. Existing ordinary
+`ResolveNetworkInstance` queries keep their existing composition semantics.
