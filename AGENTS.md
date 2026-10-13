@@ -86,7 +86,7 @@ The `dual-module-change` skill has the table and the command.
 | `runtime_value.go` | `RuntimeValue`, for values the runtime injects directly |
 | `runtime_environment_file.go` | loading a runtime-written env file |
 | `fixture/` | the selected fixture, and resolving its principals by role |
-| `tls.go` | workload leaf certificates, reloaded on rotation |
+| `tls.go`, `workload/`, `ingress/` | workload leaf certificates reloaded on rotation; the X.509-SVID listener and platform client, held to one posture and moved here from the solution runtime (`workload/AGENTS.md`); a module's gateway ingress and its origin report |
 | `receipts/` | effect receipts: the store, the digest, the replay/conflict interceptor |
 | `receipts/grpctransport/`, `receipts/connecttransport/` | the two transport adapters, split so neither drags the other's dependency in |
 | `workcontext/` | **separate leaf module**: the mint-once client, the carriers, the cache partition, the stream guard, and typed access to core's one implementation. Its own `AGENTS.md` holds what the two gates refuse |

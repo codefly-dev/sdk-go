@@ -136,6 +136,43 @@ fields, the refusals a caller must tell apart, the four sources core's verifier
 requires, and what a consumer has to stop doing — there is no heartbeat, no
 registration call, and no self-reported build or installation.
 
+## Workload identity and a module's gateway ingress
+
+`workload` is the hardened X.509-SVID layer the solution runtime has used since
+the delivered-presence cutover, moved here so a module serves under the same
+rules: a TLS 1.3 listener that requires a caller certificate from the cell's
+anchor **and** a caller named in the provisioned admitted set, re-read per
+handshake and rechecked on established connections; and a platform client that
+presents the same SVID and hands its credentials only to an identity provisioned
+for the address it dials.
+
+```go
+files := workload.ProjectedFiles(ctx)            // workload-identity group, or overrides
+principal, err := workload.PrincipalOf(workload.Projected(files))
+listener, err := workload.NewListener(workload.Projected(files), principal,
+    workload.IdentitySet(files.AllowedCallers, "who may call"))
+server := listener.Server(handler)
+go server.Serve(listener.Listen(ln))
+```
+
+`ingress` is the module half of being reached through the host's gateway. A
+module declares an endpoint named `ingress` (api `http`) and the
+`workload-identity` workspace configuration dependency, and serves the handler
+the gateway forwards `/v1/<alias>/*` to:
+
+```go
+in, err := ingress.Serve(ctx, restHandler)   // binds the ingress endpoint's port
+<-in.Reported()                               // the host has recorded the origin
+```
+
+`Serve` refuses to start without an SVID, an anchor, an admitted set, a
+projected token, a gateway set and a mint set that share an identity, and an
+https report destination; there is no plain listener. It then reports the
+origin the composition advertises for the endpoint (a local run with no
+advertised address reports `https://localhost:<port>`) to `/modules/_upstream`
+on the credential mint's origin, retrying an outage with a jittered backoff and
+a refusal slowly, until the host answers 204.
+
 ## Authority-bearing configuration
 
 A principal, binding or audience is read once, at boot, through

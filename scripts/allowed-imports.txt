@@ -49,12 +49,12 @@ root bytes
 root connectrpc.com/connect
 root context
 root crypto/sha256 receipts/digest.go receipts/postgres.go
-root crypto/tls tls.go
-root crypto/x509 tls.go
+root crypto/tls tls.go workload/posture.go workload/listener.go workload/outbound.go workload/workload.go
+root crypto/x509 tls.go workload/posture.go workload/listener.go workload/outbound.go workload/workload.go
 root database/sql
 root embed
 root encoding/binary
-root encoding/json configuration_document.go receipts/digest.go
+root encoding/json configuration_document.go receipts/digest.go ingress/ingress.go
 root errors
 root fmt
 root github.com/codefly-dev/core/composition
@@ -66,8 +66,10 @@ root github.com/codefly-dev/core/resources
 root github.com/codefly-dev/core/runnable
 root github.com/codefly-dev/core/standards
 root github.com/codefly-dev/core/wool
-root github.com/codefly-dev/sdk-go/receipts
+root github.com/codefly-dev/sdk-go
 root github.com/codefly-dev/sdk-go/internal/enclosing
+root github.com/codefly-dev/sdk-go/receipts
+root github.com/codefly-dev/sdk-go/workload
 root go/parser
 root go/token
 root google.golang.org/grpc
@@ -83,9 +85,14 @@ root google.golang.org/protobuf/types/descriptorpb
 root google.golang.org/protobuf/types/dynamicpb
 root google.golang.org/protobuf/types/known/durationpb
 root io
+root math/rand/v2 ingress/ingress.go
+root net
+root net/http
+root net/url
 root os
 root path/filepath
 root runtime/debug
+root slices
 root sort
 root strconv
 root strings

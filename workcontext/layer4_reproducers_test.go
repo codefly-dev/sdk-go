@@ -584,3 +584,13 @@ func TestAMintResponseCarryingTrailingJSONIsRefused(t *testing.T) {
 	_, err := client.Credential(t.Context())
 	require.NoError(t, err, "a trailing newline is not a second value")
 }
+
+// The ingress report body's exemption is that file's, like the mint's: a
+// namesake elsewhere carries json tags and is refused.
+func TestTheGateDoesNotLetTheReportBodyNameTravel(t *testing.T) {
+	source := "package extra\ntype upstreamReport struct { Principal string `json:\"principal\"` }"
+	findings := inspectForSecondImplementation(parseSource(t, "extra/report.go", source))
+	require.Contains(t, strings.Join(findings, "\n"), "struct with json tags")
+	genuine := "package ingress\ntype upstreamReport struct { Prefix string `json:\"prefix\"` }"
+	require.Empty(t, inspectForSecondImplementation(parseSource(t, "ingress/ingress.go", genuine)))
+}

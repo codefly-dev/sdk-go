@@ -137,7 +137,10 @@ var narrowedImports = map[string]struct {
 		symbols: []string{"RawValue", "Unmarshal", "ClassContextSpecific"},
 	},
 	"crypto/tls": {
-		files: []string{"workcontext/mint.go", "tls.go"},
+		// The workload package is the hardened identity layer moved out of the
+		// solution runtime: its listener and its platform client. It parses no
+		// key and signs nothing.
+		files: []string{"workcontext/mint.go", "tls.go", "workload/posture.go", "workload/listener.go", "workload/outbound.go", "workload/workload.go"},
 		// Config and the version floor, plus the two error types the client
 		// classifies on. Reading an error TYPE is not using a primitive, and
 		// the alternative was matching on error text — which is how a
@@ -153,6 +156,9 @@ var narrowedImports = map[string]struct {
 			"Certificate", "X509KeyPair", "LoadX509KeyPair",
 			"ClientHelloInfo", "CertificateRequestInfo",
 			"RequireAndVerifyClientCert",
+			// The workload listener: wrap a net.Listener, and the connection
+			// type its per-connection recheck holds.
+			"NewListener", "Conn",
 		},
 	},
 	// mime, for one call: the mint response's Content-Type must be declared
@@ -220,7 +226,7 @@ var narrowedImports = map[string]struct {
 		symbols: []string{"RawURLEncoding", "URLEncoding", "StdEncoding"},
 	},
 	"crypto/x509": {
-		files: []string{"workcontext/mint.go", "tls.go"},
+		files: []string{"workcontext/mint.go", "tls.go", "workload/posture.go", "workload/listener.go", "workload/outbound.go", "workload/workload.go"},
 		// CertPool for the caller's roots, and the three verification error
 		// types for the same reason as above. Notably still refused:
 		// ParsePKCS8PrivateKey, which is how a signer gets a key without
@@ -232,6 +238,11 @@ var narrowedImports = map[string]struct {
 			// Inspect the parsed TLS leaf's SVID purpose; no key or codec operations.
 			"Certificate", "KeyUsageDigitalSignature", "KeyUsageCertSign", "KeyUsageCRLSign", "ExtKeyUsageServerAuth",
 			"UnknownAuthorityError", "HostnameError", "CertificateInvalidError",
+			// The workload package re-reads a peer's chain from its own copy of
+			// the DER — so the identity it admits by is computed from bytes no
+			// verifier was lent — and verifies it for client or server use.
+			// ParseCertificate parses a certificate, never a key.
+			"ParseCertificate", "ExtKeyUsage", "ExtKeyUsageClientAuth",
 		},
 	},
 }
@@ -254,6 +265,8 @@ var codecAllowlist = []codecUse{
 		types: append(append([]string{}, mintEndpointJSONTypes...), "encoding/json#RawMessage"),
 		reason: "the same two bodies, plus a RawMessage the response decoder reads into to " +
 			"require EOF — it holds nothing and is discarded"},
+	{file: "ingress/ingress.go", codec: codecJSON, operations: []string{"Marshal"}, types: []string{"upstreamReport"},
+		reason: "the ingress report's HTTP body: a module's route alias and the origin it serves at, never a capability"},
 	{file: "workcontext/cache_partition.go", codec: codecProto, operations: protoOperations,
 		types:  []string{basev0Path + "#WorkScopeV1"},
 		reason: "one scope, for the cache digest preimage — never a capability"},
@@ -336,6 +349,7 @@ var jsonAllowlist = map[string]string{
 	// message in any file whatever this list says.
 	"configuration_document.go": "the runtime's own configuration document, which is not a capability",
 	"receipts/digest.go":        "canonicalising a receipt REQUEST for its digest: protojson, then a stable re-encode",
+	"ingress/ingress.go":        "the ingress report's HTTP body, a route alias and an origin; it carries no capability",
 }
 
 // mintEndpointJSONTypes are the only structs in this module that may carry
@@ -354,6 +368,17 @@ var (
 	mintEndpointJSONTypes = []string{"mintRequest", "mintResponse"}
 	mintEndpointJSONFile  = "workcontext/mint.go"
 )
+
+// endpointJSONBodies is every file that may declare json-tagged structs, and
+// exactly which: the host endpoints' HTTP bodies, none of which carries a
+// capability's fields. The mint's two are the first entry; the ingress's
+// report body — a module's route alias and the origin it serves at — is the
+// second. A third is a failing test, as above, and an entry here is the
+// argument for it.
+var endpointJSONBodies = map[string][]string{
+	mintEndpointJSONFile: mintEndpointJSONTypes,
+	"ingress/ingress.go": {"upstreamReport"},
+}
 
 // coreModulePath is the module whose types this one aliases. An alias has to
 // resolve into it, or it is a local type wearing core's name.
@@ -441,9 +466,11 @@ func TestNoSecondWorkContextImplementation(t *testing.T) {
 	}
 	assertFrozenStructShapes(t, files)
 
-	require.Contains(t, jsonAllowlist, mintEndpointJSONFile,
-		"the file allowed to carry json TAGS must be the file allowed to IMPORT encoding/json; "+
-			"two lists that can drift are two lists")
+	for file := range endpointJSONBodies {
+		require.Contains(t, jsonAllowlist, file,
+			"a file allowed to carry json TAGS must be a file allowed to IMPORT encoding/json; "+
+				"two lists that can drift are two lists")
+	}
 }
 
 // inspectForSecondImplementation is the whole check over one parsed file,
@@ -1081,8 +1108,8 @@ func inspectJSONTags(file sourceFile) []string {
 	allowed := map[ast.Node]bool{}
 	// Only the mint endpoint's own file may hold them. Elsewhere the names earn
 	// nothing, so the walk below finds the tags and refuses them.
-	if file.path == mintEndpointJSONFile {
-		allowed = allowedMintBodies(file)
+	if types, ok := endpointJSONBodies[file.path]; ok {
+		allowed = allowedBodies(file, types)
 	}
 	var findings []string
 	ast.Inspect(file.syntax, func(node ast.Node) bool {
@@ -1099,13 +1126,13 @@ func inspectJSONTags(file sourceFile) []string {
 				continue
 			}
 			findings = append(findings, fmt.Sprintf(
-				"%s declares a struct with json tags. Only %v in %s may.\n"+
+				"%s declares a struct with json tags. Only %v may, each in its own file.\n"+
 					"A JSON-tagged struct describing a capability's fields is the second\n"+
 					"implementation: core signs the deterministic protobuf encoding, and a field\n"+
 					"enumerated by hand is a field dropped at mint and absent at verify. Naming a type\n"+
 					"mintRequest somewhere else does not inherit the endpoint's exemption — the\n"+
 					"exemption is that file's, not the identifier's.",
-				file.path, mintEndpointJSONTypes, mintEndpointJSONFile))
+				file.path, endpointJSONBodies))
 			return true
 		}
 		return true
@@ -1113,10 +1140,10 @@ func inspectJSONTags(file sourceFile) []string {
 	return findings
 }
 
-// allowedMintBodies returns the struct nodes of the mint endpoint's two bodies,
-// identified by node so a THIRD json-tagged type declared beside them cannot
+// allowedBodies returns the struct nodes of one endpoint file's bodies,
+// identified by node so another json-tagged type declared beside them cannot
 // borrow the allowance.
-func allowedMintBodies(file sourceFile) map[ast.Node]bool {
+func allowedBodies(file sourceFile, types []string) map[ast.Node]bool {
 	allowed := map[ast.Node]bool{}
 	for _, declaration := range file.syntax.Decls {
 		general, ok := declaration.(*ast.GenDecl)
@@ -1125,7 +1152,7 @@ func allowedMintBodies(file sourceFile) map[ast.Node]bool {
 		}
 		for _, spec := range general.Specs {
 			typed, ok := spec.(*ast.TypeSpec)
-			if !ok || !slices.Contains(mintEndpointJSONTypes, typed.Name.Name) {
+			if !ok || !slices.Contains(types, typed.Name.Name) {
 				continue
 			}
 			if structure, ok := typed.Type.(*ast.StructType); ok {
@@ -1168,7 +1195,7 @@ func inspectJSONCalls(file sourceFile, jsonNames map[string]bool) []string {
 				"Only %v may be JSON-encoded here, by name and by type. A map[string]any holding a\n"+
 				"capability's fields needs no json tags, so the tag rule alone let it through — and a\n"+
 				"hand-enumerated capability is exactly the implementation this module deleted.",
-			file.path, qualifier.Name, selector.Sel.Name, mintEndpointJSONTypes))
+			file.path, qualifier.Name, selector.Sel.Name, endpointJSONBodies))
 		return true
 	})
 	return findings
@@ -1200,7 +1227,7 @@ func inspectJSONValueCalls(file sourceFile, importsJSON bool) []string {
 			"%s calls %s on a type it is not allowed to.\n"+
 				"Only %v may be JSON-decoded or encoded here, by type. A decoder takes a reader, so\n"+
 				"the type that matters is what it is pointed at.",
-			file.path, selector.Sel.Name, mintEndpointJSONTypes))
+			file.path, selector.Sel.Name, endpointJSONBodies))
 		return true
 	})
 	return findings
