@@ -211,6 +211,14 @@ in-cluster Service address exactly under that assertion. Both halves are
 required: the assertion covers only what a mesh can cover, and a name alone is
 not evidence a mesh wraps the wire.
 
+- **One function, `admitEndpoint`, and two call sites.** `ResolveKeySetEndpoint`
+  admits a verifier's key-set URL through it and `validateMintURL` admits the
+  mint endpoint through it, with `MintOptions.Transport` as the mint client's
+  `TransportSource`; a nil `Transport` admits https alone, because nothing can
+  read either fact. The mint URL is not a mint-shaped variant of the rule:
+  `TestTheMintURLIsAdmittedByTheSameRuleAsTheKeySet` drives every branch
+  through both doors and requires the same answer in the same words. The rule
+  itself is the one the composed modules apply to `platform/gateway-endpoint`.
 - **`ClusterServiceHost` accepts `<service>.<namespace>.svc` or that followed by
   `cluster.local` and nothing else**, with both leading labels held to DNS-1123.
   The suffix is matched LITERALLY, because a name carrying an `svc` label in
@@ -363,8 +371,13 @@ that are easy to get backwards:
 
 ## The mint transport admits the peer before disclosing the projection
 
-`MintOptions` requires three sources: `TrustAnchor`, `ClientCertificate` and
-`AdmittedPeers`. Construction checks configuration without calling any source.
+`MintOptions` requires three sources for an https endpoint: `TrustAnchor`,
+`ClientCertificate` and `AdmittedPeers`. For an admitted plaintext endpoint —
+loopback on a local run, or an in-cluster Service under the mesh assertion — no
+handshake ever reads them, so all three must be nil, and one set beside a
+plaintext URL is refused at construction rather than ignored: an `AdmittedPeers`
+nothing consults reads, in the configuration, as peer admission that is
+happening. Construction checks configuration without calling any source.
 The SDK owns its HTTP client and transport; a caller can supply neither. The
 private TLS dialer reads the current anchor for normal chain and hostname
 verification. `GetClientCertificate` reads the workload's current X.509-SVID;
