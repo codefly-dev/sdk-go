@@ -19,20 +19,22 @@ They land hard here: this is a *library*, so its defects are observed in someone
 else's service, where hand-assembling the value the SDK failed to resolve always
 looks like the faster path.
 
+- **Prove reuse before you build**, and **build the simplest thing that works;
+  size is the signal**: fill a gap on what the platform has, keep a coding task
+  to about **500 hand-written lines**, and past **2,000** **stop and ask the
+  user**. Both in full in [the handbook](https://github.com/obin-ai/handbook/blob/main/AGENTS.md).
 - **A gap in the tooling is a bug in the tooling — never a reason to reach
-  around it.** When a service cannot get a value out of the SDK, the answer is
-  an accessor added here, or a capability fixed in whichever tool owns it, named
-  in the PR. It is never a hand-written env var in the consumer — not as a
-  "workaround", not "just this once", not "until the accessor lands".
+  around it.** When a service cannot get a value out of the SDK, the answer is an
+  accessor added here, or a capability fixed in whichever tool owns it, named in
+  the PR — never a hand-written env var in the consumer, not "just this once".
 - **Never hack. Provide the best fix, even when it spans repos.** The fix living
   in `codefly-dev/core` or `codefly-dev/cli` is not a reason to work around it
   here. Open the PR there and consume the reviewed result. When it genuinely
   cannot be fixed now, the deliverable is a precise issue against that owner
   plus an explicitly labelled stopgap — never an unlabelled one.
 - **Classify every change that makes something work**, in the PR body: a *fix*
-  at the place that owns the behaviour, or a *hack*. A hack does not become a
-  fix by working, by being small, by being local, or by the real fix belonging
-  elsewhere.
+  at the place that owns the behaviour, or a *hack* — which does not become a fix
+  by working, by being small, by being local, or by the fix belonging elsewhere.
 - **Never hardcode what the system resolves** — injected environment, derived
   ports, service addresses, credentials copied out of another component. This
   module is the resolution: addresses come from
@@ -187,14 +189,12 @@ Loaded on demand rather than carried here — `.claude/skills/`:
 ## Workflow
 
 - Branch and PR; never commit to `main`. Conventional Commits for the title.
-- The PR template asks for the fix-or-hack classification and for what you did
-  not verify. Both are rules above; answer them there rather than omitting them.
+- The PR template asks for both classifications above; answer them there.
 - `agentcontext_test.go` holds this file's length budget and each skill's
-  frontmatter contract. It runs under `go test ./...`, so CI enforces it with no
-  workflow change.
+  frontmatter contract, under `go test ./...` — CI needs no workflow change.
 - `TestQueryDoesNotExposeDefaultNetworkAPI` holds the deleted query API absent,
   including inert methods or fields. Legacy means delete, not deprecate.
 - Keep this file under ~150 lines (hard cap 200). Push depth into a nested
   `AGENTS.md` beside what it describes, or into `.claude/skills/`.
-- `CLAUDE.md` is a pointer to this file. Keep one canonical source.
-- Treat this file as code: the PR that changes a process updates it.
+- `CLAUDE.md` points here — one canonical source, and the PR that changes a
+  process updates it.
