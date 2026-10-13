@@ -8,11 +8,15 @@
 
 # codefly + go = sdk-go
 
-## Endpoint resolution with core v0.19.1
+## Endpoint resolution with core v0.19.4
 
-Both SDK modules pin the core **v0.19.1** release tag (`7f78302f`). Endpoint
+Both SDK modules pin the core **v0.19.4** release tag (`5b9dbf5d`). Endpoint
 visibility is `private`, `internal`, or `public`; an endpoint outside the system
 declares `location: external` independently of its visibility.
+
+Core v0.19.4 keeps the dependency graph compatible with stable client-go:
+no `structured-merge-diff/v7`, and `kube-openapi` no newer than
+`v0.0.0-20260721132016-d427ff9ee9ad`. The SDK API is unchanged.
 
 `For(ctx).Module(...).Service(...).Endpoint(...).ResolveNetworkInstance()` uses
 core selection before looking up a runtime-injected address wherever the
