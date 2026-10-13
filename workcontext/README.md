@@ -1049,8 +1049,8 @@ root:
 
 ### Core release dependency
 
-Both `workcontext/go.mod` and the root SDK pin **core v0.19.1**, the release
-tag at `7f78302f4ac82932c83a6e43375cee4da73f7b9d`. This tag supplies the sealed
+Both `workcontext/go.mod` and the root SDK pin **core v0.19.4**, the release
+tag at `5b9dbf5d7f03dd048d7b741dc8b79ab2bc407ab3`. This tag supplies the sealed
 Work Context implementation, `Decode`, verification and re-check entrypoints,
 the lifetime ceiling, and the conformance kit exercised by this module. No
 unreleased core pin is required.

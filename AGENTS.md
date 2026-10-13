@@ -101,7 +101,7 @@ see the skill below.
 
 ## Rules that bite
 
-- **Core is pinned to the v0.19.1 tag in both modules.** Endpoint visibility is
+- **Core is pinned to the v0.19.4 tag in both modules.** Endpoint visibility is
   exactly `private`/`internal`/`public`; `external` is a location. Local fallback
   uses core's `Endpoint.External()` predicate and still resolves public
   endpoints without an external location. Do not recreate removed visibility names.
