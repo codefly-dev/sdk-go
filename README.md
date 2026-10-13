@@ -155,15 +155,37 @@ server := listener.Server(handler)
 go server.Serve(listener.Listen(ln))
 ```
 
-`ingress` is the module half of being reached through the host's gateway. A
-module declares an endpoint named `ingress` (api `http`) and the
-`workload-identity` workspace configuration dependency, and serves the handler
-the gateway forwards `/v1/<alias>/*` to:
+`ingress` is the module half of being reached through the host's gateway. The
+service that serves the module's gateway surface declares the ingress endpoint
+and the identity it is served under:
+
+```yaml
+endpoints:
+  - name: ingress
+    api: http
+    visibility: public
+    exposure: none
+workspace-configuration-dependencies:
+  - workload-identity
+```
+
+and starts it from its configure hook. The gateway surface (`/v1/<alias>/*`,
+transcoded by the generated server) is served by a listener module code does
+not own, so `ingress.Front` fronts it: it resolves this service's own endpoint
+for the API (default `rest`) through the SDK's resolution and proxies to it over
+loopback only, refusing any other resolution.
 
 ```go
-in, err := ingress.Serve(ctx, restHandler)   // binds the ingress endpoint's port
+front, err := ingress.Front(ctx, "rest")     // this service's own REST endpoint, loopback
+in, err := ingress.Serve(ctx, front)          // binds the ingress endpoint's port
 <-in.Reported()                               // the host has recorded the origin
 ```
+
+The front forwards method, path, query, body and headers (Authorization
+included; hop-by-hop headers are not), adds no `X-Forwarded-*` header and drops
+any the caller sent — the caller is the gateway, authenticated by its SVID, and
+a forwarding chain this hop did not verify is not one it vouches for — and
+flushes responses as they are written, so streams pass through.
 
 `Serve` refuses to start without an SVID, an anchor, an admitted set, a
 projected token, a gateway set and a mint set that share an identity, and an

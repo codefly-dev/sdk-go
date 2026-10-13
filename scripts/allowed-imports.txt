@@ -88,6 +88,7 @@ root io
 root math/rand/v2 ingress/ingress.go
 root net
 root net/http
+root net/http/httputil ingress/front.go
 root net/url
 root os
 root path/filepath

@@ -29,5 +29,8 @@ arguments. Read the comment before changing the rule it sits on.
 (endpoint `ingress`, api `http`) and the report of its advertised https origin
 to the host's `/modules/_upstream`, on the credential mint's origin, presenting
 the SVID and the projected token to an identity both the gateway and the mint
-sets admit. Tests issue their own anchor (`cell_test.go`); mutation-check a new
+sets admit. `ingress.Front` is the handler a module whose surface is served by
+its generated listener passes to `Serve`: its own endpoint, resolved by the SDK,
+proxied over loopback only (any other resolution is refused), no
+`X-Forwarded-*` added, streams flushed. Tests issue their own anchor (`cell_test.go`); mutation-check a new
 rule by disabling it and watching its test fail.
