@@ -1990,7 +1990,7 @@ type mintResponse struct {
 	BuildIncarnation string `json:"build_incarnation,omitempty"`
 }
 
-// validateMintURL admits the mint endpoint through admitEndpoint, the one
+// validateMintURL admits the mint endpoint through AdmitEndpoint, the one
 // transport rule in this module, and reports whether the admitted URL is
 // plaintext. It requires an absolute URL with no userinfo, query or fragment;
 // https to any host; http only to a loopback host on a local run, or to an
@@ -2018,7 +2018,7 @@ func validateMintURL(raw string, source TransportSource) (endpoint string, plain
 	if source == nil {
 		source = httpsOnly{}
 	}
-	parsed, err := admitEndpoint(raw, source, "mint endpoint")
+	parsed, err := AdmitEndpoint(raw, source, "mint endpoint")
 	if err != nil {
 		return "", false, err
 	}
@@ -2027,7 +2027,7 @@ func validateMintURL(raw string, source TransportSource) (endpoint string, plain
 
 // httpsOnly is the transport posture of a mint client given no Transport: with
 // nothing to read the composition's assertion or the environment from, nothing
-// is asserted and this is not a local run, and admitEndpoint admits https alone.
+// is asserted and this is not a local run, and AdmitEndpoint admits https alone.
 type httpsOnly struct{}
 
 func (httpsOnly) WorkspaceValueIfSet(string, string) (string, bool, error) { return "", false, nil }

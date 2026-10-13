@@ -211,11 +211,14 @@ in-cluster Service address exactly under that assertion. Both halves are
 required: the assertion covers only what a mesh can cover, and a name alone is
 not evidence a mesh wraps the wire.
 
-- **One function, `admitEndpoint`, and two call sites.** `ResolveKeySetEndpoint`
-  admits a verifier's key-set URL through it and `validateMintURL` admits the
-  mint endpoint through it, with `MintOptions.Transport` as the mint client's
-  `TransportSource`; a nil `Transport` admits https alone, because nothing can
-  read either fact. The mint URL is not a mint-shaped variant of the rule:
+- **One function, `AdmitEndpoint`, exported, and two call sites here.**
+  `ResolveKeySetEndpoint` admits a verifier's key-set URL through it and
+  `validateMintURL` admits the mint endpoint through it, with
+  `MintOptions.Transport` as the mint client's `TransportSource`; a nil
+  `Transport` admits https alone, because nothing can read either fact. It is
+  exported for the URLs a consumer dials that are neither — a runtime calling the
+  gateway on the origin it mints against — so a consumer's boot refusal is this
+  rule and not a copy. The mint URL is not a mint-shaped variant of the rule:
   `TestTheMintURLIsAdmittedByTheSameRuleAsTheKeySet` drives every branch
   through both doors and requires the same answer in the same words. The rule
   itself is the one the composed modules apply to `platform/gateway-endpoint`.
