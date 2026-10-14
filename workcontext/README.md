@@ -268,6 +268,13 @@ where it asserts them:
 
 ## Obtaining the credential
 
+`MintClient` is the SDK's generic mint transport: one credential per execution
+from whichever mint endpoint the composition names, over this module's JSON
+exchange, renewed only at expiry, with the URL admitted by `AdmitEndpoint`. It is
+not a client of any host-specific broker exchange and it adds no heartbeat or
+registration; a consumer that speaks such an exchange keeps its own typed client
+and admits that URL through the same rule.
+
 ```go
 // At boot, in the root SDK: read the authority-bearing values once.
 authority, err := codefly.ReadAuthority(ctx,

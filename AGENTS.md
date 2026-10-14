@@ -95,20 +95,17 @@ The `dual-module-change` skill has the table and the command.
 | `workcontext/grpctransport/` | the gRPC carrier, so a consumer that makes no gRPC call never compiles grpc |
 
 `workcontext` mints nothing and verifies nothing: `core/workcontext` is the only
-implementation of the capability, and this module re-exports core's verifier by
-type alias. Adding a dependency to it is still a design change, not a detail —
-see the skill below.
+implementation of the capability, reached here through typed access. Adding a
+dependency to it is still a design change, not a detail — see the skill below.
 
 ## Rules that bite
 
-- **Each module's go.mod owns its Core pin.** The root currently uses the
-  candidate live endpoint contract at `886d218d`; the Work Context module
-  remains on v0.19.1. Candidate source checks are not released-pin
-  qualification. Endpoint visibility is
-  exactly `private`/`internal`/`public`; `external` is a location. Local fallback
-  uses core's `Endpoint.External()` predicate and still resolves public
-  endpoints without an external location. Do not recreate removed visibility names.
-  Preserve the calling module separately from the queried producer; core's
+- **Each module's go.mod owns its Core pin.** Root: the candidate live-endpoint
+  contract `886d218d` (not released-pin qualification); `workcontext`: v0.19.1.
+  Endpoint visibility is exactly `private`/`internal`/`public`; `external` is a
+  location. Local fallback uses core's `Endpoint.External()` and resolves public
+  endpoints with no external location. Do not recreate removed visibility names.
+  Keep the calling module separate from the queried producer; core's
   `SelectEndpointForReference` owns selection on module-adjusted declarations.
   `Init` pins that consumer once; endpoint resolution refuses identity drift.
 - **A deployed process has no workspace, so its carriers are authoritative.**
