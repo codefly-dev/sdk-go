@@ -8,11 +8,13 @@
 
 # codefly + go = sdk-go
 
-## Endpoint resolution with core v0.19.1
+## Endpoint resolution
 
-Both SDK modules pin the core **v0.19.1** release tag (`7f78302f`). Endpoint
-visibility is `private`, `internal`, or `public`; an endpoint outside the system
-declares `location: external` independently of its visibility.
+Each module's `go.mod` owns its core pin: `workcontext` is on the **v0.19.1**
+release tag (`7f78302f`); the root is on core's candidate `835460f1`, a candidate
+pin and not release qualification. Endpoint visibility is `private`, `internal`,
+or `public`; an endpoint outside the system declares `location: external`
+independently of its visibility.
 
 `For(ctx).Module(...).Service(...).Endpoint(...).ResolveNetworkInstance()` uses
 core selection before looking up a runtime-injected address wherever the
@@ -60,6 +62,20 @@ it composes through `workspaces:` or `solutions:` count, and the native address
 is computed under the composition's name. A module it does not carry is
 answered from the carriers, and an absent carrier's refusal names the modules
 the workspace does carry.
+
+The composition's own workspace is sometimes one only the host can compose: a
+solution run natively from its root imports its platform by release
+(`workspaces:` with `source` and `version`), and composing that means acquiring
+the release, which the CLI does — it hands core a `WorkspaceResolver` — and this
+SDK never does. The SDK hands core a resolver that refuses, so core's own loader
+says when that acquisition is all that stands between the file and a
+composition, and the file then counts as none (`enclosing.HostComposed`): the
+carriers the run injected answer, the process's own endpoint included, and an
+absent carrier's `ErrEndpointCarrierAbsent` says why no declaration was judged
+here and names the import. Nothing is recomposed and no native address is
+computed from a workspace that was not composed. Before this, the load failure
+(`requires host resolution`) was the answer, and `NetworkInstance()` hid it as
+nil while the run's carrier sat in the environment.
 
 `codefly run` and `codefly test` both inject that identity. With none injected,
 no composition started the process (a local tool, a plain `go test` or `go
@@ -161,3 +177,32 @@ and retention requirements.
 Core validates each marked operation when the receipts interceptor is built.
 Operation declarations must specify a completion mode; synchronous operations
 declare `COMPLETION_CALL`. An omitted mode is refused, not defaulted.
+
+
+### Live host route delivery
+
+A host resolving a declared component uses
+`For(ctx).Module(...).Service(...).Endpoint(...).API(...).ResolveDeliveredNetworkInstance(applied, raw)`.
+Pass the presence document the host has applied, not a desired declaration, and
+the endpoint delivery value the host carries beside that applied generation in
+its durable delivery state. Core validates the value against the whole canonical
+applied document; the SDK decodes the one endpoint the query names. Nothing is
+mounted and nothing is read from a file, a directory or the environment: a route
+update is whatever the host hands over on the next call, so new components and
+relocated endpoints are discovered without reloading the host environment and
+without a restart. The host supplies the value; the SDK never fetches it.
+
+A nil or empty value, a value over `solutionhost.EndpointDeliveryMaxBytes`, a
+malformed, withdrawn or mismatched delivery, and an endpoint the producer did not
+deliver all return `ErrEndpointDeliveryUnavailable`. This API never falls back to
+a startup carrier or a locally computed port, including during an upgrade.
+Existing ordinary `ResolveNetworkInstance` queries keep their existing
+composition semantics.
+
+The reader takes three names from core's `solutionhost` package — the applied
+`SolutionHostBinding`, the `EndpointDeliveryMaxBytes` bound and the strict decoder
+`ParseEndpointDelivery` — and never `MarshalEndpointDelivery`: the SDK reads a
+delivery and writes none, because a delivery it produced itself would be one
+nobody applied. The import policy (`scripts/allowed-imports.txt`) admits the
+package for `endpoint_delivery.go` alone, and the Go gate holds it to those
+symbols.

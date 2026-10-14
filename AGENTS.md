@@ -15,9 +15,8 @@ repo is deliberate and encapsulated; a new one anywhere else is the bug.
 ## How to behave
 
 Fleet standard — [handbook#68](https://github.com/obin-ai/handbook/issues/68).
-They land hard here: this is a *library*, so its defects are observed in someone
-else's service, where hand-assembling the value the SDK failed to resolve always
-looks like the faster path.
+They land hard here: this is a *library*; its defects surface in someone else's
+service, where hand-assembling what the SDK failed to resolve always looks faster.
 
 - **Prove reuse before you build**, and **build the simplest thing that works;
   size is the signal**: fill a gap on what the platform has, keep a coding task
@@ -70,13 +69,11 @@ The receipts store's tests **skip** without `CODEFLY_TEST_POSTGRES_DSN`, and a
 skipped test is green. CI's `coverage` and `race` jobs run a Postgres service
 and set it; a local run that does not is not the gate.
 
-Run each of those a second time from `workcontext/` — it is a separate module
-with its own `go.mod` and `go.sum`, so nothing at the root covers it. Lint finds
-the root `.golangci.yaml` by walking up, so it needs no config of its own.
+Run each again from `workcontext/`: a separate module with its own `go.mod` and
+`go.sum`, so nothing at the root covers it; lint walks up to `.golangci.yaml`.
 
-Coverage gates differ by module and are not interchangeable — root
-`.testcoverage.yaml`, `workcontext` an `awk` on the **module total** in `go.yml`.
-The `dual-module-change` skill has the table and the command.
+Coverage gates differ by module: root `.testcoverage.yaml`, `workcontext` an
+`awk` on the **module total** in `go.yml`; `dual-module-change` has the command.
 
 ## Where things live
 
@@ -95,19 +92,19 @@ The `dual-module-change` skill has the table and the command.
 | `workcontext/grpctransport/` | the gRPC carrier, so a consumer that makes no gRPC call never compiles grpc |
 
 `workcontext` mints nothing and verifies nothing: `core/workcontext` is the only
-implementation of the capability, and this module re-exports core's verifier by
-type alias. Adding a dependency to it is still a design change, not a detail —
-see the skill below.
+implementation of the capability, reached here through typed access. Adding a
+dependency to it is still a design change, not a detail — see the skill below.
 
 ## Rules that bite
 
-- **Core is pinned to the v0.19.1 tag in both modules.** Endpoint visibility is
+- **Each module's go.mod owns its Core pin.** Root: candidate `835460f1` (not
+  released-pin qualification); `workcontext`: v0.19.1. Endpoint visibility is
   exactly `private`/`internal`/`public`; `external` is a location. Local fallback
-  uses core's `Endpoint.External()` predicate and still resolves public
-  endpoints without an external location. Do not recreate removed visibility names.
-  Preserve the calling module separately from the queried producer; core's
-  `SelectEndpointForReference` owns selection on module-adjusted declarations.
-  `Init` pins that consumer once; endpoint resolution refuses identity drift.
+  uses core's `Endpoint.External()` and resolves public endpoints with no external
+  location. Do not recreate removed visibility names. Keep the calling module
+  separate from the queried producer; core's `SelectEndpointForReference` owns
+  selection on module-adjusted declarations. `Init` pins that consumer once;
+  endpoint resolution refuses identity drift.
 - **A deployed process has no workspace, so its carriers are authoritative.**
   The builder image ships the binary alone, including in local Kubernetes pods.
   In any environment with no workspace on disk, `ResolveNetworkInstance` reads
@@ -119,7 +116,12 @@ see the skill below.
   environment. A workspace that is not this process's composition counts as none
   (`internal/enclosing`, #66): with `CODEFLY__WORKSPACE` injected only that name
   counts, and another is never even loaded; it must also carry the queried
-  module. With nothing injected, the workspace found is used as found.
+  module. With nothing injected, the workspace found is used as found. The
+  composition's own workspace that only the host can compose — it imports a
+  workspace by release, which this SDK never acquires — counts as none too
+  (`enclosing.HostComposed`, via core's `WorkspaceResolver`): the carriers answer
+  and absence says why. `ResolveDeliveredNetworkInstance(applied, raw)` takes the
+  host's applied presence and the value beside it: no file, no environment, no fallback.
 - **`CODEFLY__` is spelled in this repo, nowhere else.** A consumer needing a
   value gets a typed accessor here; the prefix constant lives in
   `runtime_value.go` for that reason.
@@ -158,11 +160,11 @@ see the skill below.
   constructor and `PinnedVerifier` the only type here that verifies. The
   endpoint, the fetch and the verifier are one operation — `KeySet` has one
   constructor and `NewVerifier` takes nothing else — so an admitted location and
-  the keys in use are one fact. `ResolveKeySetEndpoint` is the host's transport
-  rule: plaintext reaches an in-cluster Service address only under
-  `internal-transport/mesh-protected`, compared literally, and loopback only on a
-  local run. A failed read of that setting is a refusal, not absence. No refusal
-  echoes a configured value. `scripts/security-posture.sh` re-audits both rules.
+  the keys in use are one fact. `AdmitEndpoint` is the one transport rule, for the
+  key-set URL, the mint URL (`MintOptions.Transport`; nil keeps https only) and a
+  consumer's own: plaintext reaches an in-cluster Service address only under
+  `internal-transport/mesh-protected`, compared literally, loopback only locally; a
+  failed read refuses, not absence; no refusal echoes a value. `scripts/security-posture.sh` re-audits.
 - **A receipt is written inside the transaction that commits its effect.** A
   receipt written after the commit leaves a window where the effect exists and
   the receipt does not, and a recovery landing there reads "no receipt" for an
@@ -173,9 +175,7 @@ see the skill below.
   deleted implementation, so retiring the three NAMED compat refs would have
   turned the gate green with 19 copies published. A line that cannot meet a
   rule is **retired** by the owner, never granted a period during which the
-  rule is false here. A bullet forbidding the back-port of a breaking deletion
-  used to live here; it is what kept the implementation alive on refs CI
-  builds, so it is deleted.
+  rule is false here.
 
 ## Procedures
 

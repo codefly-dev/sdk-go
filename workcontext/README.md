@@ -268,6 +268,15 @@ where it asserts them:
 
 ## Obtaining the credential
 
+`MintClient` is the SDK's generic mint transport: one credential per execution
+from whichever mint endpoint the composition names, over this module's JSON
+exchange, with the URL admitted by `AdmitEndpoint`. It renews when a caller asks
+for a credential that has reached its renewal point — a lead derived from that
+credential's own lifetime, not a timer — and replaces one through `Refresh` after
+the far end has refused it. It is not a client of any host-specific broker
+exchange and it adds no heartbeat or registration; a consumer that speaks such an
+exchange keeps its own typed client and admits that URL through the same rule.
+
 ```go
 // At boot, in the root SDK: read the authority-bearing values once.
 authority, err := codefly.ReadAuthority(ctx,
@@ -289,8 +298,13 @@ client, err := workcontext.NewMintClient(workcontext.MintOptions{
     },
     ProjectedToken:     workcontext.ProjectedTokenFile("/var/run/secrets/codefly/token"),
     ProjectionAudience: projectionAudience,
-    // REQUIRED: sources of current trust roots, workload X.509-SVID,
-    // and admitted mint endpoint SPIFFE IDs. Re-read per handshake.
+    // The transport rule's two facts, read from the runtime: the composition's
+    // internal-transport/mesh-protected assertion and whether this is a local
+    // run. Nil keeps the default, https only.
+    Transport: codefly.For(ctx),
+    // REQUIRED for an https URL, and nil for a plaintext one: sources of
+    // current trust roots, workload X.509-SVID, and admitted mint endpoint
+    // SPIFFE IDs. Re-read per handshake.
     TrustAnchor:       readPlatformRoots,     // func() (*x509.CertPool, error)
     ClientCertificate: readWorkloadSVID,      // func() (*tls.Certificate, error)
     AdmittedPeers:     readAdmittedMintPeers, // func() ([]string, error)
@@ -304,14 +318,35 @@ string the caller had typed. Reading it through `Value` on every mint is what
 makes the pin load-bearing, and `credentialFrom` then requires the audience the
 host SIGNED to be the audience the pin answered.
 
-`URL` must be **absolute https** with no userinfo, query or fragment: the
-projected service-account token travels on that request as a bearer credential,
-so plaintext is a disclosure the configuration must not be able to choose.
+`URL` must be **absolute** with no userinfo, query or fragment, and it is
+admitted by [the transport contract](#the-transport-contract) — the same
+function that admits a verifier's key-set URL, with `Transport` answering its
+two facts. **https is admitted to any host and is the default**: with
+`Transport` nil nothing can read an assertion or an environment, so https is
+all that is admitted. **http is admitted exactly where the mesh carries the
+hop**: to an in-cluster Service address (`<service>.<namespace>.svc`, optionally
+followed by `cluster.local`) when the composition asserts
+`internal-transport/mesh-protected=true`, and to a loopback host on a local
+run. Every other http URL is `ErrInvalid` naming the half of the rule that
+refused it. The projected service-account token still travels on that request
+as a bearer credential, and the reasoning that refused plaintext still stands:
+a credential request goes over an authenticated channel or it does not go.
+In-cell that channel is the mesh's mTLS between workload identities, the mint
+endpoint is the gateway's workload port, which the mesh admits only from
+composed workloads, and the token is single-use and spent by the mint it is read
+for — so plaintext under the assertion *is* the authenticated channel, and
+plaintext anywhere the mesh does not reach is still refused by name.
 
-**The SDK owns the mint transport.** Callers provide `TrustAnchor`,
-`ClientCertificate` and `AdmittedPeers` sources; all three functions are
-required. `NewMintClient` returns `ErrInvalid` for a missing source and reads
-no sources. Every source answer is validated during dialing.
+**The SDK owns the mint transport.** For an https URL, callers provide
+`TrustAnchor`, `ClientCertificate` and `AdmittedPeers` sources; all three
+functions are required. For a plaintext URL there is no handshake for them to
+apply to, so all three **must be nil**: a source set beside a plaintext URL is a
+check that never runs, and is refused rather than ignored. `NewMintClient`
+returns `ErrInvalid` for a missing or misplaced source and reads no sources.
+Every source answer is validated during dialing. An admitted plaintext endpoint
+is dialed by the same client with the same guarantees — a fresh connection per
+request, HTTP/1.1, no compression, proxy or followed redirect — and nothing
+about TLS below applies to it.
 
 Every mint, renewal and refresh opens a **new TLS 1.3 connection**. The SDK
 reads the current anchor for the handshake, presents the workload's current
@@ -378,7 +413,7 @@ handshake, and verify deadlines, connection closure, bounded reads and recovery.
 Then, on every outbound request:
 
 ```go
-credential, err := client.Credential(ctx) // mints once; renews only at expiry
+credential, err := client.Credential(ctx) // mints once; renews one past its renewal point
 if err != nil {
     return err
 }
@@ -625,7 +660,19 @@ group, key and remedy sentence the host and the composed modules apply to their
 own in-cluster hops — reimplemented rather than imported, because a module never
 imports another module's internals, so the shared thing is the contract.
 **This is the SDK's one copy, which is what lets a consumer route every plaintext
-hop it has through one check.**
+hop it has through one check.** It is one exported function, `AdmitEndpoint`,
+with two call sites in this module: `ResolveKeySetEndpoint` admits a verifier's
+key-set URL through it, and `NewMintClient` admits `MintOptions.URL` through it,
+with `MintOptions.Transport` as the `TransportSource`. A test drives every branch
+of the rule through both and requires the same answer in the same words. A
+consumer with a URL that is neither — a runtime calling the gateway on the origin
+it mints against — admits it with the same call:
+
+```go
+// The label names the URL in a refusal and is never the value; the URL is
+// returned only on admission, parsed and canonical.
+gateway, err := workcontext.AdmitEndpoint(gatewayURL, codefly.For(ctx), "gateway")
+```
 
 | Address | Admitted |
 | --- | --- |

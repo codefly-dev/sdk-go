@@ -3,11 +3,15 @@
 A separate leaf module (`github.com/codefly-dev/sdk-go/workcontext`, Go 1.27,
 its own `go.mod`/`go.sum` and its own coverage gate). It mints nothing and
 verifies nothing: `codefly-dev/core/workcontext` is the only implementation of
-the capability and this module re-exports core's verifier by type alias, in
-`core.go`. Adding a dependency here is a design change — see
+the capability, reached here through the typed access in `core.go`; core's
+verifier itself is NOT re-exported (see "Core's verifier is NOT re-exported"
+below). Adding a dependency here is a design change — see
 `.claude/skills/dual-module-change`.
 
-Both modules pin core's **v0.19.1 release tag** (`7f78302f`). Core owns the
+Each module's `go.mod` owns its core pin. This leaf stays on core's **v0.19.1
+release tag** (`7f78302f`); the root is on core's candidate `835460f1`, the
+live-endpoint lane's green final, which is not released-pin qualification. Core
+owns the
 endpoint vocabulary: visibility is `private`/`internal`/`public`, and
 `location: external` describes an endpoint outside the system. The root SDK
 uses core's location predicate for local resolution; public visibility alone
@@ -24,7 +28,9 @@ budget. The root file carries the rule; this carries what the gates refuse.
 `TestNoCodecTouchesACapabilityByType` decides the codec rule with `go/types`.
 `TestNoSecondWorkContextImplementation` is the syntactic gate that remains.
 `scripts/check-one-implementation.sh` sweeps every published ref, reading
-imports with `go/parser`.
+imports with `go/parser`. Every ref, not a `compat/*` glob: a bullet forbidding
+the back-port of a breaking deletion once lived in the root `AGENTS.md`, and it is
+what kept the deleted implementation alive on refs CI builds, so it was deleted.
 
 **Deny by default is the spine, and it replaces an argument that lost ten
 times.** Every revision banned a LIST OF NAMES and every review found the next
@@ -77,7 +83,12 @@ qualifier, because the qualifier is the author's choice.
   `crypto/x509`, `mime`, `crypto/sha256` and `encoding/base64` each have an
   honest use in exactly one file. Whole-file is allowed-for-everything — which
   is how `x509.ParsePKCS8PrivateKey`, a signer getting a key without naming
-  `ed25519`, would be a permitted use of an allowed import.
+  `ed25519`, would be a permitted use of an allowed import. The root module's
+  `core/solutionhost` is held the same way: `endpoint_delivery.go` alone, reading
+  the delivery value the host hands over (`SolutionHostBinding`,
+  `EndpointDeliveryMaxBytes`, `ParseEndpointDelivery`) and never writing one —
+  `MarshalEndpointDelivery` is refused — with the policy file naming the same
+  file so the sweep holds it on every ref.
 - **base64 may ENCODE and never DECODE.** `cache_partition.go` builds a cache
   key. base64 decoding plus `proto.Unmarshal` is the entire second parser this
   module deleted, and the symbol rule alone cannot see it: `base64.StdEncoding`
@@ -211,6 +222,17 @@ in-cluster Service address exactly under that assertion. Both halves are
 required: the assertion covers only what a mesh can cover, and a name alone is
 not evidence a mesh wraps the wire.
 
+- **One function, `AdmitEndpoint`, exported, and two call sites here.**
+  `ResolveKeySetEndpoint` admits a verifier's key-set URL through it and
+  `validateMintURL` admits the mint endpoint through it, with
+  `MintOptions.Transport` as the mint client's `TransportSource`; a nil
+  `Transport` admits https alone, because nothing can read either fact. It is
+  exported for the URLs a consumer dials that are neither — a runtime calling the
+  gateway on the origin it mints against — so a consumer's boot refusal is this
+  rule and not a copy. The mint URL is not a mint-shaped variant of the rule:
+  `TestTheMintURLIsAdmittedByTheSameRuleAsTheKeySet` drives every branch
+  through both doors and requires the same answer in the same words. The rule
+  itself is the one the composed modules apply to `platform/gateway-endpoint`.
 - **`ClusterServiceHost` accepts `<service>.<namespace>.svc` or that followed by
   `cluster.local` and nothing else**, with both leading labels held to DNS-1123.
   The suffix is matched LITERALLY, because a name carrying an `svc` label in
@@ -363,8 +385,13 @@ that are easy to get backwards:
 
 ## The mint transport admits the peer before disclosing the projection
 
-`MintOptions` requires three sources: `TrustAnchor`, `ClientCertificate` and
-`AdmittedPeers`. Construction checks configuration without calling any source.
+`MintOptions` requires three sources for an https endpoint: `TrustAnchor`,
+`ClientCertificate` and `AdmittedPeers`. For an admitted plaintext endpoint —
+loopback on a local run, or an in-cluster Service under the mesh assertion — no
+handshake ever reads them, so all three must be nil, and one set beside a
+plaintext URL is refused at construction rather than ignored: an `AdmittedPeers`
+nothing consults reads, in the configuration, as peer admission that is
+happening. Construction checks configuration without calling any source.
 The SDK owns its HTTP client and transport; a caller can supply neither. The
 private TLS dialer reads the current anchor for normal chain and hostname
 verification. `GetClientCertificate` reads the workload's current X.509-SVID;

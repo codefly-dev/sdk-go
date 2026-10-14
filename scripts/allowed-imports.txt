@@ -64,6 +64,13 @@ root github.com/codefly-dev/core/generated/go/codefly/runnable/v0
 root github.com/codefly-dev/core/network
 root github.com/codefly-dev/core/resources
 root github.com/codefly-dev/core/runnable
+# core/solutionhost, in endpoint_delivery.go only: the reader of the endpoint
+# delivery value the host hands over with the applied presence. It uses three
+# names — the applied SolutionHostBinding, the EndpointDeliveryMaxBytes bound and
+# core's strict decoder ParseEndpointDelivery — and never MarshalEndpointDelivery:
+# the SDK reads a delivery and writes none. This line holds the import to the
+# file on every ref; narrowedImports in the Go gate holds it to those symbols.
+root github.com/codefly-dev/core/solutionhost endpoint_delivery.go
 root github.com/codefly-dev/core/standards
 root github.com/codefly-dev/core/wool
 root github.com/codefly-dev/sdk-go/receipts

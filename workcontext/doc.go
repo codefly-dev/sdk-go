@@ -12,9 +12,10 @@
 // core. What it adds around that is CONFIGURATION and never behaviour: core's
 // verifier is not re-exported, NewVerifier is the only constructor and it
 // refuses by name a verifier with no pinned issuer, no audience or no key set
-// acquired from an admitted endpoint. ResolveKeySetEndpoint is the one transport
-// guard — the host's own rule, so a plaintext hop is not a check each consumer
-// writes for itself.
+// acquired from an admitted endpoint. One transport guard, AdmitEndpoint,
+// admits the key-set URL (ResolveKeySetEndpoint), the mint URL
+// (MintOptions.Transport) and a consumer's own — the host's own rule, so a
+// plaintext hop is not a check each consumer writes for itself.
 //
 // That is a rule and not a preference, because the alternative was tried. A
 // second implementation here once signed a hand-written JSON payload while
@@ -29,8 +30,10 @@
 // What this package does own:
 //
 //   - MintClient: one credential per execution, obtained from the projected
-//     service-account token, renewed only at expiry. No heartbeat, no
-//     registration, nothing a process reports about itself.
+//     service-account token, renewed once it reaches a renewal point derived
+//     from its own lifetime or replaced by Refresh after a refusal, over https
+//     or over plaintext exactly where the mesh carries the hop. No heartbeat,
+//     no registration, nothing a process reports about itself.
 //   - The carriers: the capability's header, and the sealed installation
 //     beside it as a pre-check the far end may refuse on cheaply.
 //   - CachePartition: the identity partition a cache stack scopes entries to,

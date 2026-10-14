@@ -141,19 +141,51 @@ func newMintHost(t *testing.T, now func() time.Time) *mintHost {
 	return host
 }
 
+// newPlaintextMintHost is the same host over plain HTTP on a loopback address,
+// which is the shape the mesh contract admits on a local run. It has no CA and
+// no client certificate: there is no handshake for either to take part in.
+func newPlaintextMintHost(t *testing.T, now func() time.Time) *mintHost {
+	t.Helper()
+	host := &mintHost{
+		t: t, now: now, lifetime: 15 * time.Minute,
+		audience: testAudience, authority: newAuthority(t),
+		bodies: make(chan []byte, 64), pin: newTestPin(),
+		arrivals: make(chan mintArrival, 64),
+	}
+	host.server = &httptest.Server{Listener: newMintMemoryListener(t), Config: &http.Server{Handler: http.HandlerFunc(host.handle)}}
+	host.server.Start()
+	t.Cleanup(host.server.Close)
+	t.Cleanup(func() {
+		host.faultsMu.Lock()
+		defer host.faultsMu.Unlock()
+		require.Empty(t, host.faults, "the mint host hit something it should not have")
+	})
+	return host
+}
+
+// plaintextMint configures a client for a plaintext host: the runtime is a local
+// run and no handshake source is set, because none would ever be read.
+func plaintextMint(o *MintOptions) {
+	o.Transport = localRun
+	o.TrustAnchor, o.ClientCertificate, o.AdmittedPeers = nil, nil, nil
+}
+
 func (h *mintHost) handle(writer http.ResponseWriter, request *http.Request) {
 	h.requests.Add(1)
 	if h.before != nil {
 		h.before()
 	}
 	h.presented.Store(request.Header.Get("Authorization"))
-	select {
-	case h.arrivals <- mintArrival{
+	arrival := mintArrival{
 		authorization: request.Header.Get("Authorization"),
 		remote:        request.RemoteAddr, close: request.Close,
 		protocol: request.ProtoMajor, encoding: request.Header.Get("Accept-Encoding"),
-		tls: *request.TLS,
-	}:
+	}
+	if request.TLS != nil {
+		arrival.tls = *request.TLS
+	}
+	select {
+	case h.arrivals <- arrival:
 	default:
 	}
 	if h.answer != nil {
@@ -994,8 +1026,10 @@ func TestTheMintTransportIsOwnedByTheClient(t *testing.T) {
 	require.ErrorIs(t, client.CheckRedirect(request, nil), ErrMintUnavailable)
 }
 
-func TestNewMintClientValidatesItsConfiguration(t *testing.T) {
-	valid := MintOptions{
+// validMintOptions is a configuration NewMintClient accepts, for the tests that
+// break exactly one thing about it.
+func validMintOptions() MintOptions {
+	return MintOptions{
 		URL:                "https://mint.example/platform/_mint",
 		Authority:          newTestPin(),
 		Audience:           testAudienceName,
@@ -1005,15 +1039,54 @@ func TestNewMintClientValidatesItsConfiguration(t *testing.T) {
 		ClientCertificate:  unusedMintCertificate,
 		AdmittedPeers:      testMintPeers,
 	}
+}
+
+func TestNewMintClientValidatesItsConfiguration(t *testing.T) {
+	valid := validMintOptions()
 	_, err := NewMintClient(valid)
 	require.NoError(t, err)
 
 	for name, mutate := range map[string]func(*MintOptions){
 		"no url": func(o *MintOptions) { o.URL = "" },
 		// Plaintext is the one that mattered: the projection travels on this
-		// request as a bearer credential, so http was a disclosure the
-		// configuration could choose.
-		"plaintext http":       func(o *MintOptions) { o.URL = "http://mint.example/_mint" },
+		// request as a bearer credential, so http is admitted exactly where the
+		// mesh carries the hop and nowhere else. With no Transport nothing can
+		// say where that is, so the default is https alone.
+		"plaintext http with no transport source": func(o *MintOptions) { o.URL = "http://mint.example/_mint" },
+		"plaintext http to a loopback host with no transport source": func(o *MintOptions) {
+			o.URL = "http://127.0.0.1:8443/_mint"
+		},
+		"plaintext http to an in-cluster Service with no transport source": func(o *MintOptions) {
+			o.URL = "http://gateway.platform.svc/_mint"
+		},
+		"plaintext http to an external host under the assertion": func(o *MintOptions) {
+			o.URL, o.Transport = "http://mint.example/_mint", meshed
+			o.TrustAnchor, o.ClientCertificate, o.AdmittedPeers = nil, nil, nil
+		},
+		"plaintext http to a loopback host off a local run": func(o *MintOptions) {
+			o.URL, o.Transport = "http://127.0.0.1:8443/_mint", meshed
+			o.TrustAnchor, o.ClientCertificate, o.AdmittedPeers = nil, nil, nil
+		},
+		"plaintext http to an in-cluster Service without the assertion": func(o *MintOptions) {
+			o.URL, o.Transport = "http://gateway.platform.svc/_mint", localRun
+			o.TrustAnchor, o.ClientCertificate, o.AdmittedPeers = nil, nil, nil
+		},
+		// The assertion is read whatever the scheme, as for the key set.
+		"a misspelled assertion behind an https url": func(o *MintOptions) {
+			o.Transport = transport{assertion: "True", set: true}
+		},
+		"an unreadable assertion behind an https url": func(o *MintOptions) {
+			o.Transport = transport{failure: errors.New("the delivery could not be read")}
+		},
+		// A handshake source beside a plaintext URL is a check that never runs.
+		"a trust anchor beside a plaintext url": func(o *MintOptions) {
+			o.URL, o.Transport = "http://gateway.platform.svc/_mint", meshed
+			o.ClientCertificate, o.AdmittedPeers = nil, nil
+		},
+		"admitted peers beside a plaintext url": func(o *MintOptions) {
+			o.URL, o.Transport = "http://127.0.0.1:8443/_mint", localRun
+			o.TrustAnchor, o.ClientCertificate = nil, nil
+		},
 		"url with query":       func(o *MintOptions) { o.URL = "https://mint.example/_mint?as=root" },
 		"url with credentials": func(o *MintOptions) { o.URL = "https://user:pass@mint.example/_mint" },
 		"url with fragment":    func(o *MintOptions) { o.URL = "https://mint.example/_mint#f" },
