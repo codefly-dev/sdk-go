@@ -16,7 +16,7 @@ import (
 //
 //	workspaces:
 //	  - name: platform-core
-//	    source: obin-ai/platform-core
+//	    source: example-org/platform-core
 //	    version: "0.0.10"
 //
 // Only the CLI can compose that: it acquires the release and registers core's
@@ -34,7 +34,7 @@ func writeSolutionImportingItsPlatformByRelease(t *testing.T) string {
 	t.Helper()
 	root := t.TempDir()
 	writeFile(t, filepath.Join(root, "workspace.codefly.yaml"),
-		"name: lastlogin-go\nlayout: modules\nworkspaces:\n  - name: platform-core\n    source: obin-ai/platform-core\n    version: \"0.0.10\"\nmodules:\n  - name: lastlogin-go\n    path: .\n")
+		"name: lastlogin-go\nlayout: modules\nworkspaces:\n  - name: platform-core\n    source: example-org/platform-core\n    version: \"0.0.10\"\nmodules:\n  - name: lastlogin-go\n    path: .\n")
 	writeFile(t, filepath.Join(root, "module.codefly.yaml"),
 		"kind: module\nname: lastlogin-go\nservice-entry: backend\nservices:\n  - name: backend\n")
 	backend := filepath.Join(root, "services", "backend")
