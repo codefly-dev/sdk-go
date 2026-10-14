@@ -4,7 +4,7 @@ go 1.27.0
 
 require (
 	connectrpc.com/connect v1.21.0
-	github.com/codefly-dev/core v0.19.5-0.20261013202057-886d218d0fb0
+	github.com/codefly-dev/core v0.19.5-0.20261014005330-835460f16fb5
 	github.com/jackc/pgx/v5 v5.10.0
 	github.com/stretchr/testify v1.12.1
 	google.golang.org/grpc v1.84.0
