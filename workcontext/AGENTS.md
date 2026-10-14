@@ -9,8 +9,9 @@ below). Adding a dependency here is a design change — see
 `.claude/skills/dual-module-change`.
 
 Each module's `go.mod` owns its core pin. This leaf stays on core's **v0.19.1
-release tag** (`7f78302f`); the root is on the candidate live-endpoint contract
-(`886d218d`, core#797), which is not released-pin qualification. Core owns the
+release tag** (`7f78302f`); the root is on core's candidate `835460f1`, the
+live-endpoint lane's green final, which is not released-pin qualification. Core
+owns the
 endpoint vocabulary: visibility is `private`/`internal`/`public`, and
 `location: external` describes an endpoint outside the system. The root SDK
 uses core's location predicate for local resolution; public visibility alone
@@ -27,7 +28,9 @@ budget. The root file carries the rule; this carries what the gates refuse.
 `TestNoCodecTouchesACapabilityByType` decides the codec rule with `go/types`.
 `TestNoSecondWorkContextImplementation` is the syntactic gate that remains.
 `scripts/check-one-implementation.sh` sweeps every published ref, reading
-imports with `go/parser`.
+imports with `go/parser`. Every ref, not a `compat/*` glob: a bullet forbidding
+the back-port of a breaking deletion once lived in the root `AGENTS.md`, and it is
+what kept the deleted implementation alive on refs CI builds, so it was deleted.
 
 **Deny by default is the spine, and it replaces an argument that lost ten
 times.** Every revision banned a LIST OF NAMES and every review found the next

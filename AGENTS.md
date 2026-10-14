@@ -15,9 +15,8 @@ repo is deliberate and encapsulated; a new one anywhere else is the bug.
 ## How to behave
 
 Fleet standard — [handbook#68](https://github.com/obin-ai/handbook/issues/68).
-They land hard here: this is a *library*, so its defects are observed in someone
-else's service, where hand-assembling the value the SDK failed to resolve always
-looks like the faster path.
+They land hard here: this is a *library*; its defects surface in someone else's
+service, where hand-assembling what the SDK failed to resolve always looks faster.
 
 - **A gap in the tooling is a bug in the tooling — never a reason to reach
   around it.** When a service cannot get a value out of the SDK, the answer is
@@ -68,13 +67,11 @@ The receipts store's tests **skip** without `CODEFLY_TEST_POSTGRES_DSN`, and a
 skipped test is green. CI's `coverage` and `race` jobs run a Postgres service
 and set it; a local run that does not is not the gate.
 
-Run each of those a second time from `workcontext/` — it is a separate module
-with its own `go.mod` and `go.sum`, so nothing at the root covers it. Lint finds
-the root `.golangci.yaml` by walking up, so it needs no config of its own.
+Run each again from `workcontext/`: a separate module with its own `go.mod` and
+`go.sum`, so nothing at the root covers it; lint walks up to `.golangci.yaml`.
 
-Coverage gates differ by module and are not interchangeable — root
-`.testcoverage.yaml`, `workcontext` an `awk` on the **module total** in `go.yml`.
-The `dual-module-change` skill has the table and the command.
+Coverage gates differ by module: root `.testcoverage.yaml`, `workcontext` an
+`awk` on the **module total** in `go.yml`; `dual-module-change` has the command.
 
 ## Where things live
 
@@ -98,14 +95,14 @@ dependency to it is still a design change, not a detail — see the skill below.
 
 ## Rules that bite
 
-- **Each module's go.mod owns its Core pin.** Root: the candidate live-endpoint
-  contract `886d218d` (not released-pin qualification); `workcontext`: v0.19.1.
-  Endpoint visibility is exactly `private`/`internal`/`public`; `external` is a
-  location. Local fallback uses core's `Endpoint.External()` and resolves public
-  endpoints with no external location. Do not recreate removed visibility names.
-  Keep the calling module separate from the queried producer; core's
-  `SelectEndpointForReference` owns selection on module-adjusted declarations.
-  `Init` pins that consumer once; endpoint resolution refuses identity drift.
+- **Each module's go.mod owns its Core pin.** Root: candidate `835460f1` (not
+  released-pin qualification); `workcontext`: v0.19.1. Endpoint visibility is
+  exactly `private`/`internal`/`public`; `external` is a location. Local fallback
+  uses core's `Endpoint.External()` and resolves public endpoints with no external
+  location. Do not recreate removed visibility names. Keep the calling module
+  separate from the queried producer; core's `SelectEndpointForReference` owns
+  selection on module-adjusted declarations. `Init` pins that consumer once;
+  endpoint resolution refuses identity drift.
 - **A deployed process has no workspace, so its carriers are authoritative.**
   The builder image ships the binary alone, including in local Kubernetes pods.
   In any environment with no workspace on disk, `ResolveNetworkInstance` reads
@@ -117,7 +114,13 @@ dependency to it is still a design change, not a detail — see the skill below.
   environment. A workspace that is not this process's composition counts as none
   (`internal/enclosing`, #66): with `CODEFLY__WORKSPACE` injected only that name
   counts, and another is never even loaded; it must also carry the queried
-  module. With nothing injected, the workspace found is used as found.
+  module. With nothing injected, the workspace found is used as found. The
+  composition's own workspace that only the host can compose — it imports a
+  workspace by release, which this SDK never acquires — counts as none too
+  (`enclosing.HostComposed`, via core's `WorkspaceResolver`): the carriers answer
+  and absence says why. `ResolveDeliveredNetworkInstance(applied, raw)` takes the
+  host's applied presence and the delivery value beside it; it reads no file,
+  directory or environment and falls back to nothing.
 - **`CODEFLY__` is spelled in this repo, nowhere else.** A consumer needing a
   value gets a typed accessor here; the prefix constant lives in
   `runtime_value.go` for that reason.
@@ -171,9 +174,7 @@ dependency to it is still a design change, not a detail — see the skill below.
   deleted implementation, so retiring the three NAMED compat refs would have
   turned the gate green with 19 copies published. A line that cannot meet a
   rule is **retired** by the owner, never granted a period during which the
-  rule is false here. A bullet forbidding the back-port of a breaking deletion
-  used to live here; it is what kept the implementation alive on refs CI
-  builds, so it is deleted.
+  rule is false here.
 
 ## Procedures
 
@@ -190,8 +191,7 @@ Loaded on demand rather than carried here — `.claude/skills/`:
 - The PR template asks for the fix-or-hack classification and for what you did
   not verify. Both are rules above; answer them there rather than omitting them.
 - `agentcontext_test.go` holds this file's length budget and each skill's
-  frontmatter contract. It runs under `go test ./...`, so CI enforces it with no
-  workflow change.
+  frontmatter contract; it runs under `go test ./...`, so CI enforces it.
 - `TestQueryDoesNotExposeDefaultNetworkAPI` holds the deleted query API absent,
   including inert methods or fields. Legacy means delete, not deprecate.
 - Keep this file under ~150 lines (hard cap 200). Push depth into a nested
