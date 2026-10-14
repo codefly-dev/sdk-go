@@ -18,20 +18,22 @@ Fleet standard — [handbook#68](https://github.com/obin-ai/handbook/issues/68).
 They land hard here: this is a *library*; its defects surface in someone else's
 service, where hand-assembling what the SDK failed to resolve always looks faster.
 
+- **Prove reuse before you build**, and **build the simplest thing that works;
+  size is the signal**: fill a gap on what the platform has, keep a coding task
+  to about **500 hand-written lines**, and past **2,000** **stop and ask the
+  user**. Both in full in [the handbook](https://github.com/obin-ai/handbook/blob/main/AGENTS.md).
 - **A gap in the tooling is a bug in the tooling — never a reason to reach
-  around it.** When a service cannot get a value out of the SDK, the answer is
-  an accessor added here, or a capability fixed in whichever tool owns it, named
-  in the PR. It is never a hand-written env var in the consumer — not as a
-  "workaround", not "just this once", not "until the accessor lands".
+  around it.** When a service cannot get a value out of the SDK, the answer is an
+  accessor added here, or a capability fixed in whichever tool owns it, named in
+  the PR — never a hand-written env var in the consumer, not "just this once".
 - **Never hack. Provide the best fix, even when it spans repos.** The fix living
   in `codefly-dev/core` or `codefly-dev/cli` is not a reason to work around it
   here. Open the PR there and consume the reviewed result. When it genuinely
   cannot be fixed now, the deliverable is a precise issue against that owner
   plus an explicitly labelled stopgap — never an unlabelled one.
 - **Classify every change that makes something work**, in the PR body: a *fix*
-  at the place that owns the behaviour, or a *hack*. A hack does not become a
-  fix by working, by being small, by being local, or by the real fix belonging
-  elsewhere.
+  at the place that owns the behaviour, or a *hack* — which does not become a fix
+  by working, by being small, by being local, or by the fix belonging elsewhere.
 - **Never hardcode what the system resolves** — injected environment, derived
   ports, service addresses, credentials copied out of another component. This
   module is the resolution: addresses come from
@@ -119,8 +121,7 @@ dependency to it is still a design change, not a detail — see the skill below.
   workspace by release, which this SDK never acquires — counts as none too
   (`enclosing.HostComposed`, via core's `WorkspaceResolver`): the carriers answer
   and absence says why. `ResolveDeliveredNetworkInstance(applied, raw)` takes the
-  host's applied presence and the delivery value beside it; it reads no file,
-  directory or environment and falls back to nothing.
+  host's applied presence and the value beside it: no file, no environment, no fallback.
 - **`CODEFLY__` is spelled in this repo, nowhere else.** A consumer needing a
   value gets a typed accessor here; the prefix constant lives in
   `runtime_value.go` for that reason.
@@ -188,13 +189,12 @@ Loaded on demand rather than carried here — `.claude/skills/`:
 ## Workflow
 
 - Branch and PR; never commit to `main`. Conventional Commits for the title.
-- The PR template asks for the fix-or-hack classification and for what you did
-  not verify. Both are rules above; answer them there rather than omitting them.
+- The PR template asks for both classifications above; answer them there.
 - `agentcontext_test.go` holds this file's length budget and each skill's
-  frontmatter contract; it runs under `go test ./...`, so CI enforces it.
+  frontmatter contract, under `go test ./...` — CI needs no workflow change.
 - `TestQueryDoesNotExposeDefaultNetworkAPI` holds the deleted query API absent,
   including inert methods or fields. Legacy means delete, not deprecate.
 - Keep this file under ~150 lines (hard cap 200). Push depth into a nested
   `AGENTS.md` beside what it describes, or into `.claude/skills/`.
-- `CLAUDE.md` is a pointer to this file. Keep one canonical source.
-- Treat this file as code: the PR that changes a process updates it.
+- `CLAUDE.md` points here — one canonical source, and the PR that changes a
+  process updates it.
