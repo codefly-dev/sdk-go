@@ -177,3 +177,11 @@ Missing, malformed, withdrawn or mismatched delivery returns
 `ErrEndpointDeliveryUnavailable`. This API never falls back to a startup carrier
 or a locally computed port, including during an upgrade. Existing ordinary
 `ResolveNetworkInstance` queries keep their existing composition semantics.
+
+The reader takes four names from core's `solutionhost` package — the applied
+`SolutionHostBinding`, `EndpointDeliveryFilename`, `EndpointDeliveryMaxBytes` and
+the strict decoder `ParseEndpointDelivery` — and never `MarshalEndpointDelivery`:
+the SDK reads a projection and writes none, because a projection it produced
+itself would be a delivery nobody applied. The import policy
+(`scripts/allowed-imports.txt`) admits the package for `endpoint_delivery.go`
+alone, and the Go gate holds it to those symbols.

@@ -176,6 +176,20 @@ var narrowedImports = map[string]struct {
 		},
 		symbols: []string{"Sum256", "New", "Size"},
 	},
+	// core/solutionhost is the host presence contract, and the root module
+	// reads ONE thing through it: the CLI's live endpoint projection, in
+	// endpoint_delivery.go. That reader needs the applied binding's type, the
+	// projection's file name and size bound, and core's strict decoder — and it
+	// never WRITES a projection: MarshalEndpointDelivery is refused, because a
+	// projection the SDK produced itself would be a delivery nobody applied.
+	// The policy file names the same file, so the sweep holds it on every ref.
+	"github.com/codefly-dev/core/solutionhost": {
+		files: []string{"endpoint_delivery.go"},
+		symbols: []string{
+			"SolutionHostBinding", "EndpointDeliveryFilename",
+			"EndpointDeliveryMaxBytes", "ParseEndpointDelivery",
+		},
+	},
 	// DYNAMIC MESSAGES AND THE TYPE REGISTRY, which the receipts replay path
 	// genuinely needs: a recorded response is decoded into whatever type the
 	// method answers with, resolved at runtime.
@@ -1659,6 +1673,28 @@ func key(der []byte) (any, error) { return x509.ParsePKCS8PrivateKey(der) }`,
 import "crypto/tls"
 var _ = tls.Config{}`,
 			says: `imports "crypto/tls", which only`,
+		},
+		// THE ROOT MODULE'S ONE NARROWED CORE IMPORT. core/solutionhost is
+		// admitted for the live endpoint reader alone, so another root file
+		// importing it is a finding — and so is the reader WRITING a
+		// projection through it: a delivery the SDK produced itself is a
+		// delivery nobody applied. Both halves, so neither is green by the
+		// other.
+		"core/solutionhost imported by a root file that is not the delivery reader": {
+			path: "for.go",
+			source: `package codefly
+import "github.com/codefly-dev/core/solutionhost"
+var _ = solutionhost.EndpointDeliveryMaxBytes`,
+			says: `imports "github.com/codefly-dev/core/solutionhost", which only`,
+		},
+		"the delivery reader writing a projection instead of reading one": {
+			path: "endpoint_delivery.go",
+			source: `package codefly
+import "github.com/codefly-dev/core/solutionhost"
+func write(applied *solutionhost.SolutionHostBinding) ([]byte, error) {
+	return solutionhost.MarshalEndpointDelivery(nil, applied)
+}`,
+			says: "uses solutionhost.MarshalEndpointDelivery",
 		},
 		"a second encoding of the message, in JSON, without encoding/json": {
 			path: "workcontext/carrier.go",
