@@ -70,13 +70,17 @@ func composedPackages(ctx context.Context) ([]*composition.PackageManifest, []st
 	// Only the process's own composition says which packages it composes. A
 	// producer's workspace above a composed module's checkout or cached tag
 	// would resolve the producer's fixtures, not the composition's.
-	workspace, unreadable, err := enclosing.Composition(ctx)
+	workspace, unreadable, hostComposed, err := enclosing.Composition(ctx)
 	if err != nil {
 		return nil, nil, fmt.Errorf("resolve Codefly workspace: %w", err)
 	}
 	if unreadable != nil {
 		return nil, nil, fmt.Errorf("resolve Codefly workspace: the workspace file in %s could not be read, so it was not taken for the composition %q: %w",
 			unreadable.Dir, enclosing.Injected(), unreadable.Err)
+	}
+	if hostComposed != nil {
+		return nil, nil, fmt.Errorf("resolve Codefly workspace: the workspace in %s is the composition's own but only the host can compose it, so the packages it composes were not read here: %w",
+			hostComposed.Dir, hostComposed.Err)
 	}
 	if workspace == nil {
 		if injected := enclosing.Injected(); injected != "" {

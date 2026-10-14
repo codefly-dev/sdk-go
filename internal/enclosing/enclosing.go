@@ -7,6 +7,8 @@ package enclosing
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"os"
 	"strings"
 
@@ -30,6 +32,31 @@ type Unreadable struct {
 	Err error
 }
 
+// ErrHostResolution is this SDK's answer when core asks it to acquire a
+// workspace that a composition imports by release: it acquires nothing. Core's
+// WorkspaceResolver is the acquisition boundary a host supplies — the CLI
+// fetches the release and registers one — and an SDK that resolved values by
+// fetching repositories would be the CLI again. Core wraps the answer into its
+// load failure, so a caller tells "only the host can compose this" from every
+// other load failure with errors.Is, never by reading a message.
+var ErrHostResolution = errors.New("this SDK acquires no released workspace; only the host resolves it")
+
+func refuseAcquisition(_ context.Context, ref *resources.WorkspaceReference) (string, error) {
+	return "", fmt.Errorf("%w: %s at %s@%s", ErrHostResolution, ref.Name, ref.Source, ref.Version)
+}
+
+// HostComposed is the composition's own workspace file above the process that
+// only the host can compose: it imports a workspace by release, and this SDK
+// acquires nothing. It is not taken as a loaded composition, so the carriers
+// the composition injected answer, exactly as they do for a process with no
+// workspace, and a caller reporting an absent carrier says this is why no
+// declaration was judged here. Err is core's load failure, wrapping
+// ErrHostResolution and naming the import.
+type HostComposed struct {
+	Dir string
+	Err error
+}
+
 // Composition returns the workspace above the process when it is the
 // composition the process runs in, loaded and composed, and nil when there is
 // none or the one found is someone else's.
@@ -39,9 +66,7 @@ type Unreadable struct {
 // own checkout, a released tag in the module cache and a solution's tag all
 // ship their producer's workspace file, which the process finds first and which
 // says nothing about the composition it runs in. Such a workspace is never
-// loaded: loading composes its imports, and a solution's tag imports its
-// platform by release, which this SDK cannot resolve ("requires host
-// resolution"). A workspace file that cannot be decoded cannot claim the name
+// loaded. A workspace file that cannot be decoded cannot claim the name
 // either; it is returned as Unreadable rather than loaded, so the caller can
 // still answer from what the composition injected, and say why the file did
 // not count when nothing was.
@@ -49,22 +74,40 @@ type Unreadable struct {
 // With nothing injected, no composition started the process, and the enclosing
 // workspace is the only one there is: it is loaded as found, and a load failure
 // — an undecodable file included — is returned.
-func Composition(ctx context.Context) (*resources.Workspace, *Unreadable, error) {
+//
+// Loading composes the workspace's imports, and a workspace that imports
+// another by release — a solution importing its platform — needs that import
+// acquired, which only the host does: the CLI fetches the release and hands
+// core a WorkspaceResolver. This SDK hands core one that refuses, so core's
+// own loader says exactly when that acquisition is the only thing between the
+// file and a composition; the file is then returned as HostComposed rather
+// than loaded. The process is inside its composition, the composition injected
+// the carriers for what it may reach, and those answer — as for a process with
+// no workspace — while an import the query never needed refuses nothing. A
+// declaration this SDK cannot compose is not judged here; the composition
+// judged it when it injected the carrier.
+func Composition(ctx context.Context) (*resources.Workspace, *Unreadable, *HostComposed, error) {
 	dir, err := find(ctx)
 	if err != nil || dir == "" {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 	if injected := Injected(); injected != "" {
 		name, decodeErr := declaredName(ctx, dir)
 		if decodeErr != nil {
-			return nil, &Unreadable{Dir: dir, Err: decodeErr}, nil
+			return nil, &Unreadable{Dir: dir, Err: decodeErr}, nil, nil
 		}
 		if name != injected {
-			return nil, nil, nil
+			return nil, nil, nil, nil
 		}
 	}
-	workspace, err := resources.LoadWorkspaceFromDir(ctx, dir)
-	return workspace, nil, err
+	workspace, err := resources.LoadWorkspaceFromDir(resources.WithWorkspaceResolver(ctx, refuseAcquisition), dir)
+	if err != nil {
+		if errors.Is(err, ErrHostResolution) {
+			return nil, nil, &HostComposed{Dir: dir, Err: err}, nil
+		}
+		return nil, nil, nil, err
+	}
+	return workspace, nil, nil, nil
 }
 
 // Name is the composition's name: the injected one, else the name the
