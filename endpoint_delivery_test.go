@@ -13,50 +13,59 @@ import (
 
 func TestDeliveredEndpointsChangeWithoutReloadAndNeverResurrectBootCarriers(t *testing.T) {
 	initEndpointConsumer(t, "platform")
-	dir := t.TempDir()
-	t.Setenv(resources.EndpointDeliveryDirectoryKey, dir)
-	raw, err := solutionhost.FixtureDocument(solutionhost.DocumentTypePresence, "valid")
+	presence, err := solutionhost.FixtureDocument(solutionhost.DocumentTypePresence, "valid")
 	require.NoError(t, err)
-	applied, err := solutionhost.Parse(raw)
+	applied, err := solutionhost.Parse(presence)
 	require.NoError(t, err)
 	endpoint := applied.Endpoints[0]
 	key := resources.EndpointAsEnvironmentVariableKey(&resources.EndpointInformation{
 		Module: endpoint.Module, Service: endpoint.Service, Name: endpoint.Name, API: endpoint.API,
 	})
+	// A boot carrier for the same endpoint, and a projection file in a delivery
+	// directory the environment names: neither may ever answer this query.
 	t.Setenv(key, "http://stale.example:9000")
+	directory := t.TempDir()
+	t.Setenv(resources.EndpointDeliveryDirectoryKey, directory)
 	require.NoError(t, codefly.LoadEnvironmentVariables())
 	query := codefly.For(t.Context()).Module(endpoint.Module).Service(endpoint.Service).Endpoint(endpoint.Name).API(endpoint.API)
-	filename, err := solutionhost.EndpointDeliveryFilename(applied)
-	require.NoError(t, err)
-	path := filepath.Join(dir, filename)
-	write := func(document *solutionhost.SolutionHostBinding, carriers map[string]string) {
+	deliver := func(document *solutionhost.SolutionHostBinding, carriers map[string]string) []byte {
 		t.Helper()
 		data, err := solutionhost.MarshalEndpointDelivery(document, carriers)
 		require.NoError(t, err)
-		require.NoError(t, os.WriteFile(path+".tmp", data, 0o600))
-		require.NoError(t, os.Rename(path+".tmp", path))
+		return data
 	}
-	_, err = query.ResolveDeliveredNetworkInstance(applied)
-	require.ErrorIs(t, err, codefly.ErrEndpointDeliveryUnavailable)
-	write(applied, map[string]string{key: "http://first.example:8080"})
-	first, err := query.ResolveDeliveredNetworkInstance(applied)
+	filename, err := solutionhost.EndpointDeliveryFilename(applied)
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(filepath.Join(directory, filename),
+		deliver(applied, map[string]string{key: "http://mounted.example:7000"}), 0o600))
+
+	_, err = query.ResolveDeliveredNetworkInstance(applied, nil)
+	require.ErrorIs(t, err, codefly.ErrEndpointDeliveryUnavailable,
+		"no value: neither the boot carrier nor a file in the named directory may answer")
+	first, err := query.ResolveDeliveredNetworkInstance(applied, deliver(applied, map[string]string{key: "http://first.example:8080"}))
 	require.NoError(t, err)
 	require.Contains(t, first.Address, "first.example")
+
 	next := *applied
 	next.Generation++
-	write(&next, map[string]string{key: "http://second.example:8081"})
-	_, err = query.ResolveDeliveredNetworkInstance(applied)
+	newer := deliver(&next, map[string]string{key: "http://second.example:8081"})
+	_, err = query.ResolveDeliveredNetworkInstance(applied, newer)
 	require.ErrorIs(t, err, codefly.ErrEndpointDeliveryUnavailable, "new delivery cannot serve old applied authority")
-	second, err := query.ResolveDeliveredNetworkInstance(&next)
+	_, err = query.ResolveDeliveredNetworkInstance(&next, deliver(applied, map[string]string{key: "http://first.example:8080"}))
+	require.ErrorIs(t, err, codefly.ErrEndpointDeliveryUnavailable, "old delivery cannot serve the new applied authority")
+	second, err := query.ResolveDeliveredNetworkInstance(&next, newer)
 	require.NoError(t, err)
 	require.Contains(t, second.Address, "second.example")
-	write(&next, nil)
-	_, err = query.ResolveDeliveredNetworkInstance(&next)
-	require.ErrorIs(t, err, codefly.ErrEndpointDeliveryUnavailable, "empty projection cannot fall back to the boot carrier")
-	require.NoError(t, os.Remove(path))
-	_, err = query.ResolveDeliveredNetworkInstance(&next)
+
+	_, err = query.ResolveDeliveredNetworkInstance(&next, deliver(&next, nil))
+	require.ErrorIs(t, err, codefly.ErrEndpointDeliveryUnavailable, "a delivery without this endpoint cannot fall back to the boot carrier")
+	_, err = query.ResolveDeliveredNetworkInstance(&next, []byte{})
 	require.ErrorIs(t, err, codefly.ErrEndpointDeliveryUnavailable, "withdrawal cannot resurrect the boot carrier")
-	require.NoError(t, os.WriteFile(path, []byte("not a projection"), 0o600))
-	_, err = query.ResolveDeliveredNetworkInstance(&next)
+	_, err = query.ResolveDeliveredNetworkInstance(&next, []byte("not a projection"))
 	require.ErrorIs(t, err, codefly.ErrEndpointDeliveryUnavailable)
+	_, err = query.ResolveDeliveredNetworkInstance(nil, newer)
+	require.ErrorIs(t, err, codefly.ErrEndpointDeliveryUnavailable, "no applied document, no route")
+	oversized := make([]byte, solutionhost.EndpointDeliveryMaxBytes+1)
+	_, err = query.ResolveDeliveredNetworkInstance(&next, oversized)
+	require.ErrorIs(t, err, codefly.ErrEndpointDeliveryUnavailable, "over the bound is refused before decoding")
 }

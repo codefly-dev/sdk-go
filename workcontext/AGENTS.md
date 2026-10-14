@@ -82,7 +82,7 @@ qualifier, because the qualifier is the author's choice.
   is how `x509.ParsePKCS8PrivateKey`, a signer getting a key without naming
   `ed25519`, would be a permitted use of an allowed import. The root module's
   `core/solutionhost` is held the same way: `endpoint_delivery.go` alone, reading
-  a projection (`SolutionHostBinding`, `EndpointDeliveryFilename`,
+  the delivery value the host hands over (`SolutionHostBinding`,
   `EndpointDeliveryMaxBytes`, `ParseEndpointDelivery`) and never writing one —
   `MarshalEndpointDelivery` is refused — with the policy file naming the same
   file so the sweep holds it on every ref.
