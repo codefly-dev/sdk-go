@@ -270,10 +270,12 @@ where it asserts them:
 
 `MintClient` is the SDK's generic mint transport: one credential per execution
 from whichever mint endpoint the composition names, over this module's JSON
-exchange, renewed only at expiry, with the URL admitted by `AdmitEndpoint`. It is
-not a client of any host-specific broker exchange and it adds no heartbeat or
-registration; a consumer that speaks such an exchange keeps its own typed client
-and admits that URL through the same rule.
+exchange, with the URL admitted by `AdmitEndpoint`. It renews when a caller asks
+for a credential that has reached its renewal point — a lead derived from that
+credential's own lifetime, not a timer — and replaces one through `Refresh` after
+the far end has refused it. It is not a client of any host-specific broker
+exchange and it adds no heartbeat or registration; a consumer that speaks such an
+exchange keeps its own typed client and admits that URL through the same rule.
 
 ```go
 // At boot, in the root SDK: read the authority-bearing values once.
@@ -411,7 +413,7 @@ handshake, and verify deadlines, connection closure, bounded reads and recovery.
 Then, on every outbound request:
 
 ```go
-credential, err := client.Credential(ctx) // mints once; renews only at expiry
+credential, err := client.Credential(ctx) // mints once; renews one past its renewal point
 if err != nil {
     return err
 }

@@ -3,11 +3,14 @@
 A separate leaf module (`github.com/codefly-dev/sdk-go/workcontext`, Go 1.27,
 its own `go.mod`/`go.sum` and its own coverage gate). It mints nothing and
 verifies nothing: `codefly-dev/core/workcontext` is the only implementation of
-the capability and this module re-exports core's verifier by type alias, in
-`core.go`. Adding a dependency here is a design change — see
+the capability, reached here through the typed access in `core.go`; core's
+verifier itself is NOT re-exported (see "Core's verifier is NOT re-exported"
+below). Adding a dependency here is a design change — see
 `.claude/skills/dual-module-change`.
 
-Both modules pin core's **v0.19.1 release tag** (`7f78302f`). Core owns the
+Each module's `go.mod` owns its core pin. This leaf stays on core's **v0.19.1
+release tag** (`7f78302f`); the root is on the candidate live-endpoint contract
+(`886d218d`, core#797), which is not released-pin qualification. Core owns the
 endpoint vocabulary: visibility is `private`/`internal`/`public`, and
 `location: external` describes an endpoint outside the system. The root SDK
 uses core's location predicate for local resolution; public visibility alone

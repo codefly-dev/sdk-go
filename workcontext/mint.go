@@ -297,8 +297,9 @@ type MintOptions struct {
 }
 
 // Credential is the sealed capability a process holds for its execution. It is
-// obtained once by Mint and replaced only by renewal at expiry or by Refresh
-// after the host has refused it.
+// obtained once by Mint and replaced only by renewal once it reaches its renewal
+// point, a lead derived from its own lifetime, or by Refresh after the host has
+// refused it.
 type Credential struct {
 	token     string
 	seal      *SealedValues

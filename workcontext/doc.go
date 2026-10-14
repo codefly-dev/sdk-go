@@ -30,9 +30,10 @@
 // What this package does own:
 //
 //   - MintClient: one credential per execution, obtained from the projected
-//     service-account token, renewed only at expiry, over https or over
-//     plaintext exactly where the mesh carries the hop. No heartbeat, no
-//     registration, nothing a process reports about itself.
+//     service-account token, renewed once it reaches a renewal point derived
+//     from its own lifetime or replaced by Refresh after a refusal, over https
+//     or over plaintext exactly where the mesh carries the hop. No heartbeat,
+//     no registration, nothing a process reports about itself.
 //   - The carriers: the capability's header, and the sealed installation
 //     beside it as a pre-check the far end may refuse on cheaply.
 //   - CachePartition: the identity partition a cache stack scopes entries to,
