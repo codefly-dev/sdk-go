@@ -124,7 +124,11 @@ var ErrEndpointCarrierAbsent = errors.New("codefly: no carrier for the endpoint 
 // that workspace is never loaded, and the process is answered exactly as one
 // with no workspace is — from the carriers, never from that workspace's
 // declarations or native map. With no injected composition, the enclosing
-// workspace is the only one there is and is used as found.
+// workspace is the only one there is and is used as found. The composition's
+// own workspace that only the host can compose — it imports a workspace by
+// release, which this SDK does not acquire — is answered the same way: from the
+// carriers the composition injected, and an absent carrier says why no
+// declaration was judged here.
 func (q *Query) ResolveNetworkInstance() (*resources.NetworkInstance, error) {
 	if err := checkConsumerIdentity(q.consumerModule); err != nil {
 		return nil, err
@@ -133,15 +137,21 @@ func (q *Query) ResolveNetworkInstance() (*resources.NetworkInstance, error) {
 	if strings.TrimSpace(q.module) == "" || strings.TrimSpace(q.service) == "" {
 		return nil, errors.New("module and service are required for endpoint selection")
 	}
-	workspace, unreadable, err := enclosing.Composition(q.ctx)
+	workspace, unreadable, hostComposed, err := enclosing.Composition(q.ctx)
 	if err != nil {
 		return nil, err
 	}
 	if workspace == nil {
 		instance, carrierErr := q.resolveFromAuthoritativeCarrier()
-		if unreadable != nil && errors.Is(carrierErr, ErrEndpointCarrierAbsent) {
-			return nil, fmt.Errorf("%w; the workspace file in %s could not be read, so it was not taken for the composition %q: %w",
-				carrierErr, unreadable.Dir, enclosing.Injected(), unreadable.Err)
+		if errors.Is(carrierErr, ErrEndpointCarrierAbsent) {
+			if unreadable != nil {
+				return nil, fmt.Errorf("%w; the workspace file in %s could not be read, so it was not taken for the composition %q: %w",
+					carrierErr, unreadable.Dir, enclosing.Injected(), unreadable.Err)
+			}
+			if hostComposed != nil {
+				return nil, fmt.Errorf("%w; the workspace in %s is the composition's own but only the host can compose it, so no declaration was judged here and the composition's carriers are the only answer: %w",
+					carrierErr, hostComposed.Dir, hostComposed.Err)
+			}
 		}
 		return instance, carrierErr
 	}
@@ -519,13 +529,17 @@ func (q *Query) localConfigurationValue(infoName string, key string, secret bool
 	// Only the process's own composition holds its local configuration files: a
 	// producer's workspace above a composed module's checkout or cached tag
 	// holds the producer's, under a module name that may even match.
-	workspace, unreadable, workspaceErr := enclosing.Composition(q.ctx)
+	workspace, unreadable, hostComposed, workspaceErr := enclosing.Composition(q.ctx)
 	if workspaceErr != nil {
 		return "", workspaceErr
 	}
 	if unreadable != nil {
 		return "", w.NewError("no %s value for %s/%s in service %s: the workspace file in %s could not be read, so it was not taken for the composition %q: %s",
 			localValueKind(secret), infoName, key, q.service, unreadable.Dir, enclosing.Injected(), unreadable.Err)
+	}
+	if hostComposed != nil {
+		return "", w.NewError("no %s value for %s/%s in service %s: the workspace in %s is the composition's own but only the host can compose it, so its local configuration files were not read: %s",
+			localValueKind(secret), infoName, key, q.service, hostComposed.Dir, hostComposed.Err)
 	}
 	if workspace == nil {
 		return "", w.NewError("no %s value for %s/%s in service %s: no workspace on disk is this process's composition",
