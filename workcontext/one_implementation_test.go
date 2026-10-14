@@ -177,18 +177,16 @@ var narrowedImports = map[string]struct {
 		symbols: []string{"Sum256", "New", "Size"},
 	},
 	// core/solutionhost is the host presence contract, and the root module
-	// reads ONE thing through it: the CLI's live endpoint projection, in
-	// endpoint_delivery.go. That reader needs the applied binding's type, the
-	// projection's file name and size bound, and core's strict decoder — and it
-	// never WRITES a projection: MarshalEndpointDelivery is refused, because a
-	// projection the SDK produced itself would be a delivery nobody applied.
-	// The policy file names the same file, so the sweep holds it on every ref.
+	// reads ONE thing through it: the endpoint delivery value the host hands
+	// over with the applied presence, in endpoint_delivery.go. That reader
+	// needs the applied binding's type, the value's size bound and core's
+	// strict decoder — and it never WRITES a delivery: MarshalEndpointDelivery
+	// is refused, because a delivery the SDK produced itself would be one
+	// nobody applied. The policy file names the same file, so the sweep holds
+	// it on every ref.
 	"github.com/codefly-dev/core/solutionhost": {
-		files: []string{"endpoint_delivery.go"},
-		symbols: []string{
-			"SolutionHostBinding", "EndpointDeliveryFilename",
-			"EndpointDeliveryMaxBytes", "ParseEndpointDelivery",
-		},
+		files:   []string{"endpoint_delivery.go"},
+		symbols: []string{"SolutionHostBinding", "EndpointDeliveryMaxBytes", "ParseEndpointDelivery"},
 	},
 	// DYNAMIC MESSAGES AND THE TYPE REGISTRY, which the receipts replay path
 	// genuinely needs: a recorded response is decoded into whatever type the
