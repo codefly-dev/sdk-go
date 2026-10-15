@@ -177,32 +177,3 @@ and retention requirements.
 Core validates each marked operation when the receipts interceptor is built.
 Operation declarations must specify a completion mode; synchronous operations
 declare `COMPLETION_CALL`. An omitted mode is refused, not defaulted.
-
-
-### Live host route delivery
-
-A host resolving a declared component uses
-`For(ctx).Module(...).Service(...).Endpoint(...).API(...).ResolveDeliveredNetworkInstance(applied, raw)`.
-Pass the presence document the host has applied, not a desired declaration, and
-the endpoint delivery value the host carries beside that applied generation in
-its durable delivery state. Core validates the value against the whole canonical
-applied document; the SDK decodes the one endpoint the query names. Nothing is
-mounted and nothing is read from a file, a directory or the environment: a route
-update is whatever the host hands over on the next call, so new components and
-relocated endpoints are discovered without reloading the host environment and
-without a restart. The host supplies the value; the SDK never fetches it.
-
-A nil or empty value, a value over `solutionhost.EndpointDeliveryMaxBytes`, a
-malformed, withdrawn or mismatched delivery, and an endpoint the producer did not
-deliver all return `ErrEndpointDeliveryUnavailable`. This API never falls back to
-a startup carrier or a locally computed port, including during an upgrade.
-Existing ordinary `ResolveNetworkInstance` queries keep their existing
-composition semantics.
-
-The reader takes three names from core's `solutionhost` package — the applied
-`SolutionHostBinding`, the `EndpointDeliveryMaxBytes` bound and the strict decoder
-`ParseEndpointDelivery` — and never `MarshalEndpointDelivery`: the SDK reads a
-delivery and writes none, because a delivery it produced itself would be one
-nobody applied. The import policy (`scripts/allowed-imports.txt`) admits the
-package for `endpoint_delivery.go` alone, and the Go gate holds it to those
-symbols.

@@ -119,7 +119,12 @@ dependency to it is still a design change, not a detail — see the skill below.
   environment. A workspace that is not this process's composition counts as none
   (`internal/enclosing`, #66): with `CODEFLY__WORKSPACE` injected only that name
   counts, and another is never even loaded; it must also carry the queried
-  module. With nothing injected, the workspace found is used as found.
+  module. With nothing injected, the workspace found is used as found. The
+  composition's own workspace that only the host can compose — it imports a
+  workspace by release, which this SDK never acquires — counts as none too
+  (`enclosing.HostComposed`, via core's `WorkspaceResolver`): the carriers answer
+  and absence says why. The host routes by the addresses in the module manifest
+  it applied; this SDK has no delivered-endpoint reader.
 - **`CODEFLY__` is spelled in this repo, nowhere else.** A consumer needing a
   value gets a typed accessor here; the prefix constant lives in
   `runtime_value.go` for that reason.
