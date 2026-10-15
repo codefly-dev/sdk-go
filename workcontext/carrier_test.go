@@ -217,7 +217,6 @@ func TestEverySealedFieldIsRequiredOnEveryCarrier(t *testing.T) {
 		"seal-without-installation",
 		"zero-principal-epoch",
 		"zero-installation-revision",
-		"zero-build-incarnation",
 	} {
 		t.Run(name, func(t *testing.T) {
 			declared := fixture(t, name)

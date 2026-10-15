@@ -73,15 +73,6 @@ type mintHost struct {
 	// mesh's default body, a cache's empty object, a rollout's redirect.
 	answer *cannedAnswer
 
-	// noApprovedBuild mints for a principal the issuer holds no approved build
-	// for, which is the human-session shape: the capability seals no execution.
-	noApprovedBuild bool
-
-	// echoIncarnation overrides the build incarnation the host ECHOES in its
-	// JSON body, which is only for catching a host and a signature that
-	// disagree.
-	echoIncarnation string
-
 	// replay makes the host IDEMPOTENT: it answers every request with this
 	// exact token. A real mint endpoint that deduplicates by projected token
 	// does the same thing.
@@ -226,7 +217,7 @@ func (h *mintHost) handle(writer http.ResponseWriter, request *http.Request) {
 	// A test endpoint that assembled a token itself would be a second
 	// implementation wearing a test's clothes.
 	token, err := h.authority.tryStartAt(mintedAt, mintInput{
-		audience: audience, binding: h.binding, humanSession: h.noApprovedBuild,
+		audience: audience, binding: h.binding,
 	}, lifetime)
 	if err != nil {
 		// Recorded and answered with a 503, never asserted here: this is the
@@ -239,9 +230,6 @@ func (h *mintHost) handle(writer http.ResponseWriter, request *http.Request) {
 		token = h.replay
 	}
 	response := mintResponse{WorkContext: token, InstallationID: testInstallation}
-	if h.echoIncarnation != "" {
-		response.BuildIncarnation = h.echoIncarnation
-	}
 	if h.echoWrong {
 		response.InstallationID = "installation-the-host-did-not-seal"
 	}
@@ -315,7 +303,6 @@ func TestMintOncePerExecutionAndRenewOnlyAtExpiry(t *testing.T) {
 	// carries the owner's epoch that core's live Seal type no longer has.
 	require.Equal(t, testInstallation, first.Seal().GetInstallationId())
 	require.EqualValues(t, 3, first.Seal().GetInstallationRevision())
-	require.EqualValues(t, 11, first.Seal().GetBuildIncarnation())
 	require.EqualValues(t, testPrincipalEpoch, first.Seal().GetPrincipalEpoch())
 	require.EqualValues(t, 1, host.requests.Load())
 

@@ -527,7 +527,7 @@ func inspectForSecondImplementation(file sourceFile) []string {
 var frozenStructFields = map[string]map[string][]string{
 	"workcontext/mint.go": {
 		"mintRequest":  {"Audience string", "ProjectionAudience string"},
-		"mintResponse": {"WorkContext string", "InstallationID string", "BuildIncarnation string"},
+		"mintResponse": {"WorkContext string", "InstallationID string"},
 	},
 }
 

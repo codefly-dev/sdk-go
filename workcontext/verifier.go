@@ -479,7 +479,7 @@ func refuseKeySetRedirect(*http.Request, []*http.Request) error {
 // instead. So the number is stated once and TestTheVerificationKeySizeAgreesWithCore
 // holds it to core's own constant from a _test.go, where the import is
 // legitimate. If core grows the validator this becomes a call and the number
-// goes. The same arrangement, for the same reason, as sealCarriesAnExecution.
+// goes.
 const verificationKeySize = 32
 
 // VerifierSettings are everything a verifier is, besides its key set.

@@ -16,7 +16,6 @@ import (
 	"net/url"
 	"os"
 	"slices"
-	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -1775,32 +1774,6 @@ func (c *MintClient) credentialFrom(payload []byte, audience string) (Credential
 			ErrMintRefused, body.InstallationID, seal.GetInstallationId(),
 		)
 	}
-	if body.BuildIncarnation != "" {
-		// PRESENCE, not value. The sealed execution became OPTIONAL in core
-		// 4cb260d3, because a principal that bears no approved build — a
-		// person at a terminal — must not have one invented for it. So a
-		// capability can legitimately carry no incarnation, and
-		// GetBuildIncarnation() answers 0 for both "absent" and a value core
-		// says is never legitimate (an incarnation starts at 1).
-		//
-		// Comparing the echo against that zero would have accepted a host
-		// echoing "0" against a capability bearing no execution at all, which
-		// is a host asserting an execution the issuer does not hold. The echo
-		// is only for catching a host and a signature that disagree, but
-		// "disagree" has to include "one of them says nothing".
-		if !sealCarriesAnExecution(seal) {
-			return Credential{}, fmt.Errorf(
-				"%w: mint reported build incarnation %q and the capability seals no execution at all",
-				ErrMintRefused, body.BuildIncarnation,
-			)
-		}
-		if body.BuildIncarnation != strconv.FormatUint(seal.GetBuildIncarnation(), 10) {
-			return Credential{}, fmt.Errorf(
-				"%w: mint reported build incarnation %q and sealed %d",
-				ErrMintRefused, body.BuildIncarnation, seal.GetBuildIncarnation(),
-			)
-		}
-	}
 	// The audience the host signed must be the audience read from the pin.
 	// This is the check an optional pin beside a free-string Audience could not
 	// make: Recheck passing told nobody that the credential in hand was minted
@@ -1906,26 +1879,6 @@ func answeredFromElsewhere(response *http.Response, configured string) string {
 	return response.Request.URL.Redacted()
 }
 
-// sealCarriesAnExecution is CORE'S OWN TEST, copied expression for expression
-// from checkExecutionAgainst (core workcontext/seal.go):
-//
-//	carried := sealed.GetImageDigest() != "" || sealed.GetBuildIncarnation() != 0
-//
-// This module had a second definition — it tested PRESENCE
-// (seal.BuildIncarnation == nil) while core tests VALUES — and two definitions
-// of "carries an execution" is one too many whether or not they currently
-// agree. They agree for anything that survives Decode, because the schema
-// requires the pair; they would disagree about a seal carrying a digest with
-// no incarnation, which is exactly the kind of case a protovalidate rule gets
-// relaxed out from under.
-//
-// Core exports no predicate for this, so adopting its expression is the
-// closest thing to calling it. Core has been asked for one; if it lands, this
-// becomes a call and the duplication goes.
-func sealCarriesAnExecution(seal *SealedValues) bool {
-	return seal.GetImageDigest() != "" || seal.GetBuildIncarnation() != 0
-}
-
 // refusalStatuses are the ONLY statuses that latch this client.
 //
 // The rule used to be the other way round — 429 and 5xx were retryable and
@@ -1986,9 +1939,8 @@ type mintRequest struct {
 // mintResponse is the host's answer. The echoed fields are for logs and for
 // catching a host and a signature that disagree; nothing authorizes from them.
 type mintResponse struct {
-	WorkContext      string `json:"work_context"`
-	InstallationID   string `json:"installation_id,omitempty"`
-	BuildIncarnation string `json:"build_incarnation,omitempty"`
+	WorkContext    string `json:"work_context"`
+	InstallationID string `json:"installation_id,omitempty"`
 }
 
 // validateMintURL admits the mint endpoint through AdmitEndpoint, the one

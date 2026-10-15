@@ -47,15 +47,9 @@ func (a *authority) deriveChild(
 ) (string, *basev0.WorkContextV1, error) {
 	t.Helper()
 	require.NoError(t, a.seals.PutEpoch(principal, 1))
-	require.NoError(t, a.seals.PutApprovedBuild(
-		principal, testApprovedBuild.digest, testApprovedBuild.incarnation))
 	verified, err := a.verifier(t).Verify(t.Context(), parent)
 	require.NoError(t, err)
 	token, claims, err := a.core.Child(t.Context(), verified, corework.ChildInput{
-		Execution: corework.Execution{
-			ImageDigest:      testApprovedBuild.digest,
-			BuildIncarnation: testApprovedBuild.incarnation,
-		},
 		PrincipalID:   principal,
 		PrincipalKind: "service",
 		DelegationID:  "delegation-" + principal,
@@ -146,10 +140,6 @@ func TestDerivedContextNeverOutlivesParent(t *testing.T) {
 		require.NoError(t, err)
 
 		_, claims, err := a.core.Grant(t.Context(), verified, corework.GrantInput{
-			Execution: corework.Execution{
-				ImageDigest:      testApprovedBuild.digest,
-				BuildIncarnation: testApprovedBuild.incarnation,
-			},
 			// An approval whose own window closes long after the parent
 			// session does, asking for a window longer than either.
 			Grant: &corework.Grant{

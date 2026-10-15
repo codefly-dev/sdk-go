@@ -139,14 +139,11 @@ three are now core's answer rather than a local one:
 | `actor-without-epoch` | `ErrInvalid` | **accepted** — the actor chain was never read, so a principal nobody can revoke went on the wire |
 | zero epoch / revision / incarnation, partial binding | `ErrInvalid` | `ErrUnsealed` |
 
-**The seal is four fields, and `ImageDigest` is one of them.** `WorkSealV1`
-gained `image_digest` as a **required** field: a seal names the approved build
-for its installation, and a mint attests the execution it is actually running
-against it (`StartInput.Execution{ImageDigest, BuildIncarnation}`). A seal that
-names no digest names no execution to match a caller against, so core refuses
-to record one. `Credential.Seal()` returns the carried seal as core's own
-message, which is why that field arriving needed no code change here — see
-`SealedValues`.
+**The seal is three fields.** `WorkSealV1` names the installation, its
+revision and the principal's epoch. It carries no build: what a workload runs is
+checked by the host where it mints, and a change of approved builds revokes
+through the epoch and the revision. `Credential.Seal()` returns the carried
+seal as core's own message — see `SealedValues`.
 
 **`ErrUnsealed` no longer exists, and that is the end of this class of defect.**
 `WorkContextV1.seal` and `WorkActorV1.principal_epoch` are schema-**required**
@@ -1113,29 +1110,9 @@ when pinning a consumer.
 `base64url(deterministic protobuf of codefly.base.v0.WorkContextV1) + "." +
 base64url(Ed25519 signature)`, signed by `core/workcontext` and by nothing
 else. The sealed fields are proto fields — `seal.installation_id`,
-`seal.installation_revision`, and `seal.image_digest` /
-`seal.build_incarnation` as a **pair or neither**; plus, for an operation
+`seal.installation_revision` and `seal.principal_epoch`; plus, for an operation
 capability, `operation_binding.binding_id` / `.revision` / `.incarnation`, all
 three together or none. Each actor hop carries its own epoch.
-
-**The execution pair is optional, and absent is a real answer.** Core
-`4cb260d3` moved the approved build out of the live `Seal` and into
-`SealSource.ApprovedBuild`, keyed on the **principal**: reading it from the
-owner's installation record made a derived capability's execution describe the
-owner's workload however many hops had been added, and a hop's principal does
-not hold the owner's installation at all. So every hop now attests its own, and
-a principal that bears no execution — a person at a terminal — seals none
-rather than having a value invented for it.
-
-**If you read the execution off `Credential.Seal()`, mind the zero.**
-`GetImageDigest()` answers `""` and `GetBuildIncarnation()` answers `0` both for
-"this principal bears no execution" and for a value core says is never
-legitimate, since an incarnation starts at 1. Treating zero as "missing or
-invalid" is a bug: it is an answer. This module hit it in its own mint-response
-cross-check, where a host echoing `"0"` matched a capability that sealed no
-execution at all — a host asserting an execution the issuer does not hold,
-passing the check whose job is to catch exactly that. Ask about presence before
-comparing.
 
 This module no longer reads a capability itself. `corework.Decode` runs the
 size bound, the envelope, `CheckEncoding`, `proto.Unmarshal`, **protovalidate**

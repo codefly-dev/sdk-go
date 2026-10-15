@@ -296,20 +296,12 @@ credential it holds.
 ## A credential is sealed or it is not a credential, and core says what that means
 
 The seal and each actor hop's epoch are schema-required, so a missing one is a
-`protovalidate` refusal inside core's decode. The **execution** —
-`image_digest` and `build_incarnation` — is a PAIR OR NEITHER: it lives in
-`SealSource.ApprovedBuild` keyed on the principal, every hop attests its own,
-and a principal that bears none (a person at a terminal) seals none rather than
-inventing a value. An operation binding carries its id, revision and
-incarnation or none of them; and core refuses an unknown field or a
-non-canonical encoding, so nothing here may ever marshal a capability.
-
-**Zero is an answer, not a gap.** `GetBuildIncarnation()` returns 0 both for
-"bears no execution" and for a value core says is never legitimate, since an
-incarnation starts at 1. `mint.go`'s echo cross-check asks about PRESENCE
-before comparing, because a host echoing `"0"` otherwise matched a capability
-sealing no execution — a host asserting an execution the issuer does not hold,
-passing the check that exists to catch that. `Attach` refuses an unsealed
+`protovalidate` refusal inside core's decode. A seal carries no build: what a
+workload runs is checked by the host where it mints, and a change of approved
+builds revokes through the principal's epoch and the installation's revision.
+An operation binding carries its id, revision and incarnation or none of them;
+and core refuses an unknown field or a non-canonical encoding, so nothing here
+may ever marshal a capability. `Attach` refuses an unsealed
 capability with `corework.Decode`'s answer — false for a while precisely
 because we answered it ourselves and never read the actor chain.
 
