@@ -95,19 +95,16 @@ The `dual-module-change` skill has the table and the command.
 | `workcontext/grpctransport/` | the gRPC carrier, so a consumer that makes no gRPC call never compiles grpc |
 
 `workcontext` mints nothing and verifies nothing: `core/workcontext` is the only
-implementation of the capability, reached here through typed access. Adding a
-dependency to it is still a design change, not a detail — see the skill below.
+implementation of the capability, reached through typed access; a new dependency is a design change (skill below).
 
 ## Rules that bite
 
-- **Each module's go.mod owns its Core pin.** Root: the candidate live-endpoint
-  contract `886d218d` (not released-pin qualification); `workcontext`: v0.19.1.
-  Endpoint visibility is exactly `private`/`internal`/`public`; `external` is a
-  location. Local fallback uses core's `Endpoint.External()` and resolves public
-  endpoints with no external location. Do not recreate removed visibility names.
-  Keep the calling module separate from the queried producer; core's
-  `SelectEndpointForReference` owns selection on module-adjusted declarations.
-  `Init` pins that consumer once; endpoint resolution refuses identity drift.
+- **Each module's go.mod owns its Core pin**, both on core's module-manifest
+  protocol (codefly-dev/core#812). Visibility is exactly `private`/`internal`/
+  `public`; `external` is a location, read through `Endpoint.External()`; never
+  recreate removed names. Keep the calling module apart from the queried producer:
+  core's `SelectEndpointForReference` selects, `Init` pins that consumer once, and
+  resolution refuses identity drift.
 - **A deployed process has no workspace, so its carriers are authoritative.**
   The builder image ships the binary alone, including in local Kubernetes pods.
   In any environment with no workspace on disk, `ResolveNetworkInstance` reads
@@ -119,12 +116,10 @@ dependency to it is still a design change, not a detail — see the skill below.
   environment. A workspace that is not this process's composition counts as none
   (`internal/enclosing`, #66): with `CODEFLY__WORKSPACE` injected only that name
   counts, and another is never even loaded; it must also carry the queried
-  module. With nothing injected, the workspace found is used as found. The
-  composition's own workspace that only the host can compose — it imports a
-  workspace by release, which this SDK never acquires — counts as none too
-  (`enclosing.HostComposed`, via core's `WorkspaceResolver`): the carriers answer
-  and absence says why. The host routes by the addresses in the module manifest
-  it applied; this SDK has no delivered-endpoint reader.
+  module. With nothing injected, the workspace found is used as found. A
+  workspace only the host can compose (it imports by release) counts as none too
+  (`enclosing.HostComposed`). The host routes by the addresses in the module
+  manifest it applied; this SDK has no delivered-endpoint reader.
 - **`CODEFLY__` is spelled in this repo, nowhere else.** A consumer needing a
   value gets a typed accessor here; the prefix constant lives in
   `runtime_value.go` for that reason.
