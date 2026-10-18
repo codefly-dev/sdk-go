@@ -192,13 +192,13 @@ func dnsLabel(label string) bool {
 	return true
 }
 
-// keySetLoopbackHosts are the hosts a local run may name over plaintext.
+// loopbackHosts are the hosts a local run may name over plaintext.
 //
 // An EXACT set, by spelling, because what a name resolves to is a
 // resolution-time question this cannot ask. `localhost` is reserved to the
 // loopback interface by RFC 6761, so that is a property of the name; a name
 // that merely contains one of these spellings is a different host.
-var keySetLoopbackHosts = []string{"127.0.0.1", "::1", "localhost"}
+var loopbackHosts = []string{"127.0.0.1", "::1", "localhost"}
 
 // KeySetEndpoint is a key-set location whose transport has been admitted.
 //
@@ -219,9 +219,30 @@ func (e KeySetEndpoint) String() string { return e.url }
 //
 // A verifier's key set decides which signatures it accepts, so the hop it
 // arrives over is part of the verifier's configuration rather than a detail of
-// how it was fetched. This is the one place that decision is made; a consumer
-// that writes its own is a second copy of a rule whose whole value is that there
-// is one.
+// how it was fetched. The decision is AdmitEndpoint's, which is the one copy of
+// the transport rule in this module; a consumer that writes its own is a second
+// copy of a rule whose whole value is that there is one.
+func ResolveKeySetEndpoint(raw string, source TransportSource) (KeySetEndpoint, error) {
+	parsed, err := AdmitEndpoint(raw, source, "key set")
+	if err != nil {
+		return KeySetEndpoint{}, err
+	}
+	return KeySetEndpoint{url: parsed.String()}, nil
+}
+
+// AdmitEndpoint is THE transport rule, and every URL this module dials goes
+// through it: ResolveKeySetEndpoint for a verifier's key set and the mint
+// client's validateMintURL for the endpoint the projected token is presented
+// to. It is exported for the URLs a consumer dials that are neither — a
+// runtime calling the gateway on the origin it mints against, for one — so a
+// consumer's boot-time refusal of a plaintext address is this rule and not a
+// copy of it. The rule is the one the host and the composed modules apply to
+// platform/gateway-endpoint; it is not a variant of it.
+//
+// `what` names the URL in a refusal ("gateway", "key set") so the refusal says
+// what it refused; it is a label and never the value, and an empty one reads
+// "endpoint". The returned URL is the admitted address, parsed and canonical,
+// and is returned only on admission.
 //
 // What is admitted:
 //
@@ -244,54 +265,57 @@ func (e KeySetEndpoint) String() string { return e.url }
 // configuration error reaches boot-time logging, and a URL is a place a
 // credential or a token gets written by mistake; every refusal names the setting
 // and the remedy instead.
-func ResolveKeySetEndpoint(raw string, source TransportSource) (KeySetEndpoint, error) {
+func AdmitEndpoint(raw string, source TransportSource, what string) (*url.URL, error) {
+	if what == "" {
+		what = "endpoint"
+	}
 	protected, err := MeshProtected(source)
 	if err != nil {
-		return KeySetEndpoint{}, err
+		return nil, err
 	}
 	trimmed := strings.TrimSpace(raw)
 	if trimmed == "" {
-		return KeySetEndpoint{}, fmt.Errorf(
-			"%w: no key-set URL is configured, so the key set is unset", ErrInvalid)
+		return nil, fmt.Errorf(
+			"%w: no %s URL is configured, so the %s is unset", ErrInvalid, what, what)
 	}
 	parsed, err := url.Parse(trimmed)
 	if err != nil || parsed.Opaque != "" || parsed.Hostname() == "" {
 		// The parser's error text embeds the input, so it is not reported.
-		return KeySetEndpoint{}, fmt.Errorf(
-			"%w: the key-set URL is not an absolute URL naming a host", ErrInvalid)
+		return nil, fmt.Errorf(
+			"%w: the %s URL is not an absolute URL naming a host", ErrInvalid, what)
 	}
 	if parsed.User != nil || parsed.RawQuery != "" || parsed.ForceQuery || parsed.Fragment != "" {
-		return KeySetEndpoint{}, fmt.Errorf(
-			"%w: the key-set URL must carry no credentials, query or fragment", ErrInvalid)
+		return nil, fmt.Errorf(
+			"%w: the %s URL must carry no credentials, query or fragment", ErrInvalid, what)
 	}
 	if parsed.Scheme == "https" {
-		return KeySetEndpoint{url: parsed.String()}, nil
+		return parsed, nil
 	}
 	if parsed.Scheme != "http" {
-		return KeySetEndpoint{}, fmt.Errorf(
-			"%w: the key-set URL scheme is not https; %s", ErrInvalid, MeshTransportRemedy)
+		return nil, fmt.Errorf(
+			"%w: the %s URL scheme is not https; %s", ErrInvalid, what, MeshTransportRemedy)
 	}
-	if slices.Contains(keySetLoopbackHosts, strings.ToLower(parsed.Hostname())) {
+	if slices.Contains(loopbackHosts, strings.ToLower(parsed.Hostname())) {
 		if source.IsLocalRun() {
-			return KeySetEndpoint{url: parsed.String()}, nil
+			return parsed, nil
 		}
-		return KeySetEndpoint{}, fmt.Errorf(
-			"%w: the key-set URL is plaintext to a loopback host and this is not a local run; "+
+		return nil, fmt.Errorf(
+			"%w: the %s URL is plaintext to a loopback host and this is not a local run; "+
 				"a mesh carries no hop that never leaves the pod, so the assertion cannot cover it. %s",
-			ErrInvalid, MeshTransportRemedy)
+			ErrInvalid, what, MeshTransportRemedy)
 	}
 	if !protected {
-		return KeySetEndpoint{}, fmt.Errorf(
-			"%w: the key-set URL is plaintext and %s/%s is not asserted. %s",
-			ErrInvalid, MeshTransportGroup, MeshTransportKey, MeshTransportRemedy)
+		return nil, fmt.Errorf(
+			"%w: the %s URL is plaintext and %s/%s is not asserted. %s",
+			ErrInvalid, what, MeshTransportGroup, MeshTransportKey, MeshTransportRemedy)
 	}
 	if !ClusterServiceHost(parsed.Hostname()) {
-		return KeySetEndpoint{}, fmt.Errorf(
-			"%w: %s/%s is asserted and the key-set URL is plaintext to a host that is not an "+
+		return nil, fmt.Errorf(
+			"%w: %s/%s is asserted and the %s URL is plaintext to a host that is not an "+
 				"in-cluster Service address, which the assertion does not cover. %s",
-			ErrInvalid, MeshTransportGroup, MeshTransportKey, MeshTransportRemedy)
+			ErrInvalid, MeshTransportGroup, MeshTransportKey, what, MeshTransportRemedy)
 	}
-	return KeySetEndpoint{url: parsed.String()}, nil
+	return parsed, nil
 }
 
 // ErrKeySetUnavailable is a key set that could not be fetched: the endpoint did
@@ -455,7 +479,7 @@ func refuseKeySetRedirect(*http.Request, []*http.Request) error {
 // instead. So the number is stated once and TestTheVerificationKeySizeAgreesWithCore
 // holds it to core's own constant from a _test.go, where the import is
 // legitimate. If core grows the validator this becomes a call and the number
-// goes. The same arrangement, for the same reason, as sealCarriesAnExecution.
+// goes.
 const verificationKeySize = 32
 
 // VerifierSettings are everything a verifier is, besides its key set.

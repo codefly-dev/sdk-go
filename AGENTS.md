@@ -95,19 +95,16 @@ The `dual-module-change` skill has the table and the command.
 | `workcontext/grpctransport/` | the gRPC carrier, so a consumer that makes no gRPC call never compiles grpc |
 
 `workcontext` mints nothing and verifies nothing: `core/workcontext` is the only
-implementation of the capability, and this module re-exports core's verifier by
-type alias. Adding a dependency to it is still a design change, not a detail —
-see the skill below.
+implementation of the capability, reached through typed access; a new dependency is a design change (skill below).
 
 ## Rules that bite
 
-- **Core is pinned to the v0.19.1 tag in both modules.** Endpoint visibility is
-  exactly `private`/`internal`/`public`; `external` is a location. Local fallback
-  uses core's `Endpoint.External()` predicate and still resolves public
-  endpoints without an external location. Do not recreate removed visibility names.
-  Preserve the calling module separately from the queried producer; core's
-  `SelectEndpointForReference` owns selection on module-adjusted declarations.
-  `Init` pins that consumer once; endpoint resolution refuses identity drift.
+- **Each module's go.mod owns its Core pin**, both on core's module-manifest
+  protocol (codefly-dev/core#812). Visibility is exactly `private`/`internal`/
+  `public`; `external` is a location, read through `Endpoint.External()`; never
+  recreate removed names. Keep the calling module apart from the queried producer:
+  core's `SelectEndpointForReference` selects, `Init` pins that consumer once, and
+  resolution refuses identity drift.
 - **A deployed process has no workspace, so its carriers are authoritative.**
   The builder image ships the binary alone, including in local Kubernetes pods.
   In any environment with no workspace on disk, `ResolveNetworkInstance` reads
@@ -119,7 +116,10 @@ see the skill below.
   environment. A workspace that is not this process's composition counts as none
   (`internal/enclosing`, #66): with `CODEFLY__WORKSPACE` injected only that name
   counts, and another is never even loaded; it must also carry the queried
-  module. With nothing injected, the workspace found is used as found.
+  module. With nothing injected, the workspace found is used as found. A
+  workspace only the host can compose (it imports by release) counts as none too
+  (`enclosing.HostComposed`). The host routes by the addresses in the module
+  manifest it applied; this SDK has no delivered-endpoint reader.
 - **`CODEFLY__` is spelled in this repo, nowhere else.** A consumer needing a
   value gets a typed accessor here; the prefix constant lives in
   `runtime_value.go` for that reason.
@@ -158,11 +158,11 @@ see the skill below.
   constructor and `PinnedVerifier` the only type here that verifies. The
   endpoint, the fetch and the verifier are one operation — `KeySet` has one
   constructor and `NewVerifier` takes nothing else — so an admitted location and
-  the keys in use are one fact. `ResolveKeySetEndpoint` is the host's transport
-  rule: plaintext reaches an in-cluster Service address only under
-  `internal-transport/mesh-protected`, compared literally, and loopback only on a
-  local run. A failed read of that setting is a refusal, not absence. No refusal
-  echoes a configured value. `scripts/security-posture.sh` re-audits both rules.
+  the keys in use are one fact. `AdmitEndpoint` is the one transport rule, for the
+  key-set URL, the mint URL (`MintOptions.Transport`; nil keeps https only) and a
+  consumer's own: plaintext reaches an in-cluster Service address only under
+  `internal-transport/mesh-protected`, compared literally, loopback only locally; a
+  failed read refuses, not absence; no refusal echoes a value. `scripts/security-posture.sh` re-audits.
 - **A receipt is written inside the transaction that commits its effect.** A
   receipt written after the commit leaves a window where the effect exists and
   the receipt does not, and a recovery landing there reads "no receipt" for an

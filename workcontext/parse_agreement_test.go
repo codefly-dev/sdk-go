@@ -32,14 +32,12 @@ var structurallyRefused = map[string]bool{
 	"seal-without-installation":  true, // ErrInvalid: a seal bound to nothing
 	"zero-principal-epoch":       true, // ErrInvalid: zero is not an epoch
 	"zero-installation-revision": true, // ErrInvalid: zero is not a revision
-	"zero-build-incarnation":     true, // ErrInvalid: zero is not an incarnation
 	// The execution is a PAIR, set together or absent together: a digest with
 	// no incarnation, or an incarnation with no digest, is a seal that names a
 	// build nothing can supersede. This fixture arrived with core's per-hop
 	// execution change and the suite caught it by comparing against core's own
 	// list rather than against a constant here — which is the whole reason the
 	// comparison is written that way.
-	"seal-half-execution":       true, // ErrInvalid: half an execution is not one
 	"partial-operation-binding": true, // ErrInvalid: an id at no revision
 	"actor-without-epoch":       true, // ErrInvalid: a principal nobody can revoke
 	// An EMPTY audience is structural and an audience MISMATCH is not, which is

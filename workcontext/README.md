@@ -139,14 +139,11 @@ three are now core's answer rather than a local one:
 | `actor-without-epoch` | `ErrInvalid` | **accepted** — the actor chain was never read, so a principal nobody can revoke went on the wire |
 | zero epoch / revision / incarnation, partial binding | `ErrInvalid` | `ErrUnsealed` |
 
-**The seal is four fields, and `ImageDigest` is one of them.** `WorkSealV1`
-gained `image_digest` as a **required** field: a seal names the approved build
-for its installation, and a mint attests the execution it is actually running
-against it (`StartInput.Execution{ImageDigest, BuildIncarnation}`). A seal that
-names no digest names no execution to match a caller against, so core refuses
-to record one. `Credential.Seal()` returns the carried seal as core's own
-message, which is why that field arriving needed no code change here — see
-`SealedValues`.
+**The seal is three fields.** `WorkSealV1` names the installation, its
+revision and the principal's epoch. It carries no build: what a workload runs is
+checked by the host where it mints, and a change of approved builds revokes
+through the epoch and the revision. `Credential.Seal()` returns the carried
+seal as core's own message — see `SealedValues`.
 
 **`ErrUnsealed` no longer exists, and that is the end of this class of defect.**
 `WorkContextV1.seal` and `WorkActorV1.principal_epoch` are schema-**required**
@@ -268,6 +265,15 @@ where it asserts them:
 
 ## Obtaining the credential
 
+`MintClient` is the SDK's generic mint transport: one credential per execution
+from whichever mint endpoint the composition names, over this module's JSON
+exchange, with the URL admitted by `AdmitEndpoint`. It renews when a caller asks
+for a credential that has reached its renewal point — a lead derived from that
+credential's own lifetime, not a timer — and replaces one through `Refresh` after
+the far end has refused it. It is not a client of any host-specific broker
+exchange and it adds no heartbeat or registration; a consumer that speaks such an
+exchange keeps its own typed client and admits that URL through the same rule.
+
 ```go
 // At boot, in the root SDK: read the authority-bearing values once.
 authority, err := codefly.ReadAuthority(ctx,
@@ -289,8 +295,13 @@ client, err := workcontext.NewMintClient(workcontext.MintOptions{
     },
     ProjectedToken:     workcontext.ProjectedTokenFile("/var/run/secrets/codefly/token"),
     ProjectionAudience: projectionAudience,
-    // REQUIRED: sources of current trust roots, workload X.509-SVID,
-    // and admitted mint endpoint SPIFFE IDs. Re-read per handshake.
+    // The transport rule's two facts, read from the runtime: the composition's
+    // internal-transport/mesh-protected assertion and whether this is a local
+    // run. Nil keeps the default, https only.
+    Transport: codefly.For(ctx),
+    // REQUIRED for an https URL, and nil for a plaintext one: sources of
+    // current trust roots, workload X.509-SVID, and admitted mint endpoint
+    // SPIFFE IDs. Re-read per handshake.
     TrustAnchor:       readPlatformRoots,     // func() (*x509.CertPool, error)
     ClientCertificate: readWorkloadSVID,      // func() (*tls.Certificate, error)
     AdmittedPeers:     readAdmittedMintPeers, // func() ([]string, error)
@@ -304,14 +315,35 @@ string the caller had typed. Reading it through `Value` on every mint is what
 makes the pin load-bearing, and `credentialFrom` then requires the audience the
 host SIGNED to be the audience the pin answered.
 
-`URL` must be **absolute https** with no userinfo, query or fragment: the
-projected service-account token travels on that request as a bearer credential,
-so plaintext is a disclosure the configuration must not be able to choose.
+`URL` must be **absolute** with no userinfo, query or fragment, and it is
+admitted by [the transport contract](#the-transport-contract) — the same
+function that admits a verifier's key-set URL, with `Transport` answering its
+two facts. **https is admitted to any host and is the default**: with
+`Transport` nil nothing can read an assertion or an environment, so https is
+all that is admitted. **http is admitted exactly where the mesh carries the
+hop**: to an in-cluster Service address (`<service>.<namespace>.svc`, optionally
+followed by `cluster.local`) when the composition asserts
+`internal-transport/mesh-protected=true`, and to a loopback host on a local
+run. Every other http URL is `ErrInvalid` naming the half of the rule that
+refused it. The projected service-account token still travels on that request
+as a bearer credential, and the reasoning that refused plaintext still stands:
+a credential request goes over an authenticated channel or it does not go.
+In-cell that channel is the mesh's mTLS between workload identities, the mint
+endpoint is the gateway's workload port, which the mesh admits only from
+composed workloads, and the token is single-use and spent by the mint it is read
+for — so plaintext under the assertion *is* the authenticated channel, and
+plaintext anywhere the mesh does not reach is still refused by name.
 
-**The SDK owns the mint transport.** Callers provide `TrustAnchor`,
-`ClientCertificate` and `AdmittedPeers` sources; all three functions are
-required. `NewMintClient` returns `ErrInvalid` for a missing source and reads
-no sources. Every source answer is validated during dialing.
+**The SDK owns the mint transport.** For an https URL, callers provide
+`TrustAnchor`, `ClientCertificate` and `AdmittedPeers` sources; all three
+functions are required. For a plaintext URL there is no handshake for them to
+apply to, so all three **must be nil**: a source set beside a plaintext URL is a
+check that never runs, and is refused rather than ignored. `NewMintClient`
+returns `ErrInvalid` for a missing or misplaced source and reads no sources.
+Every source answer is validated during dialing. An admitted plaintext endpoint
+is dialed by the same client with the same guarantees — a fresh connection per
+request, HTTP/1.1, no compression, proxy or followed redirect — and nothing
+about TLS below applies to it.
 
 Every mint, renewal and refresh opens a **new TLS 1.3 connection**. The SDK
 reads the current anchor for the handshake, presents the workload's current
@@ -378,7 +410,7 @@ handshake, and verify deadlines, connection closure, bounded reads and recovery.
 Then, on every outbound request:
 
 ```go
-credential, err := client.Credential(ctx) // mints once; renews only at expiry
+credential, err := client.Credential(ctx) // mints once; renews one past its renewal point
 if err != nil {
     return err
 }
@@ -625,7 +657,19 @@ group, key and remedy sentence the host and the composed modules apply to their
 own in-cluster hops — reimplemented rather than imported, because a module never
 imports another module's internals, so the shared thing is the contract.
 **This is the SDK's one copy, which is what lets a consumer route every plaintext
-hop it has through one check.**
+hop it has through one check.** It is one exported function, `AdmitEndpoint`,
+with two call sites in this module: `ResolveKeySetEndpoint` admits a verifier's
+key-set URL through it, and `NewMintClient` admits `MintOptions.URL` through it,
+with `MintOptions.Transport` as the `TransportSource`. A test drives every branch
+of the rule through both and requires the same answer in the same words. A
+consumer with a URL that is neither — a runtime calling the gateway on the origin
+it mints against — admits it with the same call:
+
+```go
+// The label names the URL in a refusal and is never the value; the URL is
+// returned only on admission, parsed and canonical.
+gateway, err := workcontext.AdmitEndpoint(gatewayURL, codefly.For(ctx), "gateway")
+```
 
 | Address | Admitted |
 | --- | --- |
@@ -1066,29 +1110,9 @@ when pinning a consumer.
 `base64url(deterministic protobuf of codefly.base.v0.WorkContextV1) + "." +
 base64url(Ed25519 signature)`, signed by `core/workcontext` and by nothing
 else. The sealed fields are proto fields — `seal.installation_id`,
-`seal.installation_revision`, and `seal.image_digest` /
-`seal.build_incarnation` as a **pair or neither**; plus, for an operation
+`seal.installation_revision` and `seal.principal_epoch`; plus, for an operation
 capability, `operation_binding.binding_id` / `.revision` / `.incarnation`, all
 three together or none. Each actor hop carries its own epoch.
-
-**The execution pair is optional, and absent is a real answer.** Core
-`4cb260d3` moved the approved build out of the live `Seal` and into
-`SealSource.ApprovedBuild`, keyed on the **principal**: reading it from the
-owner's installation record made a derived capability's execution describe the
-owner's workload however many hops had been added, and a hop's principal does
-not hold the owner's installation at all. So every hop now attests its own, and
-a principal that bears no execution — a person at a terminal — seals none
-rather than having a value invented for it.
-
-**If you read the execution off `Credential.Seal()`, mind the zero.**
-`GetImageDigest()` answers `""` and `GetBuildIncarnation()` answers `0` both for
-"this principal bears no execution" and for a value core says is never
-legitimate, since an incarnation starts at 1. Treating zero as "missing or
-invalid" is a bug: it is an answer. This module hit it in its own mint-response
-cross-check, where a host echoing `"0"` matched a capability that sealed no
-execution at all — a host asserting an execution the issuer does not hold,
-passing the check whose job is to catch exactly that. Ask about presence before
-comparing.
 
 This module no longer reads a capability itself. `corework.Decode` runs the
 size bound, the envelope, `CheckEncoding`, `proto.Unmarshal`, **protovalidate**

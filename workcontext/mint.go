@@ -16,7 +16,6 @@ import (
 	"net/url"
 	"os"
 	"slices"
-	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -204,10 +203,28 @@ func (v AuthorityValue) String() string { return v.Name + "/" + v.Key }
 
 // MintOptions configures the one credential a process obtains per execution.
 type MintOptions struct {
-	// URL is the host's mint endpoint: absolute HTTPS, no query, no fragment,
-	// no userinfo. Plain HTTP is refused — the projected service-account token
-	// travels on this request as a bearer credential.
+	// URL is the host's mint endpoint: absolute, no query, no fragment, no
+	// userinfo. https is admitted to any host. http is admitted exactly where
+	// the mesh transport rule admits it — see Transport — and is otherwise
+	// ErrInvalid naming the rule that refused it.
 	URL string
+
+	// Transport is the caller's assertion that a mutually authenticated mesh
+	// carries the hop to URL, answered by the runtime rather than typed: the
+	// composition's internal-transport/mesh-protected setting and whether this
+	// is a local run, both read through it. `codefly.For(ctx)` satisfies it.
+	//
+	// With it, a plaintext http URL is admitted to an in-cluster Service
+	// address (<service>.<namespace>.svc, optionally followed by cluster.local)
+	// when the composition asserts mesh-protected=true, and to a loopback host
+	// on a local run; every other http URL stays ErrInvalid, naming which half
+	// of the rule refused it. Nil keeps the default, which is https only.
+	//
+	// It is the same rule, the same setting and the same function as
+	// ResolveKeySetEndpoint's, and the one the composed modules apply to
+	// platform/gateway-endpoint, not a mint-specific variant: a boolean here
+	// would be a per-service opt-in that no address has to qualify for.
+	Transport TransportSource
 
 	// Authority is the process's boot-read authority. REQUIRED: it answers the
 	// audience on every mint and it is rechecked before every mint, including
@@ -229,21 +246,26 @@ type MintOptions struct {
 	ProjectionAudience string
 
 	// TrustAnchor reads the roots that may sign the mint endpoint's
-	// certificate. Required; called before and after every handshake, never
-	// cached. An error or nil pool refuses the connection without system roots.
-	// Returned pools must not be mutated while a handshake uses them.
+	// certificate. Required for an https URL; called before and after every
+	// handshake, never cached. An error or nil pool refuses the connection
+	// without system roots. Returned pools must not be mutated while a
+	// handshake uses them.
+	//
+	// It, ClientCertificate and AdmittedPeers must be nil for a plaintext URL:
+	// there is no handshake for them to apply to, and a source set beside a
+	// plaintext URL would read as a check that never runs.
 	TrustAnchor func() (*x509.CertPool, error)
 
-	// ClientCertificate reads the workload's X.509-SVID. Required; called by
-	// GetClientCertificate on every handshake. An unreadable or empty
-	// certificate refuses the connection. The endpoint must request it.
+	// ClientCertificate reads the workload's X.509-SVID. Required for an https
+	// URL; called by GetClientCertificate on every handshake. An unreadable or
+	// empty certificate refuses the connection. The endpoint must request it.
 	// Its private-key operations share the transport's single outstanding
 	// source slot: cancellation bounds the wait, not an arbitrary signer's work.
 	ClientCertificate func() (*tls.Certificate, error)
 
 	// AdmittedPeers reads the SPIFFE IDs the mint endpoint may present in its
-	// single URI SAN. Required; read after chain verification during the handshake
-	// and checked again after the handshake with freshly read roots and peers.
+	// single URI SAN. Required for an https URL; read after chain verification
+	// during the handshake and checked again after it with freshly read roots and peers.
 	// IDs are validated before comparison: only scheme and trust-domain case
 	// are ignored, and the path is compared byte-for-byte without normalization.
 	// Only spiffe://<trust-domain>/<path> is accepted.
@@ -274,8 +296,9 @@ type MintOptions struct {
 }
 
 // Credential is the sealed capability a process holds for its execution. It is
-// obtained once by Mint and replaced only by renewal at expiry or by Refresh
-// after the host has refused it.
+// obtained once by Mint and replaced only by renewal once it reaches its renewal
+// point, a lead derived from its own lifetime, or by Refresh after the host has
+// refused it.
 type Credential struct {
 	token     string
 	seal      *SealedValues
@@ -459,7 +482,7 @@ var mintClientIDs atomic.Uint64
 // NewMintClient validates configuration without reading any source or making a
 // network request. Source answers are validated at the handshake.
 func NewMintClient(options MintOptions) (*MintClient, error) {
-	endpoint, err := validateMintURL(options.URL)
+	endpoint, plaintext, err := validateMintURL(options.URL, options.Transport)
 	if err != nil {
 		return nil, err
 	}
@@ -484,18 +507,8 @@ func NewMintClient(options MintOptions) (*MintClient, error) {
 	if strings.TrimSpace(options.ProjectionAudience) == "" {
 		return nil, fmt.Errorf("%w: no projection audience", ErrInvalid)
 	}
-	if options.TrustAnchor == nil {
-		return nil, fmt.Errorf(
-			"%w: no trust anchor for the mint endpoint %s: TrustAnchor must read explicitly configured roots; "+
-				"there is no default, including x509.SystemCertPool",
-			ErrInvalid, endpoint,
-		)
-	}
-	if options.ClientCertificate == nil {
-		return nil, fmt.Errorf("%w: no client certificate source for the mint endpoint", ErrInvalid)
-	}
-	if options.AdmittedPeers == nil {
-		return nil, fmt.Errorf("%w: no admitted peer source for the mint endpoint", ErrInvalid)
+	if err := validateMintHandshakeSources(options, endpoint, plaintext); err != nil {
+		return nil, err
 	}
 	timeout := options.RequestTimeout
 	if timeout == 0 {
@@ -548,7 +561,11 @@ func NewMintClient(options MintOptions) (*MintClient, error) {
 }
 
 // mintHTTPClient owns the transport: callers supply sources, never an HTTP
-// client or a reachable Transport. Each request makes a fresh TLS 1.3 handshake
+// client or a reachable Transport. An admitted plaintext endpoint is dialed by
+// DialContext alone and nothing below this paragraph runs for it: the mesh
+// carries that hop, and the dialer's own guarantees — a fresh connection per
+// request, HTTP/1.1, no compression, no proxy, no followed redirect — hold for
+// both schemes. For https, each request makes a fresh TLS 1.3 handshake
 // under the current anchor, workload certificate and admitted peers, so a
 // withdrawal takes effect on the next request, including renewal and refresh.
 // After the handshake, the peer is checked again against freshly read anchors
@@ -1757,32 +1774,6 @@ func (c *MintClient) credentialFrom(payload []byte, audience string) (Credential
 			ErrMintRefused, body.InstallationID, seal.GetInstallationId(),
 		)
 	}
-	if body.BuildIncarnation != "" {
-		// PRESENCE, not value. The sealed execution became OPTIONAL in core
-		// 4cb260d3, because a principal that bears no approved build — a
-		// person at a terminal — must not have one invented for it. So a
-		// capability can legitimately carry no incarnation, and
-		// GetBuildIncarnation() answers 0 for both "absent" and a value core
-		// says is never legitimate (an incarnation starts at 1).
-		//
-		// Comparing the echo against that zero would have accepted a host
-		// echoing "0" against a capability bearing no execution at all, which
-		// is a host asserting an execution the issuer does not hold. The echo
-		// is only for catching a host and a signature that disagree, but
-		// "disagree" has to include "one of them says nothing".
-		if !sealCarriesAnExecution(seal) {
-			return Credential{}, fmt.Errorf(
-				"%w: mint reported build incarnation %q and the capability seals no execution at all",
-				ErrMintRefused, body.BuildIncarnation,
-			)
-		}
-		if body.BuildIncarnation != strconv.FormatUint(seal.GetBuildIncarnation(), 10) {
-			return Credential{}, fmt.Errorf(
-				"%w: mint reported build incarnation %q and sealed %d",
-				ErrMintRefused, body.BuildIncarnation, seal.GetBuildIncarnation(),
-			)
-		}
-	}
 	// The audience the host signed must be the audience read from the pin.
 	// This is the check an optional pin beside a free-string Audience could not
 	// make: Recheck passing told nobody that the credential in hand was minted
@@ -1888,26 +1879,6 @@ func answeredFromElsewhere(response *http.Response, configured string) string {
 	return response.Request.URL.Redacted()
 }
 
-// sealCarriesAnExecution is CORE'S OWN TEST, copied expression for expression
-// from checkExecutionAgainst (core workcontext/seal.go):
-//
-//	carried := sealed.GetImageDigest() != "" || sealed.GetBuildIncarnation() != 0
-//
-// This module had a second definition — it tested PRESENCE
-// (seal.BuildIncarnation == nil) while core tests VALUES — and two definitions
-// of "carries an execution" is one too many whether or not they currently
-// agree. They agree for anything that survives Decode, because the schema
-// requires the pair; they would disagree about a seal carrying a digest with
-// no incarnation, which is exactly the kind of case a protovalidate rule gets
-// relaxed out from under.
-//
-// Core exports no predicate for this, so adopting its expression is the
-// closest thing to calling it. Core has been asked for one; if it lands, this
-// becomes a call and the duplication goes.
-func sealCarriesAnExecution(seal *SealedValues) bool {
-	return seal.GetImageDigest() != "" || seal.GetBuildIncarnation() != 0
-}
-
 // refusalStatuses are the ONLY statuses that latch this client.
 //
 // The rule used to be the other way round — 429 and 5xx were retryable and
@@ -1968,32 +1939,85 @@ type mintRequest struct {
 // mintResponse is the host's answer. The echoed fields are for logs and for
 // catching a host and a signature that disagree; nothing authorizes from them.
 type mintResponse struct {
-	WorkContext      string `json:"work_context"`
-	InstallationID   string `json:"installation_id,omitempty"`
-	BuildIncarnation string `json:"build_incarnation,omitempty"`
+	WorkContext    string `json:"work_context"`
+	InstallationID string `json:"installation_id,omitempty"`
 }
 
-// validateMintURL requires absolute HTTPS with no userinfo, query or fragment.
+// validateMintURL admits the mint endpoint through AdmitEndpoint, the one
+// transport rule in this module, and reports whether the admitted URL is
+// plaintext. It requires an absolute URL with no userinfo, query or fragment;
+// https to any host; http only to a loopback host on a local run, or to an
+// in-cluster Service address when the composition asserts
+// internal-transport/mesh-protected=true through source.
 //
 // Its refusal is ErrInvalid, like every other construction-time check: nothing
 // has been asked of a host, so "the mint refused you" is the wrong thing to
 // tell a caller — and ErrMintRefused is the sentinel this package documents as
 // meaning a process must stop serving.
 //
-// Plaintext HTTP used to be accepted here, which made the strongest reason this
-// endpoint exists — that the projected service-account token is presented to it
-// and nothing else — contingent on a configuration value. A credential request
-// goes over an authenticated channel or it does not go.
-func validateMintURL(raw string) (string, error) {
-	parsed, err := url.Parse(strings.TrimSpace(raw))
-	if err != nil || parsed.Host == "" || parsed.User != nil ||
-		parsed.Fragment != "" || parsed.RawQuery != "" || parsed.Scheme != "https" {
-		return "", fmt.Errorf(
-			"%w: mint URL must be an absolute https URL without credentials, query, or fragment",
-			ErrInvalid,
+// Plaintext used to be refused outright here, on the reasoning that the
+// projected service-account token travels on this request as a bearer
+// credential and a credential request goes over an authenticated channel or it
+// does not go. That reasoning stands, and the channel is now the cell's mesh:
+// in-cell, every hop is carried by the mesh's mTLS between workload identities,
+// the mint endpoint is the gateway's workload port, which the mesh admits only
+// from composed workloads, and the token presented on it is single-use and
+// spent by the mint it is read for. So plaintext to an in-cluster Service
+// address under the composition's assertion IS the authenticated channel, and
+// plaintext anywhere the mesh does not reach — any other host, or a loopback
+// hop off a local run — is still refused by name. A nil source has no way to
+// read either fact, so it admits https alone.
+func validateMintURL(raw string, source TransportSource) (endpoint string, plaintext bool, err error) {
+	if source == nil {
+		source = httpsOnly{}
+	}
+	parsed, err := AdmitEndpoint(raw, source, "mint endpoint")
+	if err != nil {
+		return "", false, err
+	}
+	return parsed.String(), parsed.Scheme == "http", nil
+}
+
+// httpsOnly is the transport posture of a mint client given no Transport: with
+// nothing to read the composition's assertion or the environment from, nothing
+// is asserted and this is not a local run, and AdmitEndpoint admits https alone.
+type httpsOnly struct{}
+
+func (httpsOnly) WorkspaceValueIfSet(string, string) (string, bool, error) { return "", false, nil }
+func (httpsOnly) IsLocalRun() bool                                         { return false }
+
+// validateMintHandshakeSources holds the three handshake sources to the
+// transport: all three required for an https endpoint, where each is read on
+// every handshake, and all three nil for a plaintext one, where no handshake
+// ever reads them. A source set beside a plaintext URL is refused rather than
+// ignored, because an AdmittedPeers that nothing consults reads, in the
+// configuration, as peer admission that is happening.
+func validateMintHandshakeSources(options MintOptions, endpoint string, plaintext bool) error {
+	if plaintext {
+		if options.TrustAnchor != nil || options.ClientCertificate != nil || options.AdmittedPeers != nil {
+			return fmt.Errorf(
+				"%w: the mint URL is plaintext, so there is no handshake for TrustAnchor, ClientCertificate "+
+					"or AdmittedPeers to apply to; a source set beside a plaintext URL is a check that never runs, "+
+					"and all three must be nil",
+				ErrInvalid,
+			)
+		}
+		return nil
+	}
+	if options.TrustAnchor == nil {
+		return fmt.Errorf(
+			"%w: no trust anchor for the mint endpoint %s: TrustAnchor must read explicitly configured roots; "+
+				"there is no default, including x509.SystemCertPool",
+			ErrInvalid, endpoint,
 		)
 	}
-	return parsed.String(), nil
+	if options.ClientCertificate == nil {
+		return fmt.Errorf("%w: no client certificate source for the mint endpoint", ErrInvalid)
+	}
+	if options.AdmittedPeers == nil {
+		return fmt.Errorf("%w: no admitted peer source for the mint endpoint", ErrInvalid)
+	}
+	return nil
 }
 
 // tlsVerificationFailure names the reason when err is a failure to

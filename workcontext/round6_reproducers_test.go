@@ -171,9 +171,8 @@ type mintRequest struct {
 `+extra+`
 }
 type mintResponse struct {
-	WorkContext      string `+"`json:\"work_context\"`"+`
-	InstallationID   string `+"`json:\"installation_id\"`"+`
-	BuildIncarnation string `+"`json:\"build_incarnation\"`"+`
+	WorkContext    string `+"`json:\"work_context\"`"+`
+	InstallationID string `+"`json:\"installation_id\"`"+`
 }
 func encode(a string) ([]byte, error) { return json.Marshal(mintRequest{Audience: a}) }`)
 	}
