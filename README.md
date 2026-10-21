@@ -108,6 +108,15 @@ allowlists, exact names, API qualifiers, and ambiguity. Its refusal is returned
 to the caller, including `ErrEndpointNotReachable` for a private endpoint
 queried across modules.
 
+`Init` also enables the OTLP trace exporter when the process was handed an
+intake: Codefly delivers `OTEL_EXPORTER_OTLP_ENDPOINT` (a URL whose scheme
+fixes the transport), `OTEL_SERVICE_NAME` and `OTEL_RESOURCE_ATTRIBUTES` to
+every service it runs or renders, from the environment's `telemetry:` block. A
+service declares no configuration group and dials no address for this; one
+started with no endpoint exports nothing. An exporter that cannot be built is
+logged, never fatal. Call `codefly.ShutdownTelemetry(ctx)` on the way down so
+the last spans are flushed.
+
 `ResolveNetworkInstance` returns resolution errors with no instance, and
 `NetworkInstance` returns nil on those errors. No entrypoint ever substitutes
 an address for an unavailable, external, forbidden, or invalid endpoint.
