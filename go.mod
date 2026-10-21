@@ -3,9 +3,9 @@ module github.com/codefly-dev/sdk-go
 go 1.27.0
 
 require (
-	connectrpc.com/connect v1.21.0
+	connectrpc.com/connect v1.21.1
 	github.com/codefly-dev/core v0.19.6-0.20261018051341-b81d92e6feda
-	github.com/jackc/pgx/v5 v5.10.0
+	github.com/jackc/pgx/v5 v5.11.0
 	github.com/stretchr/testify v1.12.1
 	golang.org/x/mod v0.42.0
 	google.golang.org/grpc v1.84.0
