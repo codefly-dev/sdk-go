@@ -7,6 +7,7 @@ require (
 	github.com/codefly-dev/core v0.19.1
 	github.com/jackc/pgx/v5 v5.10.0
 	github.com/stretchr/testify v1.12.1
+	golang.org/x/mod v0.42.0
 	google.golang.org/grpc v1.84.0
 	google.golang.org/protobuf v1.36.12
 )
@@ -103,4 +104,13 @@ require (
 // retraction takes effect only once a NEW version is tagged carrying this
 // go.mod, and nothing here deletes anything from the proxy, because nothing
 // can.
-retract [v0.1.51, v0.1.65] // a second Work Context implementation at the root
+retract (
+	v0.1.66-0.20260917202218-97dfea9e20d8 // a second Work Context implementation, pinned from compat/v0.1.65
+	[v0.1.51, v0.1.65] // a second Work Context implementation at the root
+	// Two pseudo-versions released modules pinned from the compat/v0.1.65 branch
+	// (annotations 0.2.15, robin 0.1.23, record-store 0.2.2): they carry the same
+	// implementation and sort outside the range above (a prerelease of v0.1.51, and
+	// one of v0.1.66). The branch is gone; the tag compat-v0.1.65-pins keeps them
+	// reachable so those releases still build, retracted so nothing new picks them.
+	v0.1.51-0.20260927165945-8157d3abecb2 // a second Work Context implementation, pinned from compat/v0.1.65
+)
