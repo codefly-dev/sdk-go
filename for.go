@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 
 	"github.com/codefly-dev/core/configurations"
@@ -392,6 +393,67 @@ func (q *Query) WorkspaceSecret(name string, key string) (string, error) {
 	return q.workspaceConfigurationValue(resources.WorkspaceSecretConfigurationPrefix, name, key)
 }
 
+// ErrWorkspaceConfigurationAbsent reports that no carrier holds the workspace
+// configuration asked for: a group with no key, or a key with no value. It is
+// absence, an answer; a carrier that is there and cannot be read is a
+// different error and never wraps it.
+var ErrWorkspaceConfigurationAbsent = errors.New("no workspace configuration value")
+
+// WorkspaceConfigurationKeys lists, sorted, the keys of one non-secret
+// workspace configuration group this process received. A group whose keys
+// carry an identity the caller must discover (a group keyed by generated
+// names, read value by value) is enumerated here rather than by reading
+// Codefly's environment variable encoding.
+//
+// Each key is spelled so that WorkspaceConfiguration(name, key) reads its
+// value, and only keys a carrier delivers non-empty are listed. A group no
+// carrier holds returns an empty list and an error wrapping
+// ErrWorkspaceConfigurationAbsent.
+//
+// Listing reads names, never values: no file a carrier names is opened, and
+// no authority pin is read. A value is read through the per-key accessors,
+// which apply their own rules, so a listed key whose delivery cannot be read
+// fails there, naming its reason, rather than being dropped from the list.
+func (q *Query) WorkspaceConfigurationKeys(name string) ([]string, error) {
+	return workspaceConfigurationKeys(resources.WorkspaceConfigurationPrefix, name)
+}
+
+// WorkspaceSecretKeys is WorkspaceConfigurationKeys for the secret namespace:
+// each key it lists is read with WorkspaceSecret(name, key). Listing opens no
+// secret file and caches no secret value.
+func (q *Query) WorkspaceSecretKeys(name string) ([]string, error) {
+	return workspaceConfigurationKeys(resources.WorkspaceSecretConfigurationPrefix, name)
+}
+
+// workspaceConfigurationKeys matches every delivered name against the group's
+// spellings (exact, then normalized, as workspaceConfigurationValue reads
+// them). A key is kept only in the spelling the per-key lookup builds, so the
+// name it lists is exactly the carrier that lookup reads.
+func workspaceConfigurationKeys(prefix string, name string) ([]string, error) {
+	groups := []string{
+		fmt.Sprintf("%s__%s__", prefix, strings.ToUpper(name)),
+		fmt.Sprintf("%s__%s__", prefix, normalizeWorkspaceEnvironmentKey(name)),
+	}
+	found := map[string]struct{}{}
+	for _, carrier := range deliveredNames() {
+		for _, group := range groups {
+			key, ok := strings.CutPrefix(carrier, group)
+			if ok && key != "" && key == normalizeWorkspaceEnvironmentKey(key) {
+				found[key] = struct{}{}
+			}
+		}
+	}
+	if len(found) == 0 {
+		return []string{}, fmt.Errorf("%w in group %s", ErrWorkspaceConfigurationAbsent, name)
+	}
+	keys := make([]string, 0, len(found))
+	for key := range found {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	return keys, nil
+}
+
 // WorkspaceValue resolves a workspace value from the public namespace first,
 // then the secret namespace. It is intended for settings whose sensitivity is
 // deployment-defined while preserving a single SDK-only lookup boundary.
@@ -475,14 +537,8 @@ func (q *Query) workspaceValueIfSetLive(name string, key string) (string, bool, 
 // isWorkspaceValueAbsent reports whether err is the "nothing carries this name"
 // answer rather than a failure to read something that is there.
 func isWorkspaceValueAbsent(err error) bool {
-	return err != nil && strings.Contains(err.Error(), workspaceValueAbsentReason)
+	return errors.Is(err, ErrWorkspaceConfigurationAbsent)
 }
-
-// workspaceValueAbsentReason is the text workspaceConfigurationValue returns
-// when no namespace carries the name. It is matched here because the lookup
-// reports absence with a wool error rather than a sentinel; a sentinel is the
-// better shape and this is where it would be read from if one lands.
-const workspaceValueAbsentReason = "no workspace configuration value for"
 
 func (q *Query) workspaceValueLive(name string, key string) (string, error) {
 	if value, err := q.WorkspaceConfiguration(name, key); err == nil && value != "" {
@@ -491,7 +547,7 @@ func (q *Query) workspaceValueLive(name string, key string) (string, error) {
 	if value, err := q.WorkspaceSecret(name, key); err == nil && value != "" {
 		return value, nil
 	}
-	return "", wool.Get(q.ctx).In("WorkspaceValue").NewError("no workspace configuration value for %s/%s", name, key)
+	return "", fmt.Errorf("%w for %s/%s", ErrWorkspaceConfigurationAbsent, name, key)
 }
 
 func (q *Query) workspaceConfigurationValue(prefix string, name string, key string) (string, error) {
@@ -514,7 +570,7 @@ func (q *Query) workspaceConfigurationValue(prefix string, name string, key stri
 			break
 		}
 	}
-	return "", wool.Get(q.ctx).In("WorkspaceConfiguration").NewError("no workspace configuration value for %s/%s", name, key)
+	return "", fmt.Errorf("%w for %s/%s", ErrWorkspaceConfigurationAbsent, name, key)
 }
 
 func normalizeWorkspaceEnvironmentKey(value string) string {
