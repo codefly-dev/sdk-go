@@ -6,7 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"slices"
+	"sort"
 	"strings"
 
 	"github.com/codefly-dev/core/configurations"
@@ -406,50 +406,39 @@ var ErrWorkspaceConfigurationAbsent = errors.New("no workspace configuration val
 // Codefly's environment variable encoding.
 //
 // Each key is spelled so that WorkspaceConfiguration(name, key) reads its
-// value, and only keys that read a non-empty value are listed. A group no
+// value, and only keys a carrier delivers non-empty are listed. A group no
 // carrier holds returns an empty list and an error wrapping
-// ErrWorkspaceConfigurationAbsent; a key whose delivery cannot be read fails
-// the whole listing, because a partial list would silently omit that key.
+// ErrWorkspaceConfigurationAbsent.
 //
-// Listing reads no authority pin: it returns names, not values. A value is
-// read through the per-key accessors, which apply their own rules.
+// Listing reads names, never values: no file a carrier names is opened, and
+// no authority pin is read. A value is read through the per-key accessors,
+// which apply their own rules, so a listed key whose delivery cannot be read
+// fails there, naming its reason, rather than being dropped from the list.
 func (q *Query) WorkspaceConfigurationKeys(name string) ([]string, error) {
-	return q.workspaceConfigurationKeys(resources.WorkspaceConfigurationPrefix, name)
+	return workspaceConfigurationKeys(resources.WorkspaceConfigurationPrefix, name)
 }
 
 // WorkspaceSecretKeys is WorkspaceConfigurationKeys for the secret namespace:
-// each key it lists is read with WorkspaceSecret(name, key).
+// each key it lists is read with WorkspaceSecret(name, key). Listing opens no
+// secret file and caches no secret value.
 func (q *Query) WorkspaceSecretKeys(name string) ([]string, error) {
-	return q.workspaceConfigurationKeys(resources.WorkspaceSecretConfigurationPrefix, name)
+	return workspaceConfigurationKeys(resources.WorkspaceSecretConfigurationPrefix, name)
 }
 
-// workspaceConfigurationKeys enumerates every carrier name under the group's
+// workspaceConfigurationKeys matches every delivered name against the group's
 // spellings (exact, then normalized, as workspaceConfigurationValue reads
-// them) and keeps a key only when the per-key lookup answers it, so a listed
-// key and a readable key are one fact.
-func (q *Query) workspaceConfigurationKeys(prefix string, name string) ([]string, error) {
+// them). A key is kept only in the spelling the per-key lookup builds, so the
+// name it lists is exactly the carrier that lookup reads.
+func workspaceConfigurationKeys(prefix string, name string) ([]string, error) {
 	groups := []string{
 		fmt.Sprintf("%s__%s__", prefix, strings.ToUpper(name)),
 		fmt.Sprintf("%s__%s__", prefix, normalizeWorkspaceEnvironmentKey(name)),
 	}
 	found := map[string]struct{}{}
-	for _, carrier := range carrierNames() {
+	for _, carrier := range deliveredNames() {
 		for _, group := range groups {
 			key, ok := strings.CutPrefix(carrier, group)
-			if !ok || key == "" || key != normalizeWorkspaceEnvironmentKey(key) {
-				continue
-			}
-			if _, listed := found[key]; listed {
-				continue
-			}
-			value, err := q.workspaceConfigurationValue(prefix, name, key)
-			if err != nil {
-				if isWorkspaceValueAbsent(err) {
-					continue
-				}
-				return []string{}, err
-			}
-			if value != "" {
+			if ok && key != "" && key == normalizeWorkspaceEnvironmentKey(key) {
 				found[key] = struct{}{}
 			}
 		}
@@ -461,7 +450,7 @@ func (q *Query) workspaceConfigurationKeys(prefix string, name string) ([]string
 	for key := range found {
 		keys = append(keys, key)
 	}
-	slices.Sort(keys)
+	sort.Strings(keys)
 	return keys, nil
 }
 
