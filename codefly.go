@@ -269,12 +269,13 @@ func codeflyEnvironmentVariables() []string {
 	return append([]string(nil), environmentVariablesSnapshot...)
 }
 
-// deliveredNames lists, from the carriers the SDK already holds, the name of
-// every value that is delivered non-empty: the snapshot (process values, the
-// values file carriers delivered at load, and injected values) and the live
-// process environment, where an inline value is listed by its own name and a
-// file carrier by the key it carries. It reads no file: a carrier's path is
-// evidence of delivery, and its content is read only by the per-key lookup, so
+// deliveredNames lists the name of every carrier the SDK already holds with a
+// non-empty value: the snapshot (process values, the values file carriers
+// delivered at load, and injected values) and the live process environment,
+// where an inline value is listed by its own name and a file carrier by the
+// key it carries. For a live file carrier the non-empty value is its PATH: no
+// file is opened, so a carrier naming an empty file is listed, and the per-key
+// lookup then answers absent. Its content is read only by that lookup, so
 // listing a secret namespace neither materialises nor caches a secret value.
 func deliveredNames() []string {
 	names := map[string]struct{}{}

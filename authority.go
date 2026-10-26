@@ -95,6 +95,9 @@ func ReadAuthority(ctx context.Context, names ...AuthorityValueName) (*Authority
 			continue
 		}
 		value, err := query.workspaceValueLive(name.Name, name.Key)
+		if err != nil && !isWorkspaceValueAbsent(err) {
+			return nil, fmt.Errorf("%w: %s cannot be read: %w", ErrAuthorityValueMissing, name, err)
+		}
 		if err != nil || strings.TrimSpace(value) == "" {
 			return nil, fmt.Errorf("%w: %s", ErrAuthorityValueMissing, name)
 		}
@@ -164,6 +167,9 @@ func (a *Authority) Recheck(ctx context.Context) error {
 	query := For(ctx)
 	for _, name := range a.Names() {
 		value, err := query.workspaceValueLive(name.Name, name.Key)
+		if err != nil && !isWorkspaceValueAbsent(err) {
+			return fmt.Errorf("%w: %s cannot be read: %w", ErrAuthorityValueChanged, name, err)
+		}
 		if err != nil || strings.TrimSpace(value) == "" {
 			return fmt.Errorf("%w: %s is no longer configured", ErrAuthorityValueChanged, name)
 		}

@@ -129,3 +129,49 @@ func TestAnUnreadableFileCarrierFailsClosed(t *testing.T) {
 	require.ErrorIs(t, err, resources.ErrFileCarrier)
 	require.Error(t, codefly.LoadEnvironmentVariables())
 }
+
+// A public delivery that cannot be read is refused with its reason. It is
+// never answered from the secret namespace under the same name: that is a
+// different delivery, and answering with it would silently replace the value
+// the host meant this process to read (review r139 probed exactly this and got
+// "secretvalue" back with no error). The same holds where the value is read as
+// authority: ReadAuthority refuses, and Recheck refuses a pinned value whose
+// public delivery broke even when the secret namespace holds the pinned value.
+func TestAnUnreadablePublicValueIsNeverAnsweredFromTheSecretNamespace(t *testing.T) {
+	ctx := context.Background()
+	query := codefly.For(ctx)
+	public := resources.WorkspaceConfigurationPrefix + "__PROBE_FB__BINDING"
+	t.Setenv(resources.FileCarrierKey(public), filepath.Join(t.TempDir(), "absent"))
+	t.Setenv(resources.WorkspaceSecretConfigurationPrefix+"__PROBE_FB__BINDING", "secretvalue")
+
+	// The premise: the public read fails, and the secret namespace answers.
+	_, err := query.WorkspaceConfiguration("probe-fb", "BINDING")
+	require.ErrorIs(t, err, resources.ErrFileCarrier)
+	secret, err := query.WorkspaceSecret("probe-fb", "BINDING")
+	require.NoError(t, err)
+	require.Equal(t, "secretvalue", secret)
+
+	value, err := query.WorkspaceValue("probe-fb", "BINDING")
+	require.ErrorIs(t, err, resources.ErrFileCarrier, "the refusal names the public delivery's failure")
+	require.NotErrorIs(t, err, codefly.ErrWorkspaceConfigurationAbsent)
+	require.Empty(t, value)
+	require.NotContains(t, err.Error(), "secretvalue")
+
+	_, err = codefly.ReadAuthority(ctx, codefly.AuthorityValueName{Name: "probe-fb", Key: "BINDING"})
+	require.ErrorIs(t, err, codefly.ErrAuthorityValueMissing)
+	require.ErrorIs(t, err, resources.ErrFileCarrier)
+
+	pinned := resources.WorkspaceConfigurationPrefix + "__PROBE_FB_PINNED__BINDING"
+	t.Setenv(pinned, "pinnedvalue")
+	authority, err := codefly.ReadAuthority(ctx, codefly.AuthorityValueName{Name: "probe-fb-pinned", Key: "BINDING"})
+	require.NoError(t, err)
+	require.NoError(t, os.Unsetenv(pinned))
+	t.Setenv(resources.FileCarrierKey(pinned), filepath.Join(t.TempDir(), "absent"))
+	t.Setenv(resources.WorkspaceSecretConfigurationPrefix+"__PROBE_FB_PINNED__BINDING", "pinnedvalue")
+
+	err = authority.Recheck(ctx)
+	require.ErrorIs(t, err, codefly.ErrAuthorityValueChanged)
+	require.ErrorIs(t, err, resources.ErrFileCarrier)
+	_, err = query.WorkspaceValue("probe-fb-pinned", "BINDING")
+	require.ErrorIs(t, err, resources.ErrFileCarrier)
+}
