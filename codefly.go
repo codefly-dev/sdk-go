@@ -269,6 +269,36 @@ func codeflyEnvironmentVariables() []string {
 	return append([]string(nil), environmentVariablesSnapshot...)
 }
 
+// carrierNames lists the name of every carrier the lookup sources hold: the
+// snapshot (process values, file-carried values and injected values) and the
+// live process environment, where a file carrier is listed under the key it
+// carries. A listing accessor enumerates these names and then reads each one
+// through the ordinary lookup, so it never answers from a source the lookup
+// would not read.
+func carrierNames() []string {
+	names := map[string]struct{}{}
+	for _, entry := range codeflyEnvironmentVariables() {
+		name, _, _ := strings.Cut(entry, "=")
+		names[name] = struct{}{}
+	}
+	for _, entry := range os.Environ() {
+		name, _, found := strings.Cut(entry, "=")
+		if !found {
+			continue
+		}
+		if resources.IsFileCarrierKey(name) {
+			name = resources.CarriedKey(name)
+		}
+		names[name] = struct{}{}
+	}
+	listed := make([]string, 0, len(names))
+	for name := range names {
+		listed = append(listed, name)
+	}
+	sort.Strings(listed)
+	return listed
+}
+
 func injectedEnvironmentValue(name string) (string, bool) {
 	environmentVariablesMu.RLock()
 	defer environmentVariablesMu.RUnlock()
