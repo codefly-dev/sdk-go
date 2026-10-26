@@ -127,9 +127,9 @@ implementation of the capability, reached through typed access; a new dependency
   rebuilds it; a test that sets a carrier and forgets the reload asserts against
   the previous snapshot and passes for the wrong reason. Tests are
   `package codefly_test` and use `t.Setenv`.
-- **An empty injected value is not a value.** A composition templating an unset
-  variable ships the name with an empty string; `RuntimeValue` reports `false`
-  so it cannot shadow the configuration a caller falls back to. Keep that.
+- **An empty injected value is absent** (an unset template variable; it must not
+  shadow a fallback). An empty delivered *file*, and a name in both workspace
+  namespaces, are refused instead ([README](README.md#workspace-values)).
 - **The Work Context has exactly one implementation and it is not here.**
   `core/workcontext` signs, verifies, and answers the *structural* question
   through `Decode`. Nothing here may sign, check a signature, encode a

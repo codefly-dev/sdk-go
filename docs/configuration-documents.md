@@ -18,7 +18,9 @@ For typed decoding, use `DecodeConfigurationDocument(name, &destination)`,
 instead of rounding large integers through `float64`.
 
 Lookups use the injected configuration snapshot, then the process environment,
-then the SDK environment snapshot. Empty carriers are absent. Outcomes are
+then the SDK environment snapshot. An empty inline carrier is absent. A file
+carrier naming an empty or missing file is a broken delivery and reads as
+`ErrConfigurationDocumentUnreadable`, never as missing. Outcomes are
 distinguishable with `errors.Is`:
 
 | Outcome | Sentinel |

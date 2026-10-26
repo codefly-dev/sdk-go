@@ -275,8 +275,9 @@ func codeflyEnvironmentVariables() []string {
 // where an inline value is listed by its own name and a file carrier by the
 // key it carries. For a live file carrier the non-empty value is its PATH: no
 // file is opened, so a carrier naming an empty file is listed, and the per-key
-// lookup then answers absent. Its content is read only by that lookup, so
-// listing a secret namespace neither materialises nor caches a secret value.
+// lookup then refuses it as a broken delivery. Its content is read only by that
+// lookup, so listing a secret namespace neither materialises nor caches a
+// secret value.
 func deliveredNames() []string {
 	names := map[string]struct{}{}
 	for _, entry := range codeflyEnvironmentVariables() {

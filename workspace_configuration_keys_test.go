@@ -188,7 +188,10 @@ func TestWorkspaceConfigurationKeysSeparatesAbsenceFromFailure(t *testing.T) {
 		require.NoError(t, err)
 		assert.Equal(t, []string{"BINDING"}, keys, "listing opens no file, so the carrier's path is what it sees")
 		_, err = codefly.For(ctx).WorkspaceConfiguration("keys-empty-file", "BINDING")
-		assert.ErrorIs(t, err, codefly.ErrWorkspaceConfigurationAbsent, "an empty file reads as absent")
+		require.Error(t, err)
+		assert.NotErrorIs(t, err, codefly.ErrWorkspaceConfigurationAbsent, "an empty delivered file is a broken delivery, not absence")
+		assert.ErrorIs(t, err, resources.ErrFileCarrier)
+		assert.ErrorContains(t, err, "delivered file is empty")
 	})
 
 	t.Run("a value delivered both inline and by file", func(t *testing.T) {
