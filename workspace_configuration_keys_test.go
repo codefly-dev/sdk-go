@@ -115,10 +115,31 @@ func TestWorkspaceConfigurationKeysListsInjectedConfiguration(t *testing.T) {
 	assert.Equal(t, []string{"CREDENTIAL"}, secrets)
 }
 
+// Listing a secret group opens no secret file and caches no secret value:
+// the value read after the listing is what the file holds then, so the listing
+// did not keep a copy of it.
+func TestWorkspaceSecretKeysReadsNoSecretValue(t *testing.T) {
+	key := "CODEFLY__WORKSPACE_SECRET_CONFIGURATION__KEYS_SECRET_FILED__CREDENTIAL"
+	path := filepath.Join(t.TempDir(), "credential")
+	require.NoError(t, os.WriteFile(path, []byte("before listing"), 0o600))
+	t.Cleanup(func() { _ = codefly.LoadEnvironmentVariables() })
+	t.Setenv(resources.FileCarrierKey(key), path)
+
+	keys, err := codefly.For(t.Context()).WorkspaceSecretKeys("keys-secret-filed")
+
+	require.NoError(t, err)
+	assert.Equal(t, []string{"CREDENTIAL"}, keys)
+	require.NoError(t, os.WriteFile(path, []byte("after listing"), 0o600))
+	value, err := codefly.For(t.Context()).WorkspaceSecret("keys-secret-filed", keys[0])
+	require.NoError(t, err)
+	assert.Equal(t, "after listing", value, "the listing must not have read or cached the secret")
+}
+
 // Absence is an answer and a failed read is not: an absent group (or one
 // whose only carrier is empty) is an empty list with the error the per-key
-// accessor gives an absent key, and a delivery that cannot be read fails the
-// listing with an error that is not absence.
+// accessor gives an absent key, and a delivery that cannot be read is listed
+// (never silently dropped) and fails where its value is read, with an error
+// that is not absence.
 func TestWorkspaceConfigurationKeysSeparatesAbsenceFromFailure(t *testing.T) {
 	ctx := t.Context()
 
@@ -148,9 +169,11 @@ func TestWorkspaceConfigurationKeysSeparatesAbsenceFromFailure(t *testing.T) {
 
 		keys, err := codefly.For(ctx).WorkspaceConfigurationKeys("keys-unreadable")
 
+		require.NoError(t, err)
+		assert.Equal(t, []string{"BINDING", "READABLE"}, keys, "an unreadable delivery is listed, never silently omitted")
+		_, err = codefly.For(ctx).WorkspaceConfiguration("keys-unreadable", "BINDING")
 		require.Error(t, err)
 		assert.NotErrorIs(t, err, codefly.ErrWorkspaceConfigurationAbsent, "an unreadable delivery is not absence")
 		assert.ErrorIs(t, err, resources.ErrFileCarrier)
-		assert.Empty(t, keys, "a partial list would silently omit the unreadable key")
 	})
 }

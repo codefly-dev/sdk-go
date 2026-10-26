@@ -269,21 +269,23 @@ func codeflyEnvironmentVariables() []string {
 	return append([]string(nil), environmentVariablesSnapshot...)
 }
 
-// carrierNames lists the name of every carrier the lookup sources hold: the
-// snapshot (process values, file-carried values and injected values) and the
-// live process environment, where a file carrier is listed under the key it
-// carries. A listing accessor enumerates these names and then reads each one
-// through the ordinary lookup, so it never answers from a source the lookup
-// would not read.
-func carrierNames() []string {
+// deliveredNames lists, from the carriers the SDK already holds, the name of
+// every value that is delivered non-empty: the snapshot (process values, the
+// values file carriers delivered at load, and injected values) and the live
+// process environment, where an inline value is listed by its own name and a
+// file carrier by the key it carries. It reads no file: a carrier's path is
+// evidence of delivery, and its content is read only by the per-key lookup, so
+// listing a secret namespace neither materialises nor caches a secret value.
+func deliveredNames() []string {
 	names := map[string]struct{}{}
 	for _, entry := range codeflyEnvironmentVariables() {
-		name, _, _ := strings.Cut(entry, "=")
-		names[name] = struct{}{}
+		if name, value, found := strings.Cut(entry, "="); found && value != "" {
+			names[name] = struct{}{}
+		}
 	}
 	for _, entry := range os.Environ() {
-		name, _, found := strings.Cut(entry, "=")
-		if !found {
+		name, value, found := strings.Cut(entry, "=")
+		if !found || value == "" {
 			continue
 		}
 		if resources.IsFileCarrierKey(name) {
