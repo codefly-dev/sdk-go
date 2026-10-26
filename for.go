@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 
 	"github.com/codefly-dev/core/configurations"
@@ -382,9 +383,78 @@ func (q *Query) WorkspaceSecret(name string, key string) (string, error) {
 	return q.workspaceConfigurationValue(resources.WorkspaceSecretConfigurationPrefix, name, key)
 }
 
+// ErrWorkspaceConfigurationAbsent reports that no carrier holds the workspace
+// configuration asked for: a group with no key, or a key with no value. It is
+// absence, an answer; a carrier that is there and cannot be read is a
+// different error and never wraps it.
+var ErrWorkspaceConfigurationAbsent = errors.New("no workspace configuration value")
+
+// WorkspaceConfigurationKeys lists, sorted, the keys of one non-secret
+// workspace configuration group this process received. A group whose keys
+// carry an identity the caller must discover (a group keyed by generated
+// names, read value by value) is enumerated here rather than by reading
+// Codefly's environment variable encoding.
+//
+// Each key is spelled so that WorkspaceConfiguration(name, key) reads its
+// value. A key is listed when a carrier names it: an inline value that is
+// non-empty, or a file carrier whose path is non-empty. A group no carrier
+// holds returns an empty list and an error wrapping
+// ErrWorkspaceConfigurationAbsent.
+//
+// Listing reads names, never values: no file a carrier names is opened, and
+// no authority pin is read. A file's content is judged only by the per-key
+// accessors, which apply their own rules, so a listed key can still read as
+// absent (its file is empty) or fail with a named reason (its file is missing,
+// or it is delivered both inline and by file). It is never dropped from the
+// list.
+func (q *Query) WorkspaceConfigurationKeys(name string) ([]string, error) {
+	return workspaceConfigurationKeys(resources.WorkspaceConfigurationPrefix, name)
+}
+
+// WorkspaceSecretKeys is WorkspaceConfigurationKeys for the secret namespace:
+// each key it lists is read with WorkspaceSecret(name, key). Listing opens no
+// secret file and caches no secret value.
+func (q *Query) WorkspaceSecretKeys(name string) ([]string, error) {
+	return workspaceConfigurationKeys(resources.WorkspaceSecretConfigurationPrefix, name)
+}
+
+// workspaceConfigurationKeys matches every delivered name against the group's
+// spellings (exact, then normalized, as workspaceConfigurationValue reads
+// them). A key is kept only in the spelling the per-key lookup builds, so the
+// name it lists is exactly the carrier that lookup reads.
+func workspaceConfigurationKeys(prefix string, name string) ([]string, error) {
+	groups := []string{
+		fmt.Sprintf("%s__%s__", prefix, strings.ToUpper(name)),
+		fmt.Sprintf("%s__%s__", prefix, normalizeWorkspaceEnvironmentKey(name)),
+	}
+	found := map[string]struct{}{}
+	for _, carrier := range deliveredNames() {
+		for _, group := range groups {
+			key, ok := strings.CutPrefix(carrier, group)
+			if ok && key != "" && key == normalizeWorkspaceEnvironmentKey(key) {
+				found[key] = struct{}{}
+			}
+		}
+	}
+	if len(found) == 0 {
+		return []string{}, fmt.Errorf("%w in group %s", ErrWorkspaceConfigurationAbsent, name)
+	}
+	keys := make([]string, 0, len(found))
+	for key := range found {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	return keys, nil
+}
+
 // WorkspaceValue resolves a workspace value from the public namespace first,
 // then the secret namespace. It is intended for settings whose sensitivity is
 // deployment-defined while preserving a single SDK-only lookup boundary.
+//
+// Only an absent public value moves the lookup on to the secret namespace. A
+// public delivery that cannot be read (a missing file, a value delivered both
+// inline and by file) is refused with that reason, and the secret namespace
+// is not consulted.
 //
 // A value this process read as authority-bearing (see ReadAuthority) answers
 // from what was read at boot, and a live value that has since drifted is
@@ -395,6 +465,9 @@ func (q *Query) WorkspaceValue(name string, key string) (string, error) {
 	addressed := AuthorityValueName{Name: name, Key: key}.canonical()
 	pinned, isPinned := authorityPin(addressed)
 	value, err := q.workspaceValueLive(name, key)
+	if err != nil && !isWorkspaceValueAbsent(err) {
+		return "", err
+	}
 	if !isPinned {
 		return value, err
 	}
@@ -407,16 +480,16 @@ func (q *Query) WorkspaceValue(name string, key string) (string, error) {
 	return pinned, nil
 }
 
-// WorkspaceValueIfSet resolves a workspace value and distinguishes the three
-// answers WorkspaceValue flattens into two: the value is set, the value is
-// genuinely not configured, or the lookup FAILED.
+// WorkspaceValueIfSet resolves a workspace value and answers absence without
+// an error: the value is set, the value is genuinely not configured, or the
+// lookup FAILED.
 //
-// WorkspaceValue reports "not configured" and "the delivery could not be read"
-// with the same error, because its callers want a value or nothing. A caller
-// deciding a posture question cannot live with that: a setting that must be
-// asserted before something is permitted has to treat an unreadable delivery,
-// and an authority-bearing value that has drifted, as a refusal rather than as
-// "the operator did not assert it". Absence is an answer; a failed read is not.
+// WorkspaceValue answers absence with an error, because its callers want a
+// value or nothing. A caller deciding a posture question needs absence as an
+// answer: a setting that must be asserted before something is permitted has to
+// treat an unreadable delivery, and an authority-bearing value that has
+// drifted, as a refusal rather than as "the operator did not assert it".
+// Absence is an answer; a failed read is not.
 //
 // So an unreadable file carrier, a value delivered both inline and by file, and
 // ErrAuthorityValueChanged all come back as errors here, and only a value no
@@ -465,23 +538,23 @@ func (q *Query) workspaceValueIfSetLive(name string, key string) (string, bool, 
 // isWorkspaceValueAbsent reports whether err is the "nothing carries this name"
 // answer rather than a failure to read something that is there.
 func isWorkspaceValueAbsent(err error) bool {
-	return err != nil && strings.Contains(err.Error(), workspaceValueAbsentReason)
+	return errors.Is(err, ErrWorkspaceConfigurationAbsent)
 }
 
-// workspaceValueAbsentReason is the text workspaceConfigurationValue returns
-// when no namespace carries the name. It is matched here because the lookup
-// reports absence with a wool error rather than a sentinel; a sentinel is the
-// better shape and this is where it would be read from if one lands.
-const workspaceValueAbsentReason = "no workspace configuration value for"
-
+// workspaceValueLive is workspaceValueIfSetLive with absence as an error. A
+// public delivery that cannot be read is returned as the failure it is, never
+// stepped over to the secret namespace: a value under the same name there is a
+// different delivery, and answering with it would let an unreadable public
+// value be silently replaced.
 func (q *Query) workspaceValueLive(name string, key string) (string, error) {
-	if value, err := q.WorkspaceConfiguration(name, key); err == nil && value != "" {
-		return value, nil
+	value, found, err := q.workspaceValueIfSetLive(name, key)
+	if err != nil {
+		return "", err
 	}
-	if value, err := q.WorkspaceSecret(name, key); err == nil && value != "" {
-		return value, nil
+	if !found {
+		return "", fmt.Errorf("%w for %s/%s", ErrWorkspaceConfigurationAbsent, name, key)
 	}
-	return "", wool.Get(q.ctx).In("WorkspaceValue").NewError("no workspace configuration value for %s/%s", name, key)
+	return value, nil
 }
 
 func (q *Query) workspaceConfigurationValue(prefix string, name string, key string) (string, error) {
@@ -504,7 +577,7 @@ func (q *Query) workspaceConfigurationValue(prefix string, name string, key stri
 			break
 		}
 	}
-	return "", wool.Get(q.ctx).In("WorkspaceConfiguration").NewError("no workspace configuration value for %s/%s", name, key)
+	return "", fmt.Errorf("%w for %s/%s", ErrWorkspaceConfigurationAbsent, name, key)
 }
 
 func normalizeWorkspaceEnvironmentKey(value string) string {

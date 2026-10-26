@@ -269,6 +269,39 @@ func codeflyEnvironmentVariables() []string {
 	return append([]string(nil), environmentVariablesSnapshot...)
 }
 
+// deliveredNames lists the name of every carrier the SDK already holds with a
+// non-empty value: the snapshot (process values, the values file carriers
+// delivered at load, and injected values) and the live process environment,
+// where an inline value is listed by its own name and a file carrier by the
+// key it carries. For a live file carrier the non-empty value is its PATH: no
+// file is opened, so a carrier naming an empty file is listed, and the per-key
+// lookup then answers absent. Its content is read only by that lookup, so
+// listing a secret namespace neither materialises nor caches a secret value.
+func deliveredNames() []string {
+	names := map[string]struct{}{}
+	for _, entry := range codeflyEnvironmentVariables() {
+		if name, value, found := strings.Cut(entry, "="); found && value != "" {
+			names[name] = struct{}{}
+		}
+	}
+	for _, entry := range os.Environ() {
+		name, value, found := strings.Cut(entry, "=")
+		if !found || value == "" {
+			continue
+		}
+		if resources.IsFileCarrierKey(name) {
+			name = resources.CarriedKey(name)
+		}
+		names[name] = struct{}{}
+	}
+	listed := make([]string, 0, len(names))
+	for name := range names {
+		listed = append(listed, name)
+	}
+	sort.Strings(listed)
+	return listed
+}
+
 func injectedEnvironmentValue(name string) (string, bool) {
 	environmentVariablesMu.RLock()
 	defer environmentVariablesMu.RUnlock()
