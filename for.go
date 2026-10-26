@@ -413,10 +413,9 @@ var ErrWorkspaceConfigurationAbsent = errors.New("no workspace configuration val
 //
 // Listing reads names, never values: no file a carrier names is opened, and
 // no authority pin is read. A file's content is judged only by the per-key
-// accessors, which apply their own rules, so a listed key can still read as
-// absent (its file is empty) or fail with a named reason (its file is missing,
-// or it is delivered both inline and by file). It is never dropped from the
-// list.
+// accessors, which apply their own rules, so a listed key can still fail with
+// a named reason (its file is missing or empty, or it is delivered both inline
+// and by file). It is never dropped from the list.
 func (q *Query) WorkspaceConfigurationKeys(name string) ([]string, error) {
 	return workspaceConfigurationKeys(resources.WorkspaceConfigurationPrefix, name)
 }
@@ -461,22 +460,25 @@ func workspaceConfigurationKeys(prefix string, name string) ([]string, error) {
 // then the secret namespace. It is intended for settings whose sensitivity is
 // deployment-defined while preserving a single SDK-only lookup boundary.
 //
-// Only an absent public value moves the lookup on to the secret namespace. A
-// public delivery that cannot be read (a missing file, a value delivered both
-// inline and by file) is refused with that reason, and the secret namespace
-// is not consulted.
+// A value lives in exactly one namespace. A public delivery that cannot be read
+// (a missing or empty file, a value delivered both inline and by file) is
+// refused with that reason, and the secret namespace does not answer in its
+// place. A name carried in both namespaces is refused with
+// ErrWorkspaceValueInBothNamespaces: two sources for one value, neither of
+// which can be preferred silently.
 //
 // A value this process read as authority-bearing (see ReadAuthority) answers
-// from what was read at boot, and a live value that has since drifted is
-// refused with ErrAuthorityValueChanged rather than returned. Without that, a
-// process could seal its credential to the boot value and then authorize
-// against a different one through the ordinary accessor.
+// from what was read at boot. A live value that has since drifted, been
+// withdrawn, or become unreadable is refused with ErrAuthorityValueChanged
+// (wrapping the read failure, if there was one) rather than returned. Without
+// that, a process could seal its credential to the boot value and then
+// authorize against a different one through the ordinary accessor.
 func (q *Query) WorkspaceValue(name string, key string) (string, error) {
 	addressed := AuthorityValueName{Name: name, Key: key}.canonical()
 	pinned, isPinned := authorityPin(addressed)
 	value, err := q.workspaceValueLive(name, key)
 	if err != nil && !isWorkspaceValueAbsent(err) {
-		return "", err
+		return "", pinnedReadFailure(addressed, isPinned, err)
 	}
 	if !isPinned {
 		return value, err
@@ -501,15 +503,17 @@ func (q *Query) WorkspaceValue(name string, key string) (string, error) {
 // drifted, as a refusal rather than as "the operator did not assert it".
 // Absence is an answer; a failed read is not.
 //
-// So an unreadable file carrier, a value delivered both inline and by file, and
-// ErrAuthorityValueChanged all come back as errors here, and only a value no
-// namespace carries comes back as (", false, nil").
+// So an unreadable or empty file carrier, a value delivered both inline and by
+// file, a name carried in both namespaces, and ErrAuthorityValueChanged all
+// come back as errors here, and only a value no namespace carries comes back
+// as ("", false, nil). For a pinned name, a read failure is
+// ErrAuthorityValueChanged wrapping it, as Authority.Recheck reports it.
 func (q *Query) WorkspaceValueIfSet(name string, key string) (string, bool, error) {
 	addressed := AuthorityValueName{Name: name, Key: key}.canonical()
 	pinned, isPinned := authorityPin(addressed)
 	value, found, err := q.workspaceValueIfSetLive(name, key)
 	if err != nil {
-		return "", false, err
+		return "", false, pinnedReadFailure(addressed, isPinned, err)
 	}
 	if !isPinned {
 		return value, found, nil
@@ -523,26 +527,61 @@ func (q *Query) WorkspaceValueIfSet(name string, key string) (string, bool, erro
 	return pinned, true, nil
 }
 
-// workspaceValueIfSetLive reads the public namespace and then the secret one,
-// returning a lookup failure rather than continuing past it. Continuing is what
-// makes an unreadable value indistinguishable from an absent one.
+// ErrWorkspaceValueInBothNamespaces reports a workspace value carried in both
+// the public and the secret namespace under one name. They are two sources for
+// one value, like a value delivered both inline and by file, and the SDK
+// refuses rather than choose: preferring either would let a stale copy left in
+// the other answer, with nothing reported.
+var ErrWorkspaceValueInBothNamespaces = errors.New("workspace value is carried in both the public and the secret namespace")
+
+// workspaceValueIfSetLive reads the public and the secret namespace and
+// answers from the one that carries the value. A lookup failure in either is
+// returned rather than continued past, because continuing is what makes an
+// unreadable value indistinguishable from an absent one, and a value carried
+// in both is refused.
 func (q *Query) workspaceValueIfSetLive(name string, key string) (string, bool, error) {
-	for _, prefix := range []string{
-		resources.WorkspaceConfigurationPrefix,
-		resources.WorkspaceSecretConfigurationPrefix,
-	} {
-		value, err := q.workspaceConfigurationValue(prefix, name, key)
-		if err != nil {
-			if isWorkspaceValueAbsent(err) {
-				continue
-			}
-			return "", false, err
-		}
-		if value != "" {
-			return value, true, nil
-		}
+	public, publicFound, err := q.workspaceNamespaceValue(resources.WorkspaceConfigurationPrefix, name, key)
+	if err != nil {
+		return "", false, err
+	}
+	secret, secretFound, err := q.workspaceNamespaceValue(resources.WorkspaceSecretConfigurationPrefix, name, key)
+	if err != nil {
+		return "", false, err
+	}
+	switch {
+	case publicFound && secretFound:
+		return "", false, fmt.Errorf("%w: %s/%s", ErrWorkspaceValueInBothNamespaces, name, key)
+	case publicFound:
+		return public, true, nil
+	case secretFound:
+		return secret, true, nil
 	}
 	return "", false, nil
+}
+
+// workspaceNamespaceValue is one namespace's answer with absence as a result
+// rather than an error.
+func (q *Query) workspaceNamespaceValue(prefix string, name string, key string) (string, bool, error) {
+	value, err := q.workspaceConfigurationValue(prefix, name, key)
+	if err != nil {
+		if isWorkspaceValueAbsent(err) {
+			return "", false, nil
+		}
+		return "", false, err
+	}
+	return value, value != "", nil
+}
+
+// pinnedReadFailure is what a failed live read means for name: for a value
+// pinned as authority it is ErrAuthorityValueChanged wrapping the failure, as
+// Authority.Recheck reports it, so a caller that stops or re-seals on that
+// sentinel sees a broken delivery of a pinned value; otherwise it is the
+// failure itself.
+func pinnedReadFailure(name AuthorityValueName, isPinned bool, err error) error {
+	if !isPinned {
+		return err
+	}
+	return fmt.Errorf("%w: %s cannot be read: %w", ErrAuthorityValueChanged, name, err)
 }
 
 // isWorkspaceValueAbsent reports whether err is the "nothing carries this name"
@@ -552,10 +591,10 @@ func isWorkspaceValueAbsent(err error) bool {
 }
 
 // workspaceValueLive is workspaceValueIfSetLive with absence as an error. A
-// public delivery that cannot be read is returned as the failure it is, never
-// stepped over to the secret namespace: a value under the same name there is a
-// different delivery, and answering with it would let an unreadable public
-// value be silently replaced.
+// delivery that cannot be read is returned as the failure it is, never
+// stepped over to the other namespace: a value under the same name there is a
+// different delivery, and answering with it would let an unreadable value be
+// silently replaced.
 func (q *Query) workspaceValueLive(name string, key string) (string, error) {
 	value, found, err := q.workspaceValueIfSetLive(name, key)
 	if err != nil {

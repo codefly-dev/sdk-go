@@ -172,6 +172,96 @@ func TestAnUnreadablePublicValueIsNeverAnsweredFromTheSecretNamespace(t *testing
 	err = authority.Recheck(ctx)
 	require.ErrorIs(t, err, codefly.ErrAuthorityValueChanged)
 	require.ErrorIs(t, err, resources.ErrFileCarrier)
+	// The ordinary accessors report a pinned value's broken delivery exactly as
+	// Recheck does: ErrAuthorityValueChanged, wrapping the reason.
 	_, err = query.WorkspaceValue("probe-fb-pinned", "BINDING")
+	require.ErrorIs(t, err, codefly.ErrAuthorityValueChanged)
 	require.ErrorIs(t, err, resources.ErrFileCarrier)
+	_, found, err := query.WorkspaceValueIfSet("probe-fb-pinned", "BINDING")
+	require.ErrorIs(t, err, codefly.ErrAuthorityValueChanged)
+	require.ErrorIs(t, err, resources.ErrFileCarrier)
+	require.False(t, found)
+	require.NotContains(t, err.Error(), "pinnedvalue")
+}
+
+// A file carrier exists only for a value too large for the environment, so a
+// carrier naming an empty file is a broken delivery (a truncated write, a mount
+// race), refused like a missing file. It never reads as absent, so the secret
+// namespace cannot answer in its place (review r144 probed this and got "sec1"
+// back with no error), and the process refuses to load it.
+func TestAnEmptyDeliveredFileIsABrokenDelivery(t *testing.T) {
+	ctx := context.Background()
+	query := codefly.For(ctx)
+	public := resources.WorkspaceConfigurationPrefix + "__PROBE_EMPTY__K"
+	path := filepath.Join(t.TempDir(), "empty")
+	require.NoError(t, os.WriteFile(path, nil, 0o600))
+	t.Cleanup(func() { _ = codefly.LoadEnvironmentVariables() })
+	t.Setenv(resources.FileCarrierKey(public), path)
+	t.Setenv(resources.WorkspaceSecretConfigurationPrefix+"__PROBE_EMPTY__K", "sec1")
+
+	_, err := query.WorkspaceConfiguration("probe-empty", "K")
+	require.ErrorIs(t, err, resources.ErrFileCarrier)
+	require.ErrorContains(t, err, "delivered file is empty")
+	require.NotErrorIs(t, err, codefly.ErrWorkspaceConfigurationAbsent)
+
+	value, err := query.WorkspaceValue("probe-empty", "K")
+	require.ErrorIs(t, err, resources.ErrFileCarrier)
+	require.Empty(t, value)
+	_, found, err := query.WorkspaceValueIfSet("probe-empty", "K")
+	require.ErrorIs(t, err, resources.ErrFileCarrier)
+	require.False(t, found)
+	_, err = codefly.ReadAuthority(ctx, codefly.AuthorityValueName{Name: "probe-empty", Key: "K"})
+	require.ErrorIs(t, err, codefly.ErrAuthorityValueMissing)
+	require.ErrorIs(t, err, resources.ErrFileCarrier)
+
+	require.ErrorIs(t, codefly.LoadEnvironmentVariables(), resources.ErrFileCarrier)
+}
+
+// A name carried in both the public and the secret namespace is two sources
+// for one value, refused like a value delivered both inline and by file. Review
+// r144 probed public "pub" plus secret "sec" and got "pub" back with no error,
+// so a value moved to the secret namespace with a stale public copy left behind
+// kept answering the stale copy. The per-namespace accessors still answer: each
+// asks one namespace by name.
+func TestAValueInBothNamespacesIsRefused(t *testing.T) {
+	ctx := context.Background()
+	query := codefly.For(ctx)
+	t.Setenv(resources.WorkspaceConfigurationPrefix+"__PROBE_BOTH__K", "pub")
+	t.Setenv(resources.WorkspaceSecretConfigurationPrefix+"__PROBE_BOTH__K", "sec")
+
+	value, err := query.WorkspaceValue("probe-both", "K")
+	require.ErrorIs(t, err, codefly.ErrWorkspaceValueInBothNamespaces)
+	require.NotErrorIs(t, err, codefly.ErrWorkspaceConfigurationAbsent)
+	require.Empty(t, value)
+	require.NotContains(t, err.Error(), "pub\"")
+	require.NotContains(t, err.Error(), "sec\"")
+	require.ErrorContains(t, err, "probe-both/K")
+
+	_, found, err := query.WorkspaceValueIfSet("probe-both", "K")
+	require.ErrorIs(t, err, codefly.ErrWorkspaceValueInBothNamespaces)
+	require.False(t, found)
+
+	_, err = codefly.ReadAuthority(ctx, codefly.AuthorityValueName{Name: "probe-both", Key: "K"})
+	require.ErrorIs(t, err, codefly.ErrAuthorityValueMissing)
+	require.ErrorIs(t, err, codefly.ErrWorkspaceValueInBothNamespaces)
+
+	public, err := query.WorkspaceConfiguration("probe-both", "K")
+	require.NoError(t, err)
+	require.Equal(t, "pub", public)
+	secret, err := query.WorkspaceSecret("probe-both", "K")
+	require.NoError(t, err)
+	require.Equal(t, "sec", secret)
+
+	// A value pinned from one namespace whose name then appears in the other
+	// is refused as a changed authority, by Recheck and by the accessor alike.
+	t.Setenv(resources.WorkspaceSecretConfigurationPrefix+"__PROBE_BOTH_PINNED__K", "sec")
+	authority, err := codefly.ReadAuthority(ctx, codefly.AuthorityValueName{Name: "probe-both-pinned", Key: "K"})
+	require.NoError(t, err)
+	t.Setenv(resources.WorkspaceConfigurationPrefix+"__PROBE_BOTH_PINNED__K", "sec")
+	err = authority.Recheck(ctx)
+	require.ErrorIs(t, err, codefly.ErrAuthorityValueChanged)
+	require.ErrorIs(t, err, codefly.ErrWorkspaceValueInBothNamespaces)
+	_, err = query.WorkspaceValue("probe-both-pinned", "K")
+	require.ErrorIs(t, err, codefly.ErrAuthorityValueChanged)
+	require.ErrorIs(t, err, codefly.ErrWorkspaceValueInBothNamespaces)
 }

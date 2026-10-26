@@ -169,6 +169,27 @@ is the authority for these values, and a value that drifts under a running
 process is an error rather than a reload — the process has already minted a
 credential sealed to the old one. `For(ctx).WorkspaceValue` answers from that
 boot read for a pinned name, so the ordinary accessor is not a way around it.
+A pinned value whose live delivery breaks is refused with
+`ErrAuthorityValueChanged` wrapping the reason, by `WorkspaceValue`,
+`WorkspaceValueIfSet` and `Authority.Recheck` alike.
+
+## Workspace values
+
+`WorkspaceValue` and `WorkspaceValueIfSet` read a name that may sit in either
+the public or the secret workspace namespace, and it must sit in exactly one:
+
+- a name carried in **both** namespaces is refused with
+  `ErrWorkspaceValueInBothNamespaces`, as two sources for one value, the same
+  way a value delivered both inline and by file is refused;
+- a delivery that **cannot be read** (a missing file, an empty file, a value
+  delivered both inline and by file) is refused with that reason
+  (`resources.ErrFileCarrier`). The other namespace never answers in its place.
+
+An **empty delivered file** is a broken delivery, not absence. Codefly
+delivers a value by file only when it is too large for the process
+environment, so an empty file is a truncated write or a mount race. Every
+accessor refuses it, and so does `LoadEnvironmentVariables`. An empty
+*inline* value is still absent.
 
 ## Tenant-scoped effect receipts
 
