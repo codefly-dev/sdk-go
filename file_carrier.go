@@ -27,8 +27,8 @@ var (
 // processValue is key's value as the process received it: inline in its
 // environment, or in the file its carrier names. An inline value and a
 // carrier for the same key are two sources for one fact and are refused, and
-// a carrier that cannot be read is an error, never an absent value: an
-// unreadable credential must not read as an unset one.
+// a carrier that cannot be read, or whose file is empty, is an error, never an
+// absent value: an unreadable credential must not read as an unset one.
 func processValue(key string) (string, bool, error) {
 	value, inline := os.LookupEnv(key)
 	path, carried := os.LookupEnv(resources.FileCarrierKey(key))
@@ -42,10 +42,17 @@ func processValue(key string) (string, bool, error) {
 	if err != nil {
 		return "", false, err
 	}
-	return content, content != "", nil
+	return content, true, nil
 }
 
 // readFileCarrier reads key's file once and keeps it.
+//
+// An empty file is refused like a missing one. Codefly delivers a value by
+// file only when it is too large for the process environment (core's
+// resources.FileCarrierThreshold), so a carrier naming an empty file is a
+// truncated write or a mount race, never a value the host chose to leave
+// unset. Reading it as absent would let a lookup step past a broken delivery
+// to another source.
 func readFileCarrier(key, path string) (string, error) {
 	fileCarrierMu.Lock()
 	defer fileCarrierMu.Unlock()
@@ -56,6 +63,9 @@ func readFileCarrier(key, path string) (string, error) {
 	content, err := resources.ReadFileCarrier(key, path)
 	if err != nil {
 		return "", err
+	}
+	if content == "" {
+		return "", fmt.Errorf("%w: %s: delivered file is empty", resources.ErrFileCarrier, key)
 	}
 	fileCarrierValues[cacheKey] = content
 	return content, nil

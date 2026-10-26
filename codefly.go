@@ -13,6 +13,8 @@ import (
 	basev0 "github.com/codefly-dev/core/generated/go/codefly/base/v0"
 	"github.com/codefly-dev/core/resources"
 	"github.com/codefly-dev/core/wool"
+	wotel "github.com/codefly-dev/core/wool/otel"
+	"github.com/codefly-dev/sdk-go/internal/enclosing"
 )
 
 var service string
@@ -41,11 +43,15 @@ func Init(ctx context.Context) (*wool.Provider, error) {
 	if err := LoadEnvironmentVariables(); err != nil {
 		return nil, err
 	}
+	identity := strings.TrimSpace(os.Getenv(resources.ModulePrefix))
+	if err := pinConsumerIdentity(identity); err != nil {
+		return nil, err
+	}
 	// For logging before we get the runningService
 	var provider *wool.Provider
 
 	service = os.Getenv(resources.ServicePrefix)
-	module = os.Getenv(resources.ModulePrefix)
+	module = identity
 
 	// Now update the provider
 	id := resources.ServiceIdentity{Name: service, Module: module}
@@ -57,7 +63,53 @@ func Init(ctx context.Context) (*wool.Provider, error) {
 	// default console logger (dropping the configured level + service identity).
 	runningCtx = provider.Inject(ctx)
 
+	enableTelemetryExport(runningCtx, id)
+
 	return provider, nil
+}
+
+// telemetry is the trace exporter Init enabled, for ShutdownTelemetry to flush.
+var telemetry *wotel.Provider
+
+// enableTelemetryExport turns on the OTLP trace exporter when the process was
+// handed somewhere to export to. Codefly delivers OTEL_EXPORTER_OTLP_ENDPOINT
+// (a URL whose scheme fixes the transport), OTEL_SERVICE_NAME and
+// OTEL_RESOURCE_ATTRIBUTES to every service it runs or renders, from the
+// environment's `telemetry:` block; a process started with none exports nothing
+// and says nothing. A service never declares a group or dials an address for
+// this: wool/otel reads the specification's variables and this is the only
+// call site. An exporter that cannot be built is reported, not fatal — a
+// telemetry outage must not stop a service from serving — and the reason is
+// in the service's own log where an operator looks first.
+func enableTelemetryExport(ctx context.Context, id resources.ServiceIdentity) {
+	if strings.TrimSpace(os.Getenv("OTEL_EXPORTER_OTLP_ENDPOINT")) == "" {
+		return
+	}
+	name := strings.TrimSpace(os.Getenv("OTEL_SERVICE_NAME"))
+	if name == "" {
+		name = id.Module + "/" + id.Name
+	}
+	provider, err := wotel.Enable(wotel.WithServiceName(name))
+	w := wool.Get(ctx).In("codefly.Init")
+	if err != nil {
+		w.Warn("telemetry export is configured but its exporter could not be built; traces stay in-process",
+			wool.Field("endpoint", os.Getenv("OTEL_EXPORTER_OTLP_ENDPOINT")), wool.ErrField(err))
+		return
+	}
+	telemetry = provider
+	w.Info("telemetry export enabled", wool.Field("endpoint", os.Getenv("OTEL_EXPORTER_OTLP_ENDPOINT")), wool.Field("service", name))
+}
+
+// ShutdownTelemetry flushes and stops the trace exporter Init enabled, so the
+// last spans of a stopping process reach the collector. A process that enabled
+// none returns nil.
+func ShutdownTelemetry(ctx context.Context) error {
+	if telemetry == nil {
+		return nil
+	}
+	err := telemetry.Shutdown(ctx)
+	telemetry = nil
+	return err
 }
 
 var runningCtx context.Context
@@ -217,6 +269,40 @@ func codeflyEnvironmentVariables() []string {
 	return append([]string(nil), environmentVariablesSnapshot...)
 }
 
+// deliveredNames lists the name of every carrier the SDK already holds with a
+// non-empty value: the snapshot (process values, the values file carriers
+// delivered at load, and injected values) and the live process environment,
+// where an inline value is listed by its own name and a file carrier by the
+// key it carries. For a live file carrier the non-empty value is its PATH: no
+// file is opened, so a carrier naming an empty file is listed, and the per-key
+// lookup then refuses it as a broken delivery. Its content is read only by that
+// lookup, so listing a secret namespace neither materialises nor caches a
+// secret value.
+func deliveredNames() []string {
+	names := map[string]struct{}{}
+	for _, entry := range codeflyEnvironmentVariables() {
+		if name, value, found := strings.Cut(entry, "="); found && value != "" {
+			names[name] = struct{}{}
+		}
+	}
+	for _, entry := range os.Environ() {
+		name, value, found := strings.Cut(entry, "=")
+		if !found || value == "" {
+			continue
+		}
+		if resources.IsFileCarrierKey(name) {
+			name = resources.CarriedKey(name)
+		}
+		names[name] = struct{}{}
+	}
+	listed := make([]string, 0, len(names))
+	for name := range names {
+		listed = append(listed, name)
+	}
+	sort.Strings(listed)
+	return listed
+}
+
 func injectedEnvironmentValue(name string) (string, bool) {
 	environmentVariablesMu.RLock()
 	defer environmentVariablesMu.RUnlock()
@@ -233,15 +319,10 @@ func ServiceVersion() string {
 	return os.Getenv(resources.VersionPrefix)
 }
 
-// Fixture returns the fixture selected by the Codefly runtime. Product code
-// must not depend on the runtime's environment-variable representation.
-func Fixture() FixtureSelection {
-	return FixtureSelection(os.Getenv(resources.FixturePrefix))
-}
-
-func WithFixture(fixture string) bool {
-	return resources.Match(string(Fixture()), fixture)
-}
+// The fixture API moved to the sdk-go/fixture package: it was the only thing in
+// this root package that needed core/composition, and composition carries a
+// GitHub release resolver, so every service importing codefly for its own
+// address linked a GitHub API client it never calls. Use fixture.Selected().
 
 // Environment returns the Codefly environment selected for this process. The
 // representation is owned by the SDK; product code must not read its carrier.
@@ -251,23 +332,22 @@ func Environment() string {
 
 // Workspace returns the Codefly workspace identity for the current process.
 // A runtime-injected identity is authoritative. Local tools that are not
-// launched as a service fall back to the enclosing workspace resource, keeping
-// product code independent from Codefly's environment-variable carriers.
+// launched as a service fall back to the name the enclosing workspace file
+// declares — read, not composed, so a workspace whose imports only the CLI can
+// resolve still names itself — keeping product code independent from Codefly's
+// environment-variable carriers.
 func Workspace(ctx context.Context) (string, error) {
-	if name := strings.TrimSpace(os.Getenv(resources.WorkspacePrefix)); name != "" {
-		return name, nil
-	}
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	workspace, err := resources.FindWorkspaceUp(ctx)
+	name, err := enclosing.Name(ctx)
 	if err != nil {
 		return "", fmt.Errorf("resolve Codefly workspace: %w", err)
 	}
-	if workspace == nil || strings.TrimSpace(workspace.Name) == "" {
+	if name == "" {
 		return "", fmt.Errorf("resolve Codefly workspace: no enclosing workspace")
 	}
-	return workspace.Name, nil
+	return name, nil
 }
 
 // IsLocal reports whether the current Codefly environment is local.

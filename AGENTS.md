@@ -19,20 +19,22 @@ They land hard here: this is a *library*, so its defects are observed in someone
 else's service, where hand-assembling the value the SDK failed to resolve always
 looks like the faster path.
 
+- **Prove reuse before you build**, and **build the simplest thing that works;
+  size is the signal**: fill a gap on what the platform has, keep a coding task
+  to about **500 hand-written lines**, and past **2,000** **stop and ask the
+  user**. Both in full in [the handbook](https://github.com/obin-ai/handbook/blob/main/AGENTS.md).
 - **A gap in the tooling is a bug in the tooling — never a reason to reach
-  around it.** When a service cannot get a value out of the SDK, the answer is
-  an accessor added here, or a capability fixed in whichever tool owns it, named
-  in the PR. It is never a hand-written env var in the consumer — not as a
-  "workaround", not "just this once", not "until the accessor lands".
+  around it.** When a service cannot get a value out of the SDK, the answer is an
+  accessor added here, or a capability fixed in whichever tool owns it, named in
+  the PR — never a hand-written env var in the consumer, not "just this once".
 - **Never hack. Provide the best fix, even when it spans repos.** The fix living
   in `codefly-dev/core` or `codefly-dev/cli` is not a reason to work around it
   here. Open the PR there and consume the reviewed result. When it genuinely
   cannot be fixed now, the deliverable is a precise issue against that owner
   plus an explicitly labelled stopgap — never an unlabelled one.
 - **Classify every change that makes something work**, in the PR body: a *fix*
-  at the place that owns the behaviour, or a *hack*. A hack does not become a
-  fix by working, by being small, by being local, or by the real fix belonging
-  elsewhere.
+  at the place that owns the behaviour, or a *hack* — which does not become a fix
+  by working, by being small, by being local, or by the fix belonging elsewhere.
 - **Never hardcode what the system resolves** — injected environment, derived
   ports, service addresses, credentials copied out of another component. This
   module is the resolution: addresses come from
@@ -72,16 +74,9 @@ Run each of those a second time from `workcontext/` — it is a separate module
 with its own `go.mod` and `go.sum`, so nothing at the root covers it. Lint finds
 the root `.golangci.yaml` by walking up, so it needs no config of its own.
 
-Coverage thresholds differ by module and are not interchangeable:
-
-| Module | Gate | Where |
-| --- | --- | --- |
-| root | total ≥ 75%, per-file and per-package 0 | `.testcoverage.yaml` |
-| `workcontext` | module total ≥ 75%, via `awk` in CI | `go.yml`, `coverage` job |
-
-The `workcontext` gate is on the **module total** across both its packages, so
-`grpctransport` sitting low is carried by the verifier. Read the total, not a
-package line.
+Coverage gates differ by module and are not interchangeable — root
+`.testcoverage.yaml`, `workcontext` an `awk` on the **module total** in `go.yml`.
+The `dual-module-change` skill has the table and the command.
 
 ## Where things live
 
@@ -92,7 +87,7 @@ package line.
 | `authority.go` | authority-bearing values, read once at boot; a drift is refused, never reloaded |
 | `runtime_value.go` | `RuntimeValue`, for values the runtime injects directly |
 | `runtime_environment_file.go` | loading a runtime-written env file |
-| `fixture.go` | the selected fixture, and resolving its principals by role |
+| `fixture/` | the selected fixture, and resolving its principals by role |
 | `tls.go` | workload leaf certificates, reloaded on rotation |
 | `receipts/` | effect receipts: the store, the digest, the replay/conflict interceptor |
 | `receipts/grpctransport/`, `receipts/connecttransport/` | the two transport adapters, split so neither drags the other's dependency in |
@@ -100,12 +95,31 @@ package line.
 | `workcontext/grpctransport/` | the gRPC carrier, so a consumer that makes no gRPC call never compiles grpc |
 
 `workcontext` mints nothing and verifies nothing: `core/workcontext` is the only
-implementation of the capability, and this module re-exports core's verifier by
-type alias. Adding a dependency to it is still a design change, not a detail —
-see the skill below.
+implementation of the capability, reached through typed access; a new dependency is a design change (skill below).
 
 ## Rules that bite
 
+- **Each module's go.mod owns its Core pin**, both on core's module-manifest
+  protocol (codefly-dev/core#812). Visibility is exactly `private`/`internal`/
+  `public`; `external` is a location, read through `Endpoint.External()`; never
+  recreate removed names. Keep the calling module apart from the queried producer:
+  core's `SelectEndpointForReference` selects, `Init` pins that consumer once, and
+  resolution refuses identity drift.
+- **A deployed process has no workspace, so its carriers are authoritative.**
+  The builder image ships the binary alone, including in local Kubernetes pods.
+  In any environment with no workspace on disk, `ResolveNetworkInstance` reads
+  the carrier keyed by the query's canonical identity and refuses only absence
+  (`ErrEndpointCarrierAbsent`) or a malformed value: the composition judged
+  eligibility at render and the mesh enforces it. With a workspace, selection
+  comes first in every environment. No flag decides the path; the workspace's
+  presence does. Native fallback requires a workspace and a `local` or unset
+  environment. A workspace that is not this process's composition counts as none
+  (`internal/enclosing`, #66): with `CODEFLY__WORKSPACE` injected only that name
+  counts, and another is never even loaded; it must also carry the queried
+  module. With nothing injected, the workspace found is used as found. A
+  workspace only the host can compose (it imports by release) counts as none too
+  (`enclosing.HostComposed`). The host routes by the addresses in the module
+  manifest it applied; this SDK has no delivered-endpoint reader.
 - **`CODEFLY__` is spelled in this repo, nowhere else.** A consumer needing a
   value gets a typed accessor here; the prefix constant lives in
   `runtime_value.go` for that reason.
@@ -113,12 +127,12 @@ see the skill below.
   rebuilds it; a test that sets a carrier and forgets the reload asserts against
   the previous snapshot and passes for the wrong reason. Tests are
   `package codefly_test` and use `t.Setenv`.
-- **An empty injected value is not a value.** A composition templating an unset
-  variable ships the name with an empty string; `RuntimeValue` reports `false`
-  so it cannot shadow the configuration a caller falls back to. Keep that.
+- **An empty injected value is absent** (an unset template variable; it must not
+  shadow a fallback). An empty delivered *file*, and a name in both workspace
+  namespaces, are refused instead ([README](README.md#workspace-values)).
 - **The Work Context has exactly one implementation and it is not here.**
   `core/workcontext` signs, verifies, and answers the *structural* question
-  through `Inspect`. Nothing here may sign, check a signature, encode a
+  through `Decode`. Nothing here may sign, check a signature, encode a
   capability **or decide what a capability is** — a local seal rule is a second
   implementation even when it signs nothing, and ours disagreed with core's own
   fixtures about which sentinel three refusals earn. **Four gates hold that, and
@@ -139,6 +153,16 @@ see the skill below.
   comes from `ReadAuthority` at boot. `WorkspaceValue` answers from that pin for
   a pinned name, so a drift is an error rather than a reload — the process has
   already minted a credential sealed to the old value.
+- **There is one way to get a verifier.** Core's verifier is not re-exported:
+  every field of it has a usable zero value, so `NewVerifier` is the only
+  constructor and `PinnedVerifier` the only type here that verifies. The
+  endpoint, the fetch and the verifier are one operation — `KeySet` has one
+  constructor and `NewVerifier` takes nothing else — so an admitted location and
+  the keys in use are one fact. `AdmitEndpoint` is the one transport rule, for the
+  key-set URL, the mint URL (`MintOptions.Transport`; nil keeps https only) and a
+  consumer's own: plaintext reaches an in-cluster Service address only under
+  `internal-transport/mesh-protected`, compared literally, loopback only locally; a
+  failed read refuses, not absence; no refusal echoes a value. `scripts/security-posture.sh` re-audits.
 - **A receipt is written inside the transaction that commits its effect.** A
   receipt written after the commit leaves a window where the effect exists and
   the receipt does not, and a recovery landing there reads "no receipt" for an
@@ -165,12 +189,12 @@ Loaded on demand rather than carried here — `.claude/skills/`:
 ## Workflow
 
 - Branch and PR; never commit to `main`. Conventional Commits for the title.
-- The PR template asks for the fix-or-hack classification and for what you did
-  not verify. Both are rules above; answer them there rather than omitting them.
+- The PR template asks for both classifications above; answer them there.
 - `agentcontext_test.go` holds this file's length budget and each skill's
-  frontmatter contract. It runs under `go test ./...`, so CI enforces it with no
-  workflow change.
+  frontmatter contract, under `go test ./...` — CI needs no workflow change.
+- `TestQueryDoesNotExposeDefaultNetworkAPI` holds the deleted query API absent,
+  including inert methods or fields. Legacy means delete, not deprecate.
 - Keep this file under ~150 lines (hard cap 200). Push depth into a nested
   `AGENTS.md` beside what it describes, or into `.claude/skills/`.
-- `CLAUDE.md` is a pointer to this file. Keep one canonical source.
-- Treat this file as code: the PR that changes a process updates it.
+- `CLAUDE.md` points here — one canonical source, and the PR that changes a
+  process updates it.

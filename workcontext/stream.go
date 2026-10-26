@@ -18,7 +18,7 @@ type StreamGuardOptions struct {
 	// Recheck re-reads the issuer's live state for a capability that is ALREADY
 	// verified, and returns the host's answer.
 	//
-	// Use core's (*Verifier).Recheck. Do NOT use Verify: it consumes a
+	// Use (*PinnedVerifier).Recheck. Do NOT use Verify: it consumes a
 	// single-use nonce, and every grant capability is single-use, so a stream
 	// opened with one died with ErrReplayed at its first message. This
 	// module's own README recommended exactly that for a while. Re-checking
@@ -41,7 +41,7 @@ type StreamGuardOptions struct {
 // everybody knows, and a guard built on it works in every test that does not
 // use a single-use capability and then kills the first grant-opened stream in
 // production.
-func RecheckWith(verifier *Verifier, verified *Verified) func(context.Context) error {
+func RecheckWith(verifier *PinnedVerifier, verified *Verified) func(context.Context) error {
 	return func(ctx context.Context) error {
 		if verifier == nil || verified == nil {
 			return fmt.Errorf("%w: a stream re-check needs a verifier and a verified capability", ErrInvalid)

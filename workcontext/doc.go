@@ -9,7 +9,13 @@
 // code that checks a signature, and the only encoding of either. This package
 // re-exports core's verification entry point rather than offering one of its
 // own, so a consumer that verifies through this module is verifying through
-// core.
+// core. What it adds around that is CONFIGURATION and never behaviour: core's
+// verifier is not re-exported, NewVerifier is the only constructor and it
+// refuses by name a verifier with no pinned issuer, no audience or no key set
+// acquired from an admitted endpoint. One transport guard, AdmitEndpoint,
+// admits the key-set URL (ResolveKeySetEndpoint), the mint URL
+// (MintOptions.Transport) and a consumer's own — the host's own rule, so a
+// plaintext hop is not a check each consumer writes for itself.
 //
 // That is a rule and not a preference, because the alternative was tried. A
 // second implementation here once signed a hand-written JSON payload while
@@ -24,12 +30,18 @@
 // What this package does own:
 //
 //   - MintClient: one credential per execution, obtained from the projected
-//     service-account token, renewed only at expiry. No heartbeat, no
-//     registration, nothing a process reports about itself.
+//     service-account token, renewed once it reaches a renewal point derived
+//     from its own lifetime or replaced by Refresh after a refusal, over https
+//     or over plaintext exactly where the mesh carries the hop. No heartbeat,
+//     no registration, nothing a process reports about itself.
 //   - The carriers: the capability's header, and the sealed installation
 //     beside it as a pre-check the far end may refuse on cheaply.
 //   - CachePartition: the identity partition a cache stack scopes entries to,
 //     which never spans an installation revision.
 //   - StreamGuard: a stream re-presents its credential before every message
 //     and terminates on refusal.
+//   - NewVerifier, ResolveKeySetEndpoint, AcquireKeySet and the mesh-transport
+//     rule beside them: the configuration a verifier is refused without — a
+//     pinned issuer and audience, and a key set fetched from a location admitted
+//     over a hop the composition accounts for.
 package workcontext

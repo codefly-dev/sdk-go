@@ -13,6 +13,7 @@ import (
 	"github.com/codefly-dev/core/wool"
 	codefly "github.com/codefly-dev/sdk-go"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func init() {
@@ -28,6 +29,7 @@ func Must[T any](obj T, err error) T {
 }
 
 func TestEnvironmentVariables(t *testing.T) {
+	initEndpointConsumer(t, "mod")
 	ctx := context.Background()
 	wool.SetGlobalLogLevel(wool.TRACE)
 
@@ -37,18 +39,12 @@ func TestEnvironmentVariables(t *testing.T) {
 	err = os.Setenv("CODEFLY_SDK__LOGLEVEL", "trace")
 	assert.NoError(t, err)
 
-	// No default
+	// An unresolved endpoint has no instance.
 	net := codefly.For(ctx).API(standards.REST).NetworkInstance()
 	assert.Nil(t, net)
 
-	// With default
-	net = codefly.For(ctx).API(standards.REST).WithDefaultNetwork().NetworkInstance()
-	assert.NotNil(t, net)
-	assert.Equal(t, "localhost", net.Hostname)
-	assert.Equal(t, uint16(8080), net.Port)
-	assert.Equal(t, "http://localhost:8080", net.Address)
-
-	// With API and no name
+	// With API and no name, after core reads the producer declaration.
+	prepareDeclaredEndpointWorkspace(t, "mod", "svc", standards.HTTP, standards.HTTP)
 	env := resources.EndpointAsEnvironmentVariableKey(&resources.EndpointInformation{Module: "mod", Service: "svc", Name: standards.HTTP, API: standards.HTTP})
 	err = os.Setenv(env, "http://localhost:1234")
 	assert.NoError(t, err)
@@ -217,6 +213,7 @@ agent:
 }
 
 func TestEndpointResolutionFallsBackToDeterministicLocalWorkspace(t *testing.T) {
+	initEndpointConsumer(t, "platform")
 	ctx := context.Background()
 	root := t.TempDir()
 	t.Setenv("CODEFLY__ENVIRONMENT", "")
@@ -251,7 +248,10 @@ endpoints:
 		Service("records").
 		Endpoint("rest").
 		ResolveNetworkInstance()
-	assert.NoError(t, err)
+	// require, not assert: a nil instance must fail this test, not panic and
+	// abort the package run with every other failure unreported.
+	require.NoError(t, err)
+	require.NotNil(t, instance)
 	expected := network.NativeFor(
 		ctx,
 		"sdk-endpoint-test",
@@ -270,7 +270,8 @@ endpoints:
 		Endpoint("rest").
 		NamingScope("agent-test").
 		ResolveNetworkInstance()
-	assert.NoError(t, err)
+	require.NoError(t, err)
+	require.NotNil(t, scoped)
 	assert.NotEqual(t, instance.Port, scoped.Port)
 }
 
@@ -309,8 +310,8 @@ func TestWorkspaceConfigurationUsesSDKBoundary(t *testing.T) {
 	_, err = codefly.For(ctx).WorkspaceValue("security", "missing")
 	assert.Error(t, err)
 	assert.True(t, codefly.IsLocal())
-	assert.Equal(t, "dogfood", string(codefly.Fixture()))
-	assert.True(t, codefly.WithFixture("dogfood"))
+	// The fixture API moved to sdk-go/fixture, so it is covered there; this
+	// test keeps the rest of the runtime identity it was always about.
 	assert.Equal(t, "scoped", codefly.ScopedAuthSecret())
 }
 
@@ -333,6 +334,25 @@ func TestWorkspaceFallsBackToEnclosingResource(t *testing.T) {
 
 	assert.NoError(t, err)
 	assert.Equal(t, "local-workspace", name)
+}
+
+// A workspace that imports its platform by release can only be composed by the
+// CLI. Its name is still its name: the fallback reads the file, it does not
+// compose it, so a local tool under a solution's tag is not refused for an
+// import it never needed.
+func TestWorkspaceNamesAWorkspaceOnlyTheCLICanCompose(t *testing.T) {
+	root := t.TempDir()
+	writeFile(t, filepath.Join(root, "workspace.codefly.yaml"),
+		"name: proposals\nlayout: modules\nworkspaces:\n  - name: platform-core\n    source: obin-ai/platform-core\n    version: \"0.0.3\"\nmodules:\n  - name: proposals\n    path: .\n")
+	t.Chdir(root)
+	t.Setenv(resources.WorkspacePrefix, "")
+	_, err := resources.FindWorkspaceUp(t.Context())
+	require.ErrorContains(t, err, "requires host resolution", "the premise: composing it fails here")
+
+	name, err := codefly.Workspace(t.Context())
+
+	require.NoError(t, err)
+	assert.Equal(t, "proposals", name)
 }
 
 func TestEnvironmentReloadDropsRemovedValues(t *testing.T) {
@@ -446,6 +466,8 @@ func TestInjectConfigurationsDropsPriorInjectedValues(t *testing.T) {
 }
 
 func TestInjectEndpointsUsesTypedSnapshotAndRejectsInvalidReplacement(t *testing.T) {
+	initEndpointConsumer(t, "mod")
+	prepareDeclaredEndpointWorkspace(t, "embedded", "store", "tcp", "tcp")
 	ctx := context.Background()
 	t.Cleanup(func() {
 		requireNoError(t, codefly.InjectEndpoints())
@@ -493,4 +515,124 @@ func requireNoError(t *testing.T, err error) {
 	if err != nil {
 		t.Fatal(err)
 	}
+}
+
+func prepareDeclaredEndpointWorkspace(t *testing.T, module, service, endpoint, api string) {
+	t.Helper()
+	root := t.TempDir()
+	writeFile(t, filepath.Join(root, "workspace.codefly.yaml"), "name: sdk-injection-test\nlayout: modules\nmodules:\n  - name: "+module+"\n")
+	writeFile(t, filepath.Join(root, "modules", module, "module.codefly.yaml"), "kind: module\nname: "+module+"\nservices:\n  - name: "+service+"\n")
+	writeFile(t, filepath.Join(root, "modules", module, "services", service, "service.codefly.yaml"), "kind: service\nname: "+service+"\nversion: 0.0.0\nagent:\n  kind: codefly:service\n  name: rust\n  version: 0.0.20\n  publisher: codefly.dev\nendpoints:\n  - name: "+endpoint+"\n    api: "+api+"\n    visibility: public\n    exposure: none\n")
+	t.Chdir(root)
+}
+
+// IsLocalRun is the Query's answer to the question the package-level IsLocal
+// answers, as a method so a leaf module can require it through an interface
+// instead of importing this one — workcontext.TransportSource does, to decide
+// whether a plaintext hop to a loopback host is a local run.
+//
+// It is tested through the carrier rather than by asserting that it delegates,
+// because what a consumer depends on is that the answer comes from the Codefly
+// environment and not from a value the consumer chose.
+func TestIsLocalRunAnswersFromTheEnvironment(t *testing.T) {
+	ctx := t.Context()
+
+	t.Run("a local environment", func(t *testing.T) {
+		t.Setenv(resources.EnvironmentPrefix, resources.LocalEnvironment().Name)
+
+		assert.True(t, codefly.For(ctx).IsLocalRun())
+		assert.Equal(t, codefly.IsLocal(), codefly.For(ctx).IsLocalRun())
+	})
+
+	t.Run("a deployed environment", func(t *testing.T) {
+		t.Setenv(resources.EnvironmentPrefix, "staging")
+
+		assert.False(t, codefly.For(ctx).IsLocalRun())
+		assert.Equal(t, codefly.IsLocal(), codefly.For(ctx).IsLocalRun())
+	})
+
+	t.Run("no environment at all is not a local run", func(t *testing.T) {
+		t.Setenv(resources.EnvironmentPrefix, "")
+
+		assert.False(t, codefly.For(ctx).IsLocalRun())
+	})
+}
+
+// WorkspaceValueIfSet separates the three answers WorkspaceValue flattens into
+// two: the value is set, nothing carries it, or the lookup FAILED.
+//
+// A caller deciding a posture question — "may this hop be plaintext" — cannot
+// live with the flattening. An unreadable delivery, or an authority-bearing
+// value that has drifted from the one pinned at boot, read as "the operator did
+// not assert it" is a failed read quietly answering a question it did not ask.
+// Absence is an answer; a failed read is not.
+func TestWorkspaceValueIfSetSeparatesAbsenceFromFailure(t *testing.T) {
+	ctx := t.Context()
+
+	t.Run("a value that is set", func(t *testing.T) {
+		t.Setenv("CODEFLY__WORKSPACE_CONFIGURATION__INTERNAL_TRANSPORT__MESH_PROTECTED", "true")
+
+		value, set, err := codefly.For(ctx).WorkspaceValueIfSet("internal-transport", "mesh-protected")
+
+		assert.NoError(t, err)
+		assert.True(t, set)
+		assert.Equal(t, "true", value)
+	})
+
+	t.Run("a value carried only by the secret namespace", func(t *testing.T) {
+		t.Setenv("CODEFLY__WORKSPACE_SECRET_CONFIGURATION__INTERNAL_TRANSPORT__MESH_PROTECTED", "true")
+
+		value, set, err := codefly.For(ctx).WorkspaceValueIfSet("internal-transport", "mesh-protected")
+
+		assert.NoError(t, err)
+		assert.True(t, set)
+		assert.Equal(t, "true", value)
+	})
+
+	t.Run("nothing carries it", func(t *testing.T) {
+		value, set, err := codefly.For(ctx).WorkspaceValueIfSet("internal-transport", "absent-here")
+
+		assert.NoError(t, err, "absence is an answer, not a failure")
+		assert.False(t, set)
+		assert.Empty(t, value)
+	})
+
+	t.Run("a delivery that cannot be read", func(t *testing.T) {
+		key := "CODEFLY__WORKSPACE_CONFIGURATION__INTERNAL_TRANSPORT__UNREADABLE"
+		t.Setenv(resources.FileCarrierKey(key), filepath.Join(t.TempDir(), "absent"))
+
+		_, set, err := codefly.For(ctx).WorkspaceValueIfSet("internal-transport", "unreadable")
+
+		assert.Error(t, err, "a delivery that is there and cannot be read is not absence")
+		assert.False(t, set)
+	})
+
+	t.Run("a delivery that is both inline and by file", func(t *testing.T) {
+		key := "CODEFLY__WORKSPACE_CONFIGURATION__INTERNAL_TRANSPORT__DOUBLED"
+		path := filepath.Join(t.TempDir(), "value")
+		require.NoError(t, os.WriteFile(path, []byte("true"), 0o600))
+		t.Setenv(key, "true")
+		t.Setenv(resources.FileCarrierKey(key), path)
+
+		_, set, err := codefly.For(ctx).WorkspaceValueIfSet("internal-transport", "doubled")
+
+		assert.Error(t, err)
+		assert.False(t, set)
+	})
+
+	// An authority-bearing value that has drifted is the decisive case: it is
+	// the one where the setting IS configured, the read fails, and reading the
+	// failure as absence would let a drifted value answer as "not asserted".
+	t.Run("an authority-bearing value that has drifted", func(t *testing.T) {
+		t.Setenv("CODEFLY__WORKSPACE_CONFIGURATION__MESH_PIN__MESH_PROTECTED", "true")
+		_, err := codefly.ReadAuthority(ctx, codefly.AuthorityValueName{Name: "mesh-pin", Key: "mesh-protected"})
+		require.NoError(t, err)
+
+		t.Setenv("CODEFLY__WORKSPACE_CONFIGURATION__MESH_PIN__MESH_PROTECTED", "false")
+
+		_, set, err := codefly.For(ctx).WorkspaceValueIfSet("mesh-pin", "mesh-protected")
+
+		assert.ErrorIs(t, err, codefly.ErrAuthorityValueChanged)
+		assert.False(t, set)
+	})
 }

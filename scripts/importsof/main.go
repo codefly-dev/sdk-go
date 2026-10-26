@@ -61,10 +61,24 @@ func run() error {
 		if path == "" {
 			continue
 		}
-		// ImportsOnly, so a file whose BODY does not compile is still read for
-		// its imports: the sweep's subject is what a file reaches for, and a
-		// blob at some old ref need not build against today's dependencies.
-		syntax, err := parser.ParseFile(fileSet, path, nil, parser.ImportsOnly|parser.SkipObjectResolution)
+		// THE WHOLE FILE IS PARSED, not just its import block.
+		//
+		// It was ImportsOnly, on the reasoning that the sweep's subject is what
+		// a file reaches for and a blob at some old ref need not build against
+		// today's dependencies. The second half of that is still true and is
+		// why this is a SYNTAX parse and not a type-check: resolving a file at a
+		// two-year-old tag would need that tag's dependencies.
+		//
+		// The first half was wrong about what ImportsOnly does. It stops at the
+		// first non-import declaration, so a file whose body does not parse
+		// at all — an unfinished function, a missing expression — reads as a
+		// file with imports and no problem, and the sweep's own documented
+		// claim that "a file that does not parse is a failure, not a file with
+		// no imports" was false for every one of them. It also stops reading at
+		// the first declaration, so an import placed AFTER one is invisible:
+		// a file whose first declaration is a var and whose import block follows
+		// swept with no imports at all. Both are refused now.
+		syntax, err := parser.ParseFile(fileSet, path, nil, parser.SkipObjectResolution)
 		if err != nil {
 			return fmt.Errorf("parse %s: %w", path, err)
 		}

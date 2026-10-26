@@ -46,6 +46,7 @@ import (
 // codec registry are absent here and refused there instead. Two rules, one
 // each for the two halves of the question.
 var codecFunctions = map[string][]string{
+	"encoding/asn1": {"Marshal", "MarshalWithParams", "Unmarshal", "UnmarshalWithParams"},
 	"google.golang.org/protobuf/proto": {
 		"Marshal", "Unmarshal", "MarshalOptions", "UnmarshalOptions",
 	},
@@ -171,7 +172,7 @@ func inspectCodecUses(loaded *packages.Package, file *ast.File, path string) []s
 				findings = append(findings, fmt.Sprintf(
 					"%s applies %s to %s, which is or contains %s.\n"+
 						"A Work Context message passes through a codec only where a row names it.\n"+
-						"Reading one off the wire is corework.Inspect's job, and it returns the claims\n"+
+						"Reading one off the wire is corework.Decode's job, and it returns the claims\n"+
 						"it decoded. This catches it THROUGH a field as well: a *Claims embedded in\n"+
 						"mintRequest put a whole capability on the wire through a row written for two\n"+
 						"strings, and the alias lived in another file, so no syntactic rule could see it.",
@@ -240,7 +241,7 @@ func inspectCodecUses(loaded *packages.Package, file *ast.File, path string) []s
 			"%s calls %s.\n"+
 				"This file may ENCODE with base64 — it builds a cache key — and may never\n"+
 				"DECODE. base64 decoding plus proto.Unmarshal is the entire second parser this\n"+
-				"module deleted; corework.Inspect opens the envelope and hands back the claims.\n"+
+				"module deleted; corework.Decode opens the envelope and hands back the claims.\n"+
 				"Resolved as an OBJECT, so assigning the encoding to a variable first does not\n"+
 				"change the answer.",
 			path, method.FullName()))
@@ -269,7 +270,7 @@ func inspectCodecUses(loaded *packages.Package, file *ast.File, path string) []s
 					"document. The exemption is for the codec call inside it, not for handing it a\n"+
 					"capability: decodeDocument json-decodes into its destination, and a\n"+
 					"WorkContextV1's json tags are snake_case, which is the format this module\n"+
-					"deleted. corework.Inspect reads a capability.",
+					"deleted. corework.Decode reads a capability.",
 				path, kind, named, indirection))
 		}
 		return true
@@ -739,6 +740,7 @@ func TestTheCodecRuleRefusesEveryShapeThatPassedBefore(t *testing.T) {
 	const preamble = `package probe
 
 import (
+	"encoding/asn1"
 	"encoding/json"
 	"reflect"
 
@@ -750,6 +752,7 @@ import (
 // Sinks, so every probe shares one import block without "imported and not
 // used". None is a codec use, so none can be the finding.
 var (
+	_ asn1.RawValue
 	_ = reflect.TypeOf
 	_ protoreflect.Message
 	_ = basev0.File_codefly_base_v0_work_context_proto
@@ -764,6 +767,14 @@ var (
 		source string
 		says   string
 	}{
+		"ASN1 decoding a capability": {
+			source: `func into(raw []byte, c *basev0.WorkContextV1) { _, _ = asn1.Unmarshal(raw, c) }`,
+			says:   "which is or contains",
+		},
+		"ASN1 decoder passed as a value": {
+			source: `var decode = asn1.Unmarshal`,
+			says:   "without calling it",
+		},
 		// R1: a type parameter. Resolved to the spelling "M".
 		"a generic codec wrapper": {
 			source: `func into[M proto.Message](raw []byte, m M) error { return proto.Unmarshal(raw, m) }

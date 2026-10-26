@@ -37,16 +37,20 @@ import (
 // host could pass the test. faults is asserted from the test goroutine by
 // assertNoHostFaults, which every test using a host runs through t.Cleanup.
 type mintHost struct {
-	t         *testing.T
-	server    *httptest.Server
-	requests  atomic.Uint64
-	presented atomic.Value // the last projected token the host was shown
-	bodies    chan []byte  // every request body, as the client actually sent it
-	now       func() time.Time
-	lifetime  time.Duration
-	audience  string
-	authority *authority
-	echoWrong bool
+	t                 *testing.T
+	server            *httptest.Server
+	tlsCA             *mintTestCA
+	tlsConfig         atomic.Pointer[tls.Config]
+	clientCertificate *tls.Certificate
+	arrivals          chan mintArrival
+	requests          atomic.Uint64
+	presented         atomic.Value // the last projected token the host was shown
+	bodies            chan []byte  // every request body, as the client actually sent it
+	now               func() time.Time
+	lifetime          time.Duration
+	audience          string
+	authority         *authority
+	echoWrong         bool
 	// binding, when set, makes the host mint an operation capability sealed to
 	// that binding.
 	binding    string
@@ -68,15 +72,6 @@ type mintHost struct {
 	// shapes something that is NOT the host sends: an ingress error page, a
 	// mesh's default body, a cache's empty object, a rollout's redirect.
 	answer *cannedAnswer
-
-	// noApprovedBuild mints for a principal the issuer holds no approved build
-	// for, which is the human-session shape: the capability seals no execution.
-	noApprovedBuild bool
-
-	// echoIncarnation overrides the build incarnation the host ECHOES in its
-	// JSON body, which is only for catching a host and a signature that
-	// disagree.
-	echoIncarnation string
 
 	// replay makes the host IDEMPOTENT: it answers every request with this
 	// exact token. A real mint endpoint that deduplicates by projected token
@@ -119,8 +114,37 @@ func newMintHost(t *testing.T, now func() time.Time) *mintHost {
 		t: t, now: now, lifetime: 15 * time.Minute,
 		audience: testAudience, authority: newAuthority(t),
 		bodies: make(chan []byte, 64), pin: newTestPin(),
+		arrivals: make(chan mintArrival, 64), tlsCA: newMintTestCA(t),
 	}
-	host.server = httptest.NewTLSServer(http.HandlerFunc(host.handle))
+	host.clientCertificate = host.tlsCA.certificate(t, []string{testMintClientPeer})
+	host.server = newMintTLSServer(t, http.HandlerFunc(host.handle), host.tlsCA,
+		func(config *tls.Config) {
+			host.tlsConfig.Store(config.Clone())
+			config.GetConfigForClient = func(*tls.ClientHelloInfo) (*tls.Config, error) {
+				return host.tlsConfig.Load(), nil
+			}
+		})
+	t.Cleanup(func() {
+		host.faultsMu.Lock()
+		defer host.faultsMu.Unlock()
+		require.Empty(t, host.faults, "the mint host hit something it should not have")
+	})
+	return host
+}
+
+// newPlaintextMintHost is the same host over plain HTTP on a loopback address,
+// which is the shape the mesh contract admits on a local run. It has no CA and
+// no client certificate: there is no handshake for either to take part in.
+func newPlaintextMintHost(t *testing.T, now func() time.Time) *mintHost {
+	t.Helper()
+	host := &mintHost{
+		t: t, now: now, lifetime: 15 * time.Minute,
+		audience: testAudience, authority: newAuthority(t),
+		bodies: make(chan []byte, 64), pin: newTestPin(),
+		arrivals: make(chan mintArrival, 64),
+	}
+	host.server = &httptest.Server{Listener: newMintMemoryListener(t), Config: &http.Server{Handler: http.HandlerFunc(host.handle)}}
+	host.server.Start()
 	t.Cleanup(host.server.Close)
 	t.Cleanup(func() {
 		host.faultsMu.Lock()
@@ -130,12 +154,31 @@ func newMintHost(t *testing.T, now func() time.Time) *mintHost {
 	return host
 }
 
+// plaintextMint configures a client for a plaintext host: the runtime is a local
+// run and no handshake source is set, because none would ever be read.
+func plaintextMint(o *MintOptions) {
+	o.Transport = localRun
+	o.TrustAnchor, o.ClientCertificate, o.AdmittedPeers = nil, nil, nil
+}
+
 func (h *mintHost) handle(writer http.ResponseWriter, request *http.Request) {
 	h.requests.Add(1)
 	if h.before != nil {
 		h.before()
 	}
 	h.presented.Store(request.Header.Get("Authorization"))
+	arrival := mintArrival{
+		authorization: request.Header.Get("Authorization"),
+		remote:        request.RemoteAddr, close: request.Close,
+		protocol: request.ProtoMajor, encoding: request.Header.Get("Accept-Encoding"),
+	}
+	if request.TLS != nil {
+		arrival.tls = *request.TLS
+	}
+	select {
+	case h.arrivals <- arrival:
+	default:
+	}
 	if h.answer != nil {
 		h.answer.write(writer)
 		return
@@ -174,7 +217,7 @@ func (h *mintHost) handle(writer http.ResponseWriter, request *http.Request) {
 	// A test endpoint that assembled a token itself would be a second
 	// implementation wearing a test's clothes.
 	token, err := h.authority.tryStartAt(mintedAt, mintInput{
-		audience: audience, binding: h.binding, humanSession: h.noApprovedBuild,
+		audience: audience, binding: h.binding,
 	}, lifetime)
 	if err != nil {
 		// Recorded and answered with a 503, never asserted here: this is the
@@ -187,9 +230,6 @@ func (h *mintHost) handle(writer http.ResponseWriter, request *http.Request) {
 		token = h.replay
 	}
 	response := mintResponse{WorkContext: token, InstallationID: testInstallation}
-	if h.echoIncarnation != "" {
-		response.BuildIncarnation = h.echoIncarnation
-	}
 	if h.echoWrong {
 		response.InstallationID = "installation-the-host-did-not-seal"
 	}
@@ -233,15 +273,16 @@ func newTestMintClient(t *testing.T, host *mintHost, path string, now func() tim
 		ProjectedToken:     ProjectedTokenFile(path),
 		ProjectionAudience: "projection-audience",
 		Now:                now,
-		// The only thing a caller may say about the transport: which roots may
-		// sign the endpoint's certificate. The client builds the rest.
-		RootCAs: certPoolOf(host.server),
+		TrustAnchor:        func() (*x509.CertPool, error) { return host.tlsCA.pool, nil },
+		ClientCertificate:  func() (*tls.Certificate, error) { return host.clientCertificate, nil },
+		AdmittedPeers:      testMintPeers,
 	}
 	for _, option := range options {
 		option(&settings)
 	}
 	client, err := NewMintClient(settings)
 	require.NoError(t, err)
+	useMintMemoryNetwork(t, client)
 	return client
 }
 
@@ -262,7 +303,6 @@ func TestMintOncePerExecutionAndRenewOnlyAtExpiry(t *testing.T) {
 	// carries the owner's epoch that core's live Seal type no longer has.
 	require.Equal(t, testInstallation, first.Seal().GetInstallationId())
 	require.EqualValues(t, 3, first.Seal().GetInstallationRevision())
-	require.EqualValues(t, 11, first.Seal().GetBuildIncarnation())
 	require.EqualValues(t, testPrincipalEpoch, first.Seal().GetPrincipalEpoch())
 	require.EqualValues(t, 1, host.requests.Load())
 
@@ -709,7 +749,7 @@ func TestMintRefusesACredentialThatIsUnusableOnArrival(t *testing.T) {
 	// bounds covers:
 	//
 	// THIS CLIENT NEVER VERIFIES A SIGNATURE. It cannot: it is the party being
-	// minted for, not a receiver. It reads the window through corework.Inspect,
+	// minted for, not a receiver. It reads the window through corework.Decode,
 	// which is structural only and checks no signature. So core's Start bounds
 	// an honest MINTER and core's Verify bounds a RECEIVER on a current core;
 	// neither bounds what this process holds in memory and presents for the
@@ -872,18 +912,18 @@ func keysOf(fields map[string]any) []string {
 // destination, asserted before the error is even looked at.
 func TestARedirectedMintSendsNothingToTheDestination(t *testing.T) {
 	now := func() time.Time { return testClock }
+	ca := newMintTestCA(t)
+	certificate := ca.certificate(t, []string{testMintClientPeer})
 	var elsewhereRequests atomic.Uint64
-	elsewhere := httptest.NewTLSServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+	elsewhere := newMintTLSServer(t, http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
 		elsewhereRequests.Add(1)
 		writer.WriteHeader(http.StatusOK)
-	}))
-	t.Cleanup(elsewhere.Close)
+	}), ca)
 
-	redirector := httptest.NewTLSServer(http.HandlerFunc(
+	redirector := newMintTLSServer(t, http.HandlerFunc(
 		func(writer http.ResponseWriter, request *http.Request) {
 			http.Redirect(writer, request, elsewhere.URL, http.StatusTemporaryRedirect)
-		}))
-	t.Cleanup(redirector.Close)
+		}), ca)
 
 	// The root pool trusts BOTH servers, so nothing but the refusal stops the
 	// second request: a client that could not verify the destination's
@@ -895,9 +935,12 @@ func TestARedirectedMintSendsNothingToTheDestination(t *testing.T) {
 		ProjectedToken:     ProjectedTokenFile(projectedFile(t, "projected")),
 		ProjectionAudience: "projection-audience",
 		Now:                now,
-		RootCAs:            certPoolOf(redirector, elsewhere),
+		TrustAnchor:        func() (*x509.CertPool, error) { return ca.pool, nil },
+		ClientCertificate:  func() (*tls.Certificate, error) { return certificate, nil },
+		AdmittedPeers:      testMintPeers,
 	})
 	require.NoError(t, err)
+	useMintMemoryNetwork(t, client)
 
 	_, err = client.Credential(t.Context())
 
@@ -925,7 +968,7 @@ func TestARedirectedMintSendsNothingToTheDestination(t *testing.T) {
 // see each sent the projected bearer over an unauthenticated channel. None of
 // them is reachable now, because there is no option to supply.
 func TestTheMintTransportIsOwnedByTheClient(t *testing.T) {
-	client := mintHTTPClient(nil)
+	client := mintHTTPClient(MintOptions{})
 
 	transport, ok := client.Transport.(*http.Transport)
 	require.True(t, ok, "the client builds a concrete *http.Transport, not a wrapper it cannot reason about")
@@ -933,9 +976,9 @@ func TestTheMintTransportIsOwnedByTheClient(t *testing.T) {
 	require.False(t, transport.TLSClientConfig.InsecureSkipVerify)
 	require.EqualValues(t, tls.VersionTLS13, transport.TLSClientConfig.MinVersion,
 		"the projected service-account token goes over 1.3 or it does not go")
-	require.Nil(t, transport.DialTLSContext,
-		"a custom TLS dialer bypasses TLSClientConfig entirely")
-	require.Nil(t, transport.DialContext)
+	require.NotNil(t, transport.DialTLSContext,
+		"the SDK-owned dialer installs fresh roots with normal TLS verification enabled")
+	require.NotNil(t, transport.DialContext, "the SDK owns the TCP dialer as well as the handshake")
 	require.Nil(t, transport.Proxy,
 		"a proxy for a credential request is an address the configuration did not name")
 	require.NotNil(t, client.CheckRedirect)
@@ -946,15 +989,19 @@ func TestTheMintTransportIsOwnedByTheClient(t *testing.T) {
 
 	// Two clients do not share a transport, so nothing one caller does to its
 	// client can reach another's.
-	require.NotSame(t, client.Transport, mintHTTPClient(nil).Transport)
+	require.NotSame(t, client.Transport, mintHTTPClient(MintOptions{}).Transport)
 
-	// The root pool is the ONLY thing a caller says about it, and it lands
-	// where it is used.
-	pool := x509.NewCertPool()
-	withRoots := mintHTTPClient(pool)
-	rooted, ok := withRoots.Transport.(*http.Transport)
-	require.True(t, ok)
-	require.Same(t, pool, rooted.TLSClientConfig.RootCAs)
+	// Roots are installed in each handshake's private config, never pinned to
+	// this template. Rotation tests exercise the effective verification.
+	require.Nil(t, transport.TLSClientConfig.RootCAs)
+	require.NotNil(t, transport.TLSClientConfig.VerifyConnection)
+	require.Nil(t, transport.TLSClientConfig.ClientSessionCache)
+	require.True(t, transport.DisableKeepAlives)
+	require.Zero(t, transport.MaxIdleConnsPerHost)
+	require.True(t, transport.DisableCompression)
+	require.False(t, transport.ForceAttemptHTTP2)
+	require.Equal(t, []string{"http/1.1"}, transport.TLSClientConfig.NextProtos)
+	require.Equal(t, maxMintRequestTimeout, transport.TLSHandshakeTimeout)
 
 	// And the redirect refusal is on it, as a refusal rather than as
 	// http.ErrUseLastResponse, so net/http never sends the second request.
@@ -966,25 +1013,67 @@ func TestTheMintTransportIsOwnedByTheClient(t *testing.T) {
 	require.ErrorIs(t, client.CheckRedirect(request, nil), ErrMintUnavailable)
 }
 
-func TestNewMintClientValidatesItsConfiguration(t *testing.T) {
-	valid := MintOptions{
+// validMintOptions is a configuration NewMintClient accepts, for the tests that
+// break exactly one thing about it.
+func validMintOptions() MintOptions {
+	return MintOptions{
 		URL:                "https://mint.example/platform/_mint",
 		Authority:          newTestPin(),
 		Audience:           testAudienceName,
 		ProjectedToken:     ProjectedTokenFile("/var/run/secrets/token"),
 		ProjectionAudience: "projection-audience",
-		// Required: construction refuses a client with no trust anchor.
-		RootCAs: x509.NewCertPool(),
+		TrustAnchor:        func() (*x509.CertPool, error) { return x509.NewCertPool(), nil },
+		ClientCertificate:  unusedMintCertificate,
+		AdmittedPeers:      testMintPeers,
 	}
+}
+
+func TestNewMintClientValidatesItsConfiguration(t *testing.T) {
+	valid := validMintOptions()
 	_, err := NewMintClient(valid)
 	require.NoError(t, err)
 
 	for name, mutate := range map[string]func(*MintOptions){
 		"no url": func(o *MintOptions) { o.URL = "" },
 		// Plaintext is the one that mattered: the projection travels on this
-		// request as a bearer credential, so http was a disclosure the
-		// configuration could choose.
-		"plaintext http":       func(o *MintOptions) { o.URL = "http://mint.example/_mint" },
+		// request as a bearer credential, so http is admitted exactly where the
+		// mesh carries the hop and nowhere else. With no Transport nothing can
+		// say where that is, so the default is https alone.
+		"plaintext http with no transport source": func(o *MintOptions) { o.URL = "http://mint.example/_mint" },
+		"plaintext http to a loopback host with no transport source": func(o *MintOptions) {
+			o.URL = "http://127.0.0.1:8443/_mint"
+		},
+		"plaintext http to an in-cluster Service with no transport source": func(o *MintOptions) {
+			o.URL = "http://gateway.platform.svc/_mint"
+		},
+		"plaintext http to an external host under the assertion": func(o *MintOptions) {
+			o.URL, o.Transport = "http://mint.example/_mint", meshed
+			o.TrustAnchor, o.ClientCertificate, o.AdmittedPeers = nil, nil, nil
+		},
+		"plaintext http to a loopback host off a local run": func(o *MintOptions) {
+			o.URL, o.Transport = "http://127.0.0.1:8443/_mint", meshed
+			o.TrustAnchor, o.ClientCertificate, o.AdmittedPeers = nil, nil, nil
+		},
+		"plaintext http to an in-cluster Service without the assertion": func(o *MintOptions) {
+			o.URL, o.Transport = "http://gateway.platform.svc/_mint", localRun
+			o.TrustAnchor, o.ClientCertificate, o.AdmittedPeers = nil, nil, nil
+		},
+		// The assertion is read whatever the scheme, as for the key set.
+		"a misspelled assertion behind an https url": func(o *MintOptions) {
+			o.Transport = transport{assertion: "True", set: true}
+		},
+		"an unreadable assertion behind an https url": func(o *MintOptions) {
+			o.Transport = transport{failure: errors.New("the delivery could not be read")}
+		},
+		// A handshake source beside a plaintext URL is a check that never runs.
+		"a trust anchor beside a plaintext url": func(o *MintOptions) {
+			o.URL, o.Transport = "http://gateway.platform.svc/_mint", meshed
+			o.ClientCertificate, o.AdmittedPeers = nil, nil
+		},
+		"admitted peers beside a plaintext url": func(o *MintOptions) {
+			o.URL, o.Transport = "http://127.0.0.1:8443/_mint", localRun
+			o.TrustAnchor, o.ClientCertificate = nil, nil
+		},
 		"url with query":       func(o *MintOptions) { o.URL = "https://mint.example/_mint?as=root" },
 		"url with credentials": func(o *MintOptions) { o.URL = "https://user:pass@mint.example/_mint" },
 		"url with fragment":    func(o *MintOptions) { o.URL = "https://mint.example/_mint#f" },
@@ -1003,7 +1092,9 @@ func TestNewMintClientValidatesItsConfiguration(t *testing.T) {
 		// THE TRUST ANCHOR. Unstated was the whole of the previous behaviour
 		// and it was silently the system pool: every other route to a weak
 		// transport here was closed and this one defaulted.
-		"no trust anchor": func(o *MintOptions) { o.RootCAs = nil },
+		"no trust anchor":       func(o *MintOptions) { o.TrustAnchor = nil },
+		"no client certificate": func(o *MintOptions) { o.ClientCertificate = nil },
+		"no admitted peers":     func(o *MintOptions) { o.AdmittedPeers = nil },
 	} {
 		t.Run(name, func(t *testing.T) {
 			options := valid

@@ -2,6 +2,7 @@ package workcontext
 
 import (
 	"context"
+	"crypto/tls"
 	"crypto/x509"
 	"net/http"
 	"net/url"
@@ -318,7 +319,9 @@ func TestEveryMintFaultIsClassifiedByWhatRecoveryItNeeds(t *testing.T) {
 		// A client pointed at the host with a root pool that does not contain
 		// the host's certificate.
 		client := newTestMintClient(t, host, projectedFile(t, "projected"), clock.now,
-			func(options *MintOptions) { options.RootCAs = x509.NewCertPool() })
+			func(options *MintOptions) {
+				options.TrustAnchor = func() (*x509.CertPool, error) { return x509.NewCertPool(), nil }
+			})
 
 		_, err := client.Credential(context.Background())
 		// This LATCHED for one revision, on the argument that the projected
@@ -500,8 +503,8 @@ func TestAMintedCredentialThatExpiresBeforeItIsValidIsRefused(t *testing.T) {
 	require.ErrorContains(t, client.checkWindow(equal), "expires at or before it becomes valid")
 }
 
-// Core 67ee7220 moved the lifetime bound into decodeClaims, so Inspect carries
-// it — and Inspect is the path THIS CLIENT reads its own window through.
+// Core 67ee7220 moved the lifetime bound into decodeClaims, so Decode carries
+// it — and Decode is the path THIS CLIENT reads its own window through.
 //
 // That is the condition this module named twice when it declined to drop
 // MintOptions.MaxCredentialLifetime, and it is now met in the right place. Core
@@ -536,7 +539,7 @@ func TestAMintedCredentialThatExpiresBeforeItIsValidIsRefused(t *testing.T) {
 func TestTheClientsDefaultCeilingIsCoresConstant(t *testing.T) {
 	// The structural read path the mint client uses, driven directly, so the
 	// entry point this depends on is exercised rather than assumed.
-	_, err := corework.Inspect(fixture(t, "session").Token)
+	_, err := corework.Decode(fixture(t, "session").Token)
 	require.NoError(t, err, "a sound capability still inspects")
 
 	require.Equal(t, corework.MaxTTLCeiling, defaultMaxCredentialLifetime,
@@ -560,44 +563,6 @@ func TestACredentialAtExactlyTheCeilingIsAccepted(t *testing.T) {
 	require.Equal(t, testClock.Add(corework.MaxTTLCeiling), credential.ExpiresAt())
 }
 
-// Core 4cb260d3 made the sealed execution OPTIONAL, because a principal that
-// bears no approved build — a person at a terminal — must not have one
-// invented for it. That turns the mint response's echo cross-check into a
-// PRESENCE question, which it was not before.
-//
-// GetBuildIncarnation() answers 0 both for "absent" and for a value core says
-// is never legitimate (an incarnation starts at 1), so comparing an echo
-// against that zero accepted a host echoing "0" against a capability that
-// seals no execution at all — a host asserting an execution the issuer does
-// not hold.
-func TestAnEchoedIncarnationIsRefusedWhenTheCapabilitySealsNoExecution(t *testing.T) {
-	clock := &movableClock{at: testClock}
-	host := newMintHost(t, clock.now)
-	// A capability for a principal the issuer holds no approved build for,
-	// which is the human-session shape.
-	host.noApprovedBuild = true
-	// And a host that echoes an incarnation anyway.
-	host.echoIncarnation = "0"
-	client := newTestMintClient(t, host, projectedFile(t, "projected"), clock.now)
-
-	_, err := client.Credential(context.Background())
-	require.ErrorIs(t, err, ErrMintRefused)
-	require.ErrorContains(t, err, "seals no execution at all")
-}
-
-// And a capability that DOES seal an execution still cross-checks by value, so
-// the presence branch did not replace the comparison.
-func TestAnEchoedIncarnationStillCrossChecksByValue(t *testing.T) {
-	clock := &movableClock{at: testClock}
-	host := newMintHost(t, clock.now)
-	host.echoIncarnation = "99"
-	client := newTestMintClient(t, host, projectedFile(t, "projected"), clock.now)
-
-	_, err := client.Credential(context.Background())
-	require.ErrorIs(t, err, ErrMintRefused)
-	require.ErrorContains(t, err, "sealed 11")
-}
-
 // Round five's mutation survivors, one test each. Every one of these passed
 // with the behaviour its name claims removed.
 
@@ -616,7 +581,9 @@ func TestAConfiguredCeilingAboveCoresIsRefusedAtConstruction(t *testing.T) {
 		ProjectedToken:        ProjectedTokenFile(projectedFile(t, "projected")),
 		ProjectionAudience:    "projection-audience",
 		Now:                   clock.now,
-		RootCAs:               certPoolOf(host.server),
+		TrustAnchor:           func() (*x509.CertPool, error) { return host.tlsCA.pool, nil },
+		ClientCertificate:     func() (*tls.Certificate, error) { return host.clientCertificate, nil },
+		AdmittedPeers:         testMintPeers,
 		MaxCredentialLifetime: corework.MaxTTLCeiling + time.Second,
 	})
 	require.ErrorIs(t, err, ErrInvalid)
@@ -631,7 +598,9 @@ func TestAConfiguredCeilingAboveCoresIsRefusedAtConstruction(t *testing.T) {
 		ProjectedToken:        ProjectedTokenFile(projectedFile(t, "projected")),
 		ProjectionAudience:    "projection-audience",
 		Now:                   clock.now,
-		RootCAs:               certPoolOf(host.server),
+		TrustAnchor:           func() (*x509.CertPool, error) { return host.tlsCA.pool, nil },
+		ClientCertificate:     func() (*tls.Certificate, error) { return host.clientCertificate, nil },
+		AdmittedPeers:         testMintPeers,
 		MaxCredentialLifetime: corework.MaxTTLCeiling,
 	})
 	require.NoError(t, err)

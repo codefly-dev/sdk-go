@@ -139,14 +139,11 @@ three are now core's answer rather than a local one:
 | `actor-without-epoch` | `ErrInvalid` | **accepted** — the actor chain was never read, so a principal nobody can revoke went on the wire |
 | zero epoch / revision / incarnation, partial binding | `ErrInvalid` | `ErrUnsealed` |
 
-**The seal is four fields, and `ImageDigest` is one of them.** `WorkSealV1`
-gained `image_digest` as a **required** field: a seal names the approved build
-for its installation, and a mint attests the execution it is actually running
-against it (`StartInput.Execution{ImageDigest, BuildIncarnation}`). A seal that
-names no digest names no execution to match a caller against, so core refuses
-to record one. `Credential.Seal()` returns the carried seal as core's own
-message, which is why that field arriving needed no code change here — see
-`SealedValues`.
+**The seal is three fields.** `WorkSealV1` names the installation, its
+revision and the principal's epoch. It carries no build: what a workload runs is
+checked by the host where it mints, and a change of approved builds revokes
+through the epoch and the revision. `Credential.Seal()` returns the carried
+seal as core's own message — see `SealedValues`.
 
 **`ErrUnsealed` no longer exists, and that is the end of this class of defect.**
 `WorkContextV1.seal` and `WorkActorV1.principal_epoch` are schema-**required**
@@ -160,14 +157,14 @@ This module needed no edit for that change, which is the argument for reading
 sentinels off core's kit rather than writing them down: three fixtures changed
 sentinel and the tests that assert `declared.Err` did not move.
 
-The fix was not to sync the rule. **`corework.Inspect` now owns every
+The fix was not to sync the rule. **`corework.Decode` now owns every
 structural decision** — shape, encoding, schema, attenuation, grant shape, a
 seal naming an installation, an epoch on every actor hop — and this module's
 `readClaims` runs after it, reads two values, and decides nothing. Core added
-`Inspect` for this, when asked; the twelve structural refusals must reach core's
+`Decode` (first named `Inspect`) for this, when asked; the twelve structural refusals must reach core's
 sentinel here, and every other fixture must **pass**, because an unverified
 inspection that refused a signature or a live-state failure would be claiming to
-have verified something it cannot see. `Inspect` checks no signature at all —
+have verified something it cannot see. `Decode` checks no signature at all —
 core's own test asserts a token re-signed with a key nobody holds passes it — so
 nil means *shaped right*, never *permitted*.
 
@@ -239,7 +236,43 @@ required. A capability missing one does not verify, and `Attach` refuses to put
 it on a request at all — there is no request on which an unsealed credential is
 better than no credential.
 
+### A derived credential never outlives its parent
+
+A credential derived from another — a child session, or the capability that
+carries an approval — expires **no later than its parent**, and a chain of them
+never refreshes a lifetime past the root's. Core's `derive` clamps it, and a
+parent already past its own expiry derives nothing at all. The chain narrows in
+the other dimension too: a hop holds a subset of the hop before it, refused at
+the mint and again in core's `checkStructure` at every verification.
+
+**This module derives nothing, and the property is pinned here anyway.**
+`TestDerivedContextNeverOutlivesParent` drives core's own minter over a matrix of
+parent lifetimes and requested windows, so the version of core *this* module
+resolves to is held to the clamp. The rule is then required of whatever this
+module depends on, rather than of core in general.
+
+Two halves of the rule are not this module's to enforce, and the test says so
+where it asserts them:
+
+- **At verification** a verifier holds the capability and not its parent, and
+  `codefly.base.v0.WorkContextV1` carries no absolute-deadline claim and no
+  per-hop timestamp — so "no later than its parent" is not a question the wire
+  lets a verifier ask. That claim, and the check that reads it, are core's.
+- **A renewal here is not a derivation.** `MintClient` renews by presenting the
+  projected service-account token for a fresh mint, never the credential it
+  holds, so each renewal is a root the host re-authorizes rather than a window
+  extended from the last one.
+
 ## Obtaining the credential
+
+`MintClient` is the SDK's generic mint transport: one credential per execution
+from whichever mint endpoint the composition names, over this module's JSON
+exchange, with the URL admitted by `AdmitEndpoint`. It renews when a caller asks
+for a credential that has reached its renewal point — a lead derived from that
+credential's own lifetime, not a timer — and replaces one through `Refresh` after
+the far end has refused it. It is not a client of any host-specific broker
+exchange and it adds no heartbeat or registration; a consumer that speaks such an
+exchange keeps its own typed client and admits that URL through the same rule.
 
 ```go
 // At boot, in the root SDK: read the authority-bearing values once.
@@ -262,10 +295,16 @@ client, err := workcontext.NewMintClient(workcontext.MintOptions{
     },
     ProjectedToken:     workcontext.ProjectedTokenFile("/var/run/secrets/codefly/token"),
     ProjectionAudience: projectionAudience,
-    // REQUIRED: the roots that may sign the mint endpoint's certificate.
-    // There is no safe default for where this process sends its
-    // service-account token, so there is no default.
-    RootCAs: platformRoots,
+    // The transport rule's two facts, read from the runtime: the composition's
+    // internal-transport/mesh-protected assertion and whether this is a local
+    // run. Nil keeps the default, https only.
+    Transport: codefly.For(ctx),
+    // REQUIRED for an https URL, and nil for a plaintext one: sources of
+    // current trust roots, workload X.509-SVID, and admitted mint endpoint
+    // SPIFFE IDs. Re-read per handshake.
+    TrustAnchor:       readPlatformRoots,     // func() (*x509.CertPool, error)
+    ClientCertificate: readWorkloadSVID,      // func() (*tls.Certificate, error)
+    AdmittedPeers:     readAdmittedMintPeers, // func() ([]string, error)
 })
 ```
 
@@ -276,33 +315,102 @@ string the caller had typed. Reading it through `Value` on every mint is what
 makes the pin load-bearing, and `credentialFrom` then requires the audience the
 host SIGNED to be the audience the pin answered.
 
-`URL` must be **absolute https** with no userinfo, query or fragment: the
-projected service-account token travels on that request as a bearer credential,
-so plaintext is a disclosure the configuration must not be able to choose.
+`URL` must be **absolute** with no userinfo, query or fragment, and it is
+admitted by [the transport contract](#the-transport-contract) — the same
+function that admits a verifier's key-set URL, with `Transport` answering its
+two facts. **https is admitted to any host and is the default**: with
+`Transport` nil nothing can read an assertion or an environment, so https is
+all that is admitted. **http is admitted exactly where the mesh carries the
+hop**: to an in-cluster Service address (`<service>.<namespace>.svc`, optionally
+followed by `cluster.local`) when the composition asserts
+`internal-transport/mesh-protected=true`, and to a loopback host on a local
+run. Every other http URL is `ErrInvalid` naming the half of the rule that
+refused it. The projected service-account token still travels on that request
+as a bearer credential, and the reasoning that refused plaintext still stands:
+a credential request goes over an authenticated channel or it does not go.
+In-cell that channel is the mesh's mTLS between workload identities, the mint
+endpoint is the gateway's workload port, which the mesh admits only from
+composed workloads, and the token is single-use and spent by the mint it is read
+for — so plaintext under the assertion *is* the authenticated channel, and
+plaintext anywhere the mesh does not reach is still refused by name.
 
-**The transport is the client's, and you cannot supply one.** `RootCAs` is the
-only thing a caller says about it, and it is **required**: `NewMintClient`
-returns `ErrInvalid` without it. A nil `RootCAs` used to mean the system pool
-silently, which left the one remaining hole in a transport built to have none —
-every other route to a weak channel was closed and the trust anchor was still
-whatever the image shipped, so a mis-issued certificate for the host name, or a
-corporate interception root, received the projected token. A deployment that
-really means the host's pool writes `x509.SystemCertPool()`, which is two lines
-and is visible at the call site. An `*http.Client` option was a hole that
-inspecting the client could not close: a nil `Transport` means the global,
-mutable `http.DefaultTransport`; a wrapping `RoundTripper` is opaque; a
-`DialTLSContext` bypasses `TLSClientConfig` entirely; and a caller keeping the
-`*http.Transport` pointer can turn verification off after construction, because
-copying an `http.Client` shares its `Transport`. Each of those sent the
-projection over a channel nobody authenticated. So the client builds the
-transport — TLS 1.3 minimum, verification on, no custom dialer, no proxy — and
-refuses redirects, because Go's own client forwards `Authorization` across a
-redirect to the same host.
+**The SDK owns the mint transport.** For an https URL, callers provide
+`TrustAnchor`, `ClientCertificate` and `AdmittedPeers` sources; all three
+functions are required. For a plaintext URL there is no handshake for them to
+apply to, so all three **must be nil**: a source set beside a plaintext URL is a
+check that never runs, and is refused rather than ignored. `NewMintClient`
+returns `ErrInvalid` for a missing or misplaced source and reads no sources.
+Every source answer is validated during dialing. An admitted plaintext endpoint
+is dialed by the same client with the same guarantees — a fresh connection per
+request, HTTP/1.1, no compression, proxy or followed redirect — and nothing
+about TLS below applies to it.
+
+Every mint, renewal and refresh opens a **new TLS 1.3 connection**. The SDK
+reads the current anchor for the handshake, presents the workload's current
+X.509-SVID through `GetClientCertificate`, and reads the current admitted peer
+set in `VerifyConnection`, **after Go has verified the chain and hostname**.
+After the handshake, it reads the anchor and peers again, re-verifies the
+certificate chains and hostname against those roots, and repeats admission
+before handing the connection to HTTP. The endpoint must request a client
+certificate. There is no system-root fallback, connection reuse, TLS session
+resumption, compression, proxy or followed redirect. HTTP/1.1 keeps requests
+on separate connections without HTTP/2 multiplexing. Callers cannot supply an
+HTTP client or reach its transport.
+
+Before reading admission, the SDK checks the parsed leaf's X.509-SVID purpose:
+it must not be a CA, its KeyUsage must include digitalSignature and exclude
+keyCertSign and cRLSign, and any present ExtendedKeyUsage extension must
+explicitly include serverAuth. Ordinary Go certificate verification accepts
+some of these forbidden purposes, so chain and hostname verification alone
+are insufficient. An absent EKU is allowed; an empty EKU or anyExtendedKeyUsage
+without serverAuth is refused.
+
+The leaf must carry **exactly one URI SAN**, a valid admitted SPIFFE ID. The
+SDK validates its original bytes from the signed SAN extension: Go's parsed
+URL loses an empty fragment delimiter, so serializing that URL is unsafe here.
+IDs must have the form `spiffe://<trust-domain>/<path>`; the trust domain uses
+ASCII letters, digits, dots, hyphens and underscores, with no empty labels.
+Scheme and trust-domain case are ignored, but paths are compared
+**byte-for-byte**. Empty segments, trailing
+slashes, dot segments, userinfo, ports, queries, fragments and percent-escapes
+are refused, never normalized into admitted identities. Any malformed admitted
+entry is `ErrInvalid`, checked at the handshake even alongside a valid entry.
+
+An unreadable anchor or client certificate, nil anchor, empty or unreadable
+peer set, invalid admitted identity, or failed TLS verification refuses the
+request with **`ErrMintUnavailable`** (also wrapping `ErrInvalid` for malformed
+admitted identities). A leaf with a forbidden SVID purpose or an invalid,
+ambiguous or unadmitted SPIFFE ID also wraps **`ErrMintPeerNotAdmitted`**,
+available through `errors.Is`.
+These failures never latch and deliver no HTTP headers or body, including
+the projected token in `Authorization`.
+
+Source waits honor the dial and request contexts. Cancellation closes the raw
+connection even if a source or private-key operation is blocked. The three
+transport sources and the TLS operations they trigger share **one outstanding
+worker per client**, retaining its slot through the entire handshake and
+post-handshake checks. Retries check the occupied slot before dialing and
+refuse immediately without a connection attempt while it is occupied. An
+arbitrary callback or signer cannot itself be interrupted; cancellation bounds
+the wait, and the slot is released only when the worker returns. Late answers
+are discarded. Subsequent attempts read fresh values and can recover.
+
+A root or peer withdrawal during the handshake is caught by the
+post-handshake check. Each source value's residual freshness interval begins
+when that value is sampled and ends at the transport's first HTTP write. The
+recheck shortens it to the **re-read-to-write window**, including later source
+waits: the second anchor is sampled before the second peer callback, which may
+block while that anchor is withdrawn. Independent sources do not provide a
+coordinated snapshot; stronger consistency requires a shared snapshot/version
+check. Withdrawal in this interval cannot retract an in-flight request.
+Every new mint, renewal and refresh repeats both checks. Tests capture
+HTTP disclosure at the server, withdraw peers and rotate roots inside the
+handshake, and verify deadlines, connection closure, bounded reads and recovery.
 
 Then, on every outbound request:
 
 ```go
-credential, err := client.Credential(ctx) // mints once; renews only at expiry
+credential, err := client.Credential(ctx) // mints once; renews one past its renewal point
 if err != nil {
     return err
 }
@@ -399,18 +507,18 @@ not a rate limit.
 option is a deployment policy.** Core's `MaxTTLCeiling` (24h) is absolute:
 `Authority.maxTTL` clamps to it, `Start` refuses a TTL beyond it, and — since
 core `67ee7220` — `decodeClaims` refuses a capability whose window is wider,
-so `Verify`, `Authenticate` **and `Inspect`** all refuse it with one message.
+so `Verify`, `Authenticate` **and `Decode`** all refuse it with one message.
 
 That last one is what matters here, and it is the third place core put this
 bound. The argument this module made twice for keeping a client-side ceiling was
 that **a mint client never verifies a signature** — it is the party the
 credential is minted *for*, not a receiver — so it reads its own window through
-`corework.Inspect`, which was structural and checked no lifetime. Core's first
+`corework.Decode`, which was structural and checked no lifetime. Core's first
 two attempts bounded `Authority.Start` and then `Verify` alone, neither of which
 this client can see. A thirty-day capability that every `Verify` refuses was
 reported to its **holder** as thirty days of validity: an absent bound tells a
 caller nothing, and that one told it something false about the only field it
-calls `Inspect` to read.
+calls `Decode` to read.
 
 With the bound in `decodeClaims`, an over-ceiling lifetime is refused in this
 client's own read path before `checkWindow` runs. So the net is core's.
@@ -481,29 +589,159 @@ while the request carried two contradictory installations.
 
 ## Verifying
 
-Verification is core's, and what this module exports is core's:
+Verification is core's. What this module hands out is a verifier that cannot
+exist without its configuration:
 
 ```go
-// workcontext.Verifier IS github.com/codefly-dev/core/workcontext.Verifier.
 verified, err := verifier.Verify(ctx, token) // *workcontext.Verified, or a refusal
 ```
 
-```go
-verifier := &workcontext.Verifier{
-    Issuer:    issuer,
-    Audience:  myAudience,
-    Keys:      publicKeysByKeyID,
+`verifier` is a `*workcontext.PinnedVerifier`, and `NewVerifier` is the only way
+to get one. All four of core's sources are required: a verifier missing one
+refuses everything rather than skipping that check, because a verifier that
+silently skipped the seal check would make the strongest check in the model the
+easiest one to omit.
 
-    // All four are required. A verifier missing one refuses everything rather
-    // than skipping that check, because a verifier that silently skipped the
-    // seal check would make the strongest check in the model the easiest one
-    // to omit.
-    Revisions: revisions, // the issuer's authorization revision
-    Replay:    replay,    // consumes single-use capabilities
-    Grants:    grants,    // resolves an approval a grant capability claims
-    Seals:     seals,     // the live installation, epoch, build and binding state
+### Settle the verifier: admit the location, fetch the keys, pin the rest
+
+**There is one way to get a verifier and it is this one.** Core's verifier is a
+struct whose every field has a usable zero value, so this module does not
+re-export it: `PinnedVerifier` is the only type here with a `Verify` method, and
+`NewVerifier` is its only constructor.
+
+```go
+// 1. Admit the location. codefly.For(ctx) answers the composition's mesh
+//    assertion and whether this is a local run.
+endpoint, err := workcontext.ResolveKeySetEndpoint(rawKeySetURL, codefly.For(ctx))
+
+// 2. Fetch the keys FROM that location. The decoding is yours — a key set's
+//    encoding is the issuer's format, and reading one means naming a signature
+//    primitive, which this module may never do.
+keys, err := workcontext.AcquireKeySet(ctx, endpoint, func(payload []byte) (map[string][]byte, error) {
+    return myJWKS(payload) // ids to raw public-key bytes
+})
+
+// 3. Settle the verifier on them.
+verifier, err := workcontext.NewVerifier(workcontext.VerifierSettings{
+    Issuer:    issuer,     // required; compared byte for byte, so whitespace is refused
+    Audience:  myAudience, // required
+    Revisions: revisions, Replay: replay, Grants: grants, Seals: seals,
+}, keys)
+if err != nil {
+    return err // a configuration fault, named, at boot — not an auth error later
 }
 ```
+
+**The steps are one operation, not three a consumer could do separately and then
+ignore.** `KeySetEndpoint` and `KeySet` are opaque with one constructor each, and
+`NewVerifier` takes nothing but a `KeySet`, so "this location was admitted" and
+"these are the keys in use" are the same fact. An endpoint that was checked while
+the keys came from somewhere else is two facts presented as one.
+
+`NewVerifier` refuses, naming each: an unset issuer or audience, either carrying
+surrounding whitespace, a key set that was never acquired, a key set holding no
+key or key material of the wrong length, and each of the four sources separately
+by its own name.
+
+A component that genuinely **is** the issuer — one holding the revision, replay,
+grant and seal state locally — imports `github.com/codefly-dev/core/workcontext`
+directly, as it already does for the verify-only `Authenticator`. At that point
+it is not a client of the capability but a participant in it.
+
+#### The transport contract
+
+In-cell transport security is the mesh's. A composition asserts it with
+`internal-transport/mesh-protected=true`, and a service accepts plaintext to an
+in-cluster Service address exactly under that assertion. This is the same rule,
+group, key and remedy sentence the host and the composed modules apply to their
+own in-cluster hops — reimplemented rather than imported, because a module never
+imports another module's internals, so the shared thing is the contract.
+**This is the SDK's one copy, which is what lets a consumer route every plaintext
+hop it has through one check.** It is one exported function, `AdmitEndpoint`,
+with two call sites in this module: `ResolveKeySetEndpoint` admits a verifier's
+key-set URL through it, and `NewMintClient` admits `MintOptions.URL` through it,
+with `MintOptions.Transport` as the `TransportSource`. A test drives every branch
+of the rule through both and requires the same answer in the same words. A
+consumer with a URL that is neither — a runtime calling the gateway on the origin
+it mints against — admits it with the same call:
+
+```go
+// The label names the URL in a refusal and is never the value; the URL is
+// returned only on admission, parsed and canonical.
+gateway, err := workcontext.AdmitEndpoint(gatewayURL, codefly.For(ctx), "gateway")
+```
+
+| Address | Admitted |
+| --- | --- |
+| `https://` any host | yes, with or without the assertion |
+| `http://<service>.<namespace>.svc[.cluster.local]` | only with `mesh-protected=true` |
+| `http://` any other host | no, assertion or not |
+| `http://` loopback | only on a local run |
+
+**Both halves are required.** The assertion covers only what a mesh can cover, so
+a plaintext URL to any other host stays refused with it set; and a name is not
+evidence a mesh wraps the wire, so an in-cluster address without the assertion is
+refused too. `ClusterServiceHost` accepts `<service>.<namespace>.svc` or that
+followed by `cluster.local` and nothing else, with both leading labels held to
+DNS-1123. **The suffix is matched literally**: a name carrying an `svc` label in
+another domain is an ordinary public name, and an arbitrary suffix is not
+evidence of a cluster domain. A cell with a custom cluster domain uses the
+unqualified `<service>.<namespace>.svc` form, which resolves in-cluster under any
+domain.
+
+**The assertion is compared literally.** `true` asserts it. Unset, empty and
+`false` keep plaintext refused. **Every other value stops the process**, a value
+carrying whitespace included — `" true"` and `"true\n"` are not the assertion. An
+earlier revision trimmed first, so that a value delivered by file would not be
+refused over its trailing newline; but `TrimSpace` trims every Unicode space, so
+values that are not the assertion asserted it. A delivery's shape is the
+delivery's to fix, and the refusal names what the value must be.
+
+**A lookup failure is not absence.** A setting nothing carries is an answer — the
+mesh is not asserted. A delivery that cannot be read, or an authority-bearing
+value that has drifted from the one pinned at boot, is not an answer at all, and
+is refused. That is why `TransportSource` requires `WorkspaceValueIfSet` rather
+than `WorkspaceValue`: the latter reports "not configured" and "could not be
+read" with one error, and a failed read must not quietly decide a posture
+question.
+
+**Loopback is the local shape only.** A deployed runtime has one admission rule
+and loopback is not an exception to it, not even with the assertion set: a mesh
+carries no hop that never leaves the pod.
+
+Both facts come from `TransportSource`, which `codefly.For(ctx)` satisfies,
+rather than from parameters. A boolean parameter would be a per-service opt-in
+that no address has to qualify for; with both answers coming from the runtime,
+the only way to say a hop may be plaintext is for the composition to have said
+it.
+
+**No refusal echoes a configured value.** Not the URL, not the parser's own
+message (whose text embeds the input), and not the assertion — `WorkspaceValueIfSet`
+reads the secret namespace too, so that value may be a credential, and a
+configuration error reaches boot-time logging. Every plaintext refusal ends with
+`MeshTransportRemedy`, so an operator reads the supported way through off the
+error.
+
+**The fetch stays on the admitted address.** A redirect is refused rather than
+followed, the body is bounded, a non-200 is an `ErrKeySetUnavailable` rather than
+a configuration fault, and the HTTP client is this module's — a caller supplies
+none, on the same terms as the mint client's.
+
+#### Re-auditing this
+
+`scripts/security-posture.sh` is the re-runnable check, and its exit status is
+the answer:
+
+```bash
+./scripts/security-posture.sh SP-WC-01   # a derived context never outlives its parent
+./scripts/security-posture.sh SP-WC-05   # every verifier pins issuer and audience
+./scripts/security-posture.sh            # both
+```
+
+It reads the exit status and separately requires every named test to have run, so
+a rule whose test was renamed, deleted or filtered out by a `-run` pattern fails
+rather than passing silently. A check that cannot fail reports green forever,
+which is worse than no check.
 
 **That shape is issuer-shaped, and it is a real cost for a consumer.** A
 component that holds those four locally — the host — supplies them from its own
@@ -853,79 +1091,35 @@ root:
 ./scripts/check-one-implementation.sh
 ```
 
-### This module pins core `v0.9.0`, and is itself consumed at a main commit
+### Core release dependency
 
-`workcontext/go.mod` pins **`v0.9.0`** — a release tag, cut from the merge commit
-of core#692, which is the change that made the capability sealed and gave this
-module `Inspect`, `Verifier.Recheck`, `SealSource` and the conformance kit.
+Both `workcontext/go.mod` and the root SDK pin **core v0.19.1**, the release
+tag at `7f78302f4ac82932c83a6e43375cee4da73f7b9d`. This tag supplies the sealed
+Work Context implementation, `Decode`, verification and re-check entrypoints,
+the lifetime ceiling, and the conformance kit exercised by this module. No
+unreleased core pin is required.
 
-**Two earlier tags are a trap worth naming.** Core's `main` cut `v0.8.0` and
-`v0.8.1` from its own release commits while core#692 sat unmerged, so neither
-carries it. They are not missing `workcontext` — the package is there at its
-pre-#692 revision, which is worse than absence: pinning `v0.8.0` compiles
-nothing this module uses and fails on `Seal`, `SealSource`, `OperationBinding`
-and `ErrNotACoreToken`, so the failure reads like a bad pin rather than a stale
-one. If you are bisecting core versions under this module, `v0.9.0` is the
-floor.
-
-**This module itself has no tags**, and that is the pseudo-version that matters
-to a consumer now. `github.com/codefly-dev/sdk-go/workcontext` has never been
-released, so `go get` resolves a pseudo-version of a **main commit** — a pin:
-reproducible, hash-recorded in `go.sum`, and not a release line. Two
-consequences:
-
-- **`go get -u` will not move you off it**, and nothing warns you. The pin is
-  the version.
-- **Think before cutting a stable consumer release on it.** Pinning this module
-  at a main commit is fine for integration; publishing something stable on top
-  of an unreleased module means owning that choice deliberately.
-
-**The retraction in `workcontext/go.mod` waits on the same thing.** It retracts
-every pseudo-version of this module published before the second implementation
-was deleted, and a `retract` directive takes effect only once a version carrying
-it is itself released. Until this module is tagged, that retraction is a
-statement of intent in the file rather than something `go get` enforces.
-
-Whether a `workcontext/vX.Y.Z` tag is cut, and when, is a **release-process
-decision for whoever owns releases here** — not something this module does by
-hand, and not something to infer from this file. What is recorded here is only
-what a consumer needs in order to know what they are pinning.
+The core dependency version is separate from the SDK leaf's own version:
+Go releases this module with a `workcontext/vX.Y.Z` tag. A root SDK tag does not
+release the leaf. Release through `codefly publish`, which owns the tags and
+pre-flight gates; use the resulting leaf tag or its resolved pseudo-version
+when pinning a consumer.
 
 ## The wire
 
 `base64url(deterministic protobuf of codefly.base.v0.WorkContextV1) + "." +
 base64url(Ed25519 signature)`, signed by `core/workcontext` and by nothing
 else. The sealed fields are proto fields — `seal.installation_id`,
-`seal.installation_revision`, and `seal.image_digest` /
-`seal.build_incarnation` as a **pair or neither**; plus, for an operation
+`seal.installation_revision` and `seal.principal_epoch`; plus, for an operation
 capability, `operation_binding.binding_id` / `.revision` / `.incarnation`, all
 three together or none. Each actor hop carries its own epoch.
 
-**The execution pair is optional, and absent is a real answer.** Core
-`4cb260d3` moved the approved build out of the live `Seal` and into
-`SealSource.ApprovedBuild`, keyed on the **principal**: reading it from the
-owner's installation record made a derived capability's execution describe the
-owner's workload however many hops had been added, and a hop's principal does
-not hold the owner's installation at all. So every hop now attests its own, and
-a principal that bears no execution — a person at a terminal — seals none
-rather than having a value invented for it.
-
-**If you read the execution off `Credential.Seal()`, mind the zero.**
-`GetImageDigest()` answers `""` and `GetBuildIncarnation()` answers `0` both for
-"this principal bears no execution" and for a value core says is never
-legitimate, since an incarnation starts at 1. Treating zero as "missing or
-invalid" is a bug: it is an answer. This module hit it in its own mint-response
-cross-check, where a host echoing `"0"` matched a capability that sealed no
-execution at all — a host asserting an execution the issuer does not hold,
-passing the check whose job is to catch exactly that. Ask about presence before
-comparing.
-
-This module no longer reads a capability itself. `corework.Inspect` runs the
+This module no longer reads a capability itself. `corework.Decode` runs the
 size bound, the envelope, `CheckEncoding`, `proto.Unmarshal`, **protovalidate**
 and the full structural seal check, and returns the claims it decoded;
 `readClaims` (`carrier.go`) calls it and clones the result. There is no second
 decode, no local rule, and **no signature check** — core's own test asserts a
-token re-signed with a key nobody holds passes `Inspect`, so nil means "shaped
+token re-signed with a key nobody holds passes `Decode`, so nil means "shaped
 like a sealed capability" and never "permitted". That is sound only because
 nothing trusts it: it fills the pre-check carriers and tells the mint client
 when its own freshly issued credential expires, and a receiver that preferred a

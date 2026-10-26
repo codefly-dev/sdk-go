@@ -170,7 +170,7 @@ func TestStreamGuardValidatesItsConfiguration(t *testing.T) {
 // call instead of the one that compiles just as well and breaks later.
 func TestTheStreamRecheckDoesNotConsumeASingleUseCapability(t *testing.T) {
 	settings := conformance.New(time.Now())
-	verifier := &Verifier{
+	verifier := &verifier{
 		Issuer:                        settings.Issuer,
 		Audience:                      settings.Audience,
 		Keys:                          settings.PublicKeys(),
@@ -198,7 +198,7 @@ func TestTheStreamRecheckDoesNotConsumeASingleUseCapability(t *testing.T) {
 
 	// Now the stream, built the way this module recommends.
 	guard, err := NewStreamGuard(StreamGuardOptions{
-		Recheck: RecheckWith(verifier, verified),
+		Recheck: RecheckWith(pinnedFor(verifier), verified),
 	})
 	require.NoError(t, err)
 	for message := range 5 {

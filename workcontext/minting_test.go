@@ -20,22 +20,11 @@ import (
 // testSeal is the live sealed state the authority holds.
 var (
 	testClock = time.Date(2026, 10, 2, 12, 0, 0, 0, time.UTC)
-	// A seal is INSTALLATION STATE ONLY now. The execution moved to
-	// SealSource.ApprovedBuild, keyed on the principal, because reading it
-	// from the owner's installation record made a derived capability's
-	// execution describe the owner's workload however many hops had been
-	// added — and a hop's principal does not hold the owner's installation at
-	// all, so a derivation had nothing to attest against even in principle.
+	// A seal is installation state and nothing else.
 	testSeal = Seal{
 		InstallationID:       testInstallation,
 		InstallationRevision: 3,
 	}
-	// testApprovedBuild is what the issuer approves for testPrincipal, which
-	// is what a caller's attested Execution is compared against.
-	testApprovedBuild = struct {
-		digest      string
-		incarnation uint64
-	}{digest: testImageDigest, incarnation: 11}
 	// testLiveBinding is the binding as the ISSUER holds it: granted to one
 	// principal, within one installation. A capability carries only the first,
 	// third and fourth of these — see SealedOperationBinding.
@@ -59,9 +48,6 @@ const (
 	testHumanPrincipal = "principal-human-1"
 	testInstallation   = "installation-1"
 	testBinding        = "binding-1"
-	// testImageDigest is the image-manifest digest the test "runs", which the
-	// seal names as approved and the mint attests against.
-	testImageDigest = "sha256:1111111111111111111111111111111111111111111111111111111111111111"
 	// testPrincipalEpoch is the owner's live epoch, which the seal source
 	// answers rather than the seal carrying it.
 	testPrincipalEpoch = 7
@@ -79,23 +65,8 @@ func newAuthority(t *testing.T) *authority {
 	t.Helper()
 	seals := corework.NewMemorySealSource()
 	require.NoError(t, seals.Put(testPrincipal, testSeal))
-	// The approved build is recorded per PRINCIPAL, separately from the
-	// installation seal.
-	require.NoError(t, seals.PutApprovedBuild(
-		testPrincipal, testApprovedBuild.digest, testApprovedBuild.incarnation))
-	// The human principal gets a seal, an epoch, and an EXPLICIT declaration
-	// that it bears no execution.
-	//
-	// Declared rather than left absent, because core stopped treating those as
-	// the same answer and was right to: "bears none" mints a capability
-	// carrying no execution that every verifier accepts, so answering it for a
-	// principal the issuer simply has no record of hands a service principal a
-	// credential nothing can revoke by replacing its build. Nothing recorded is
-	// the most permissive answer ApprovedBuild can give, so it is asserted
-	// instead of defaulted — and this harness relied on the default.
 	require.NoError(t, seals.Put(testHumanPrincipal, testSeal))
 	require.NoError(t, seals.PutEpoch(testHumanPrincipal, testPrincipalEpoch))
-	require.NoError(t, seals.PutBearsNoExecution(testHumanPrincipal))
 	// The owner's epoch is recorded through PutEpoch like any other
 	// principal's. Seal no longer carries it: it had two sources, and
 	// revocation could be UNDONE — advancing the epoch left stored seals
@@ -126,10 +97,10 @@ func newAuthorityOver(t *testing.T, seals *corework.MemorySealSource) *authority
 
 // verifier is core's verifier configured for this authority — the module's only
 // verification entry point, reached through the alias in core.go.
-func (a *authority) verifier(t *testing.T) *Verifier {
+func (a *authority) verifier(t *testing.T) *verifier {
 	t.Helper()
 	public, _ := corework.FixtureKeyPair()
-	return &Verifier{
+	return &verifier{
 		Issuer:    testIssuer,
 		Audience:  testAudience,
 		Keys:      map[string]ed25519.PublicKey{testKeyID: public},
@@ -162,12 +133,6 @@ type mintInput struct {
 	binding      string
 	taskID       string
 	organization string
-
-	// humanSession mints for a principal the issuer holds NO approved build
-	// for — a person at a terminal. The capability then seals no execution,
-	// which core 4cb260d3 made representable instead of something every mint
-	// had to invent a value for.
-	humanSession bool
 }
 
 // start mints a session capability, sealed to the live values above.
@@ -195,17 +160,6 @@ func (a *authority) startAt(t *testing.T, now time.Time, input mintInput, lifeti
 func (a *authority) tryStartAt(now time.Time, input mintInput, lifetime time.Duration) (string, error) {
 	minter := *a.core
 	owner, kind := testPrincipal, "service"
-	execution := corework.Execution{
-		ImageDigest:      testImageDigest,
-		BuildIncarnation: testApprovedBuild.incarnation,
-	}
-	if input.humanSession {
-		// No approved build is recorded for this principal and no Execution is
-		// attested. Core refuses the correspondence in BOTH directions, so
-		// attesting one here would be refused too.
-		owner, kind = testHumanPrincipal, "human"
-		execution = corework.Execution{}
-	}
 	minter.Now = func() time.Time { return now }
 	if input.tenant == "" {
 		input.tenant = testTenant
@@ -223,7 +177,6 @@ func (a *authority) tryStartAt(now time.Time, input mintInput, lifetime time.Dur
 		// What the caller attests it is running, matched against the build the
 		// ISSUER approves FOR THIS PRINCIPAL. Empty for a principal that bears
 		// no execution, which core answers with ErrNoApprovedBuild.
-		Execution:          execution,
 		TenantID:           input.tenant,
 		OwnerPrincipalID:   owner,
 		OwnerPrincipalKind: kind,
@@ -268,18 +221,12 @@ func (a *authority) childAs(t *testing.T, parent string, input hopInput) string 
 	require.NoError(t, a.seals.PutEpoch(input.principal, 1))
 	// And the hop's own approved build, because a derivation now attests the
 	// execution IT is running rather than inheriting the owner's.
-	require.NoError(t, a.seals.PutApprovedBuild(
-		input.principal, testApprovedBuild.digest, testApprovedBuild.incarnation))
 	if input.kind == "" {
 		input.kind = "service"
 	}
 	verified, err := a.verifier(t).Verify(context.Background(), parent)
 	require.NoError(t, err)
 	token, _, err := a.core.Child(context.Background(), verified, corework.ChildInput{
-		Execution: corework.Execution{
-			ImageDigest:      testApprovedBuild.digest,
-			BuildIncarnation: testApprovedBuild.incarnation,
-		},
 		PrincipalID:    input.principal,
 		PrincipalKind:  input.kind,
 		AgentID:        input.agent,

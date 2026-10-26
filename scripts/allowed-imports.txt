@@ -66,7 +66,9 @@ root github.com/codefly-dev/core/resources
 root github.com/codefly-dev/core/runnable
 root github.com/codefly-dev/core/standards
 root github.com/codefly-dev/core/wool
+root github.com/codefly-dev/core/wool/otel codefly.go
 root github.com/codefly-dev/sdk-go/receipts
+root github.com/codefly-dev/sdk-go/internal/enclosing
 root go/parser
 root go/token
 root google.golang.org/grpc
@@ -97,6 +99,7 @@ leaf context
 leaf crypto/sha256 workcontext/cache_partition.go
 leaf crypto/tls workcontext/mint.go
 leaf crypto/x509 workcontext/mint.go
+leaf encoding/asn1 workcontext/mint.go
 leaf encoding/base64 workcontext/cache_partition.go
 leaf encoding/binary
 leaf encoding/hex
@@ -113,6 +116,7 @@ leaf google.golang.org/grpc/status
 leaf google.golang.org/protobuf/proto
 leaf io
 leaf mime workcontext/mint.go
+leaf net workcontext/mint.go
 leaf net/http
 leaf net/url
 leaf os

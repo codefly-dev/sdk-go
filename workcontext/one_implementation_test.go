@@ -26,7 +26,7 @@ import (
 // core's pointer type, and the gate below would be guarding a surface that had
 // already forked.
 var (
-	_ *corework.Verifier        = (*Verifier)(nil)
+	_ *corework.Verifier        = (*verifier)(nil)
 	_ *corework.Verified        = (*Verified)(nil)
 	_ corework.Seal             = Seal{}
 	_ corework.OperationBinding = OperationBinding{}
@@ -94,7 +94,7 @@ var (
 	// envelopeDecoders are banned EXCEPT where a file is allowlisted below. A
 	// second parser applying its own seal rule was the last blocker here, and
 	// it needed exactly this: base64 to open the envelope by hand, and
-	// proto.Unmarshal to read it. corework.Inspect does both now and hands back
+	// proto.Unmarshal to read it. corework.Decode does both now and hands back
 	// the claims, so opening an envelope here has no honest use.
 	envelopeDecoders = []string{"encoding/base64"}
 
@@ -130,6 +130,12 @@ var narrowedImports = map[string]struct {
 	files   []string
 	symbols []string
 }{
+	// Only decode the signed SAN GeneralNames sequence, before URL parsing
+	// loses empty fragment delimiters. The codec row also fixes the target type.
+	"encoding/asn1": {
+		files:   []string{"workcontext/mint.go"},
+		symbols: []string{"RawValue", "Unmarshal", "ClassContextSpecific"},
+	},
 	"crypto/tls": {
 		files: []string{"workcontext/mint.go", "tls.go"},
 		// Config and the version floor, plus the two error types the client
@@ -140,6 +146,8 @@ var narrowedImports = map[string]struct {
 		symbols: []string{
 			"Config", "VersionTLS13",
 			"CertificateVerificationError", "RecordHeaderError",
+			// The mint transport reads roots and admits a peer per handshake.
+			"Client", "ConnectionState",
 			// tls.go's workload leaf certificates, reloaded on rotation.
 			// Measured from the tree, so the list is what is used and no more.
 			"Certificate", "X509KeyPair", "LoadX509KeyPair",
@@ -219,6 +227,10 @@ var narrowedImports = map[string]struct {
 		// importing ed25519.
 		symbols: []string{
 			"CertPool", "NewCertPool", "SystemCertPool",
+			// Recheck the mint peer's certificate against post-handshake roots.
+			"VerifyOptions",
+			// Inspect the parsed TLS leaf's SVID purpose; no key or codec operations.
+			"Certificate", "KeyUsageDigitalSignature", "KeyUsageCertSign", "KeyUsageCRLSign", "ExtKeyUsageServerAuth",
 			"UnknownAuthorityError", "HostnameError", "CertificateInvalidError",
 		},
 	},
@@ -234,6 +246,8 @@ var narrowedImports = map[string]struct {
 // at all. Both were reproduced as AST probes that produced zero findings. A
 // whole-file exemption is an exemption for every type in the file.
 var codecAllowlist = []codecUse{
+	{file: "workcontext/mint.go", codec: "encoding/asn1", operations: []string{"Unmarshal"},
+		types: []string{"[]encoding/asn1#RawValue"}, reason: "the signed SAN's GeneralNames, retaining exact URI bytes"},
 	{file: "workcontext/mint.go", codec: codecJSON, operations: jsonOperations, types: mintEndpointJSONTypes,
 		reason: "the mint endpoint's two HTTP bodies, which carry the capability as an opaque string"},
 	{file: "workcontext/mint.go", codec: codecJSON, operations: jsonValueOperations,
@@ -501,7 +515,7 @@ func inspectForSecondImplementation(file sourceFile) []string {
 var frozenStructFields = map[string]map[string][]string{
 	"workcontext/mint.go": {
 		"mintRequest":  {"Audience string", "ProjectionAudience string"},
-		"mintResponse": {"WorkContext string", "InstallationID string", "BuildIncarnation string"},
+		"mintResponse": {"WorkContext string", "InstallationID string"},
 	},
 }
 
@@ -651,7 +665,7 @@ func inspectProtoMethodsRoute(file sourceFile) []string {
 				"A message's own marshal and unmarshal methods are a complete codec that names no\n"+
 				"codec package: ProtoReflect().ProtoMethods().Unmarshal(...) decodes a capability\n"+
 				"with no banned import and no type for an allowlist to key on. Reading a capability\n"+
-				"off the wire is corework.Inspect's job.",
+				"off the wire is corework.Decode's job.",
 			file.path))
 		return true
 	})
@@ -698,7 +712,7 @@ func inspectEnvelopeDecoding(file sourceFile, base64Names map[string]bool) []str
 			"%s calls %s.%s.%s.\n"+
 				"This file may ENCODE with base64 — it builds a cache key — and may never DECODE.\n"+
 				"base64 decoding plus proto.Unmarshal is the entire second parser this module\n"+
-				"deleted; corework.Inspect opens the envelope and hands back the claims. Only %v\n"+
+				"deleted; corework.Decode opens the envelope and hands back the claims. Only %v\n"+
 				"may be called here.",
 			file.path, qualifier.Name, receiver.Sel.Name, method.Sel.Name, envelopeEncodeOnly))
 		return true
@@ -828,7 +842,7 @@ func inspectImport(file sourceFile, name string, path string, plumbing map[strin
 			"%s imports %q.\n"+
 				"Opening a capability's envelope by hand is the beginning of a second parser, which\n"+
 				"is what this module last had to delete — its own seal rule disagreed with core's\n"+
-				"fixtures about three refusals. corework.Inspect opens the envelope and returns the\n"+
+				"fixtures about three refusals. corework.Decode opens the envelope and returns the\n"+
 				"claims. Only %v may reach for this, and only because %v.",
 			file.path, path, allowedEnvelopeDecoderFiles(), envelopeDecoderReasons())}
 	}
@@ -885,6 +899,11 @@ func inspectPlumbingSymbols(file sourceFile, plumbing map[string]string) []strin
 		if !isPlumbing {
 			return true
 		}
+		if path == "encoding/asn1" && selector.Sel.Name == "Unmarshal" &&
+			!codecArgumentIsPermitted(file, node, path, "Unmarshal") {
+			findings = append(findings, fmt.Sprintf("%s calls %s.Unmarshal outside the SAN RawValue codec row", file.path, qualifier.Name))
+			return true
+		}
 		if slices.Contains(narrowedImports[path].symbols, selector.Sel.Name) {
 			return true
 		}
@@ -926,14 +945,14 @@ func inspectProtoEncoding(file sourceFile, protoNames map[string]bool) []string 
 		case "Unmarshal", "UnmarshalOptions":
 			// Unrestricted until now, and it is half of the defect that was the
 			// last blocker: a second unverified parser needs base64 to open the
-			// envelope and Unmarshal to read it. corework.Inspect does both, and
+			// envelope and Unmarshal to read it. corework.Decode does both, and
 			// hands back the claims, so nothing here needs either.
 			if codecArgumentIsPermitted(file, node, codecProto, "Unmarshal") {
 				return true
 			}
 			findings = append(findings, fmt.Sprintf(
 				"%s calls %s.%s.\n"+
-					"Reading a capability off the wire is corework.Inspect's job, and it returns the\n"+
+					"Reading a capability off the wire is corework.Decode's job, and it returns the\n"+
 					"claims it decoded. A decode here is the beginning of a second parser — which is\n"+
 					"what this module last had to delete, and its own seal rule disagreed with core's\n"+
 					"fixtures about three refusals.",
@@ -1333,6 +1352,21 @@ var _ = gob.NewEncoder`,
 import "encoding/asn1"
 var _ = asn1.Marshal`,
 			says: "imports \"encoding/asn1\"",
+		},
+		"ASN1 encoding in the SAN reader": {
+			path: "workcontext/mint.go",
+			source: `package workcontext
+import "encoding/asn1"
+var _ = asn1.Marshal`,
+			says: "uses asn1.Marshal",
+		},
+		"ASN1 decoding into an arbitrary struct in the SAN reader": {
+			path: "workcontext/mint.go",
+			source: `package workcontext
+import "encoding/asn1"
+type payload struct { Token string }
+func decode(raw []byte) { var value payload; _, _ = asn1.Unmarshal(raw, &value) }`,
+			says: "outside the SAN RawValue codec row",
 		},
 		"encoding/xml": {
 			path: "workcontext/carrier.go",
@@ -1811,6 +1845,12 @@ func decode(raw []byte) (mintResponse, error) {
 	return body, json.Unmarshal(raw, &body)
 }`,
 		},
+		"raw SAN GeneralNames": {
+			path: "workcontext/mint.go",
+			source: `package workcontext
+import "encoding/asn1"
+func decode(raw []byte) { var names []asn1.RawValue; _, _ = asn1.Unmarshal(raw, &names) }`,
+		},
 		"an alias of core's type": {
 			path: "workcontext/core.go",
 			source: `package workcontext
@@ -1856,7 +1896,7 @@ func parseSource(t *testing.T, path string, source string) sourceFile {
 // the misdiagnosis this whole rule exists to prevent.
 func TestWorkContextConformance(t *testing.T) {
 	settings := conformance.New(time.Now())
-	exported := &Verifier{
+	exported := &verifier{
 		Issuer:   settings.Issuer,
 		Audience: settings.Audience,
 		// Settings.Keys is map[string][]byte so holding settings needs no
@@ -2171,7 +2211,7 @@ var codecIndirections = map[string][]string{
 	// The runtime's own documents, decoded into a caller's destination. The
 	// destination is the CALLER's type and the content is a configuration
 	// document, never a capability — a capability arrives as an opaque string
-	// and is read with corework.Inspect.
+	// and is read with corework.Decode.
 	"configuration_document.go": {"decodeDocument"},
 }
 

@@ -108,10 +108,11 @@ func TestTheDefaultTransportIsNeverTheOneThatCarriesTheBearer(t *testing.T) {
 		Audience:           testAudienceName,
 		ProjectedToken:     ProjectedTokenFile(projectedFile(t, "fixture-bearer")),
 		ProjectionAudience: "projection-audience",
-		// No socket is dialled in either of these, so the anchor is never
-		// exercised — but RootCAs is required, so it is named.
-		RootCAs: x509.NewCertPool(),
-		Now:     func() time.Time { return testClock },
+		// These sources are required even when a test replaces the transport.
+		TrustAnchor:       func() (*x509.CertPool, error) { return x509.NewCertPool(), nil },
+		ClientCertificate: unusedMintCertificate,
+		AdmittedPeers:     testMintPeers,
+		Now:               func() time.Time { return testClock },
 	})
 	require.NoError(t, err)
 
@@ -139,8 +140,8 @@ func TestTheDefaultTransportIsNeverTheOneThatCarriesTheBearer(t *testing.T) {
 	bound, ok := client.httpClient.Transport.(*http.Transport)
 	require.True(t, ok)
 	require.False(t, bound.TLSClientConfig.InsecureSkipVerify)
-	require.Nil(t, bound.DialContext)
-	require.Nil(t, bound.DialTLSContext)
+	require.NotNil(t, bound.DialContext, "the SDK owns the TCP dialer as well as the handshake")
+	require.NotNil(t, bound.DialTLSContext, "only the SDK-owned dialer loads per-handshake roots")
 }
 
 // D2. Omitting both installation carriers used to skip the seal check
@@ -268,10 +269,11 @@ func TestRedirectContainmentWithoutASocket(t *testing.T) {
 		Audience:           testAudienceName,
 		ProjectedToken:     ProjectedTokenFile(projectedFile(t, "projected")),
 		ProjectionAudience: "projection-audience",
-		// No socket is dialled in either of these, so the anchor is never
-		// exercised — but RootCAs is required, so it is named.
-		RootCAs: x509.NewCertPool(),
-		Now:     func() time.Time { return testClock },
+		// These sources are required even when a test replaces the transport.
+		TrustAnchor:       func() (*x509.CertPool, error) { return x509.NewCertPool(), nil },
+		ClientCertificate: unusedMintCertificate,
+		AdmittedPeers:     testMintPeers,
+		Now:               func() time.Time { return testClock },
 	})
 	require.NoError(t, err)
 

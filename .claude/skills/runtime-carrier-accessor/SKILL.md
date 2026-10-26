@@ -47,6 +47,12 @@ because a composition templating an unset variable ships the name with an empty
 value; treating that as present would shadow the fallback a caller relies on.
 New accessors do the same.
 
+**An empty delivered file is not absent; it is broken.** A file carrier exists
+only for a value above `resources.FileCarrierThreshold`, so `readFileCarrier`
+refuses an empty file with `resources.ErrFileCarrier`, like a missing one. Read
+file carriers through `processValue` and you inherit that; never read the file
+yourself.
+
 **Two spellings, exact first.** Capability and configuration names historically
 preserved `-` while newer emitters normalize it to `_`. `For`'s accessors try
 the canonical key, then the legacy one, so an SDK user is independent of the

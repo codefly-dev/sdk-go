@@ -1,4 +1,13 @@
-package codefly
+// Package fixture resolves the fixture the Codefly runtime selected against the
+// manifests of the packages the workspace composes.
+//
+// It lives OUT of sdk-go's root package deliberately. It is the only thing in
+// the root that needed core/composition, and composition carries a GitHub
+// release resolver — so every service that imported `codefly` for its own
+// address linked a GitHub API client and an HTTP artifact downloader it never
+// calls. Resolving a seeded identity by role is a TEST-time concern; a service
+// binary has no business carrying the code that downloads release artifacts.
+package fixture
 
 import (
 	"context"
@@ -10,13 +19,14 @@ import (
 
 	"github.com/codefly-dev/core/composition"
 	"github.com/codefly-dev/core/resources"
+	"github.com/codefly-dev/sdk-go/internal/enclosing"
 )
 
-// FixtureSelection is the fixture the Codefly runtime selected for this
+// Selection is the fixture the Codefly runtime selected for this
 // process. It resolves against the manifests of the packages the workspace
 // composes, so a test authenticates as a seeded identity by role instead of
 // hardcoding one.
-type FixtureSelection string
+type Selection string
 
 // Principal returns the identity the selected fixture seeds for role. Resolving
 // by role means a renamed or dropped principal fails here, against the package
@@ -27,7 +37,7 @@ type FixtureSelection string
 // is invisible here: an unresolved name reports those modules, and a name that
 // a local module also declares resolves to the local one without reporting the
 // ambiguity.
-func (fixture FixtureSelection) Principal(ctx context.Context, role string) (*composition.FixturePrincipal, error) {
+func (fixture Selection) Principal(ctx context.Context, role string) (*composition.FixturePrincipal, error) {
 	name := strings.TrimSpace(string(fixture))
 	if name == "" {
 		return nil, errors.New("resolve fixture principal: no fixture is selected")
@@ -57,11 +67,25 @@ func composedPackages(ctx context.Context) ([]*composition.PackageManifest, []st
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	workspace, err := resources.FindWorkspaceUp(ctx)
+	// Only the process's own composition says which packages it composes. A
+	// producer's workspace above a composed module's checkout or cached tag
+	// would resolve the producer's fixtures, not the composition's.
+	workspace, unreadable, hostComposed, err := enclosing.Composition(ctx)
 	if err != nil {
 		return nil, nil, fmt.Errorf("resolve Codefly workspace: %w", err)
 	}
+	if unreadable != nil {
+		return nil, nil, fmt.Errorf("resolve Codefly workspace: the workspace file in %s could not be read, so it was not taken for the composition %q: %w",
+			unreadable.Dir, enclosing.Injected(), unreadable.Err)
+	}
+	if hostComposed != nil {
+		return nil, nil, fmt.Errorf("resolve Codefly workspace: the workspace in %s is the composition's own but only the host can compose it, so the packages it composes were not read here: %w",
+			hostComposed.Dir, hostComposed.Err)
+	}
 	if workspace == nil {
+		if injected := enclosing.Injected(); injected != "" {
+			return nil, nil, fmt.Errorf("resolve Codefly workspace: no workspace on disk is the composition %q this process runs in", injected)
+		}
 		return nil, nil, errors.New("resolve Codefly workspace: no enclosing workspace")
 	}
 	resolutions, err := workspace.ResolveModules(ctx)
@@ -95,4 +119,15 @@ func composedPackages(ctx context.Context) ([]*composition.PackageManifest, []st
 		manifests = append(manifests, manifest)
 	}
 	return manifests, pinned, nil
+}
+
+// Selected is the fixture the Codefly runtime chose for this process. Product
+// code must not depend on the runtime's environment-variable representation.
+func Selected() Selection {
+	return Selection(os.Getenv(resources.FixturePrefix))
+}
+
+// With reports whether the selected fixture matches name.
+func With(name string) bool {
+	return resources.Match(string(Selected()), name)
 }

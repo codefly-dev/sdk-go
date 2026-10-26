@@ -32,19 +32,26 @@ var structurallyRefused = map[string]bool{
 	"seal-without-installation":  true, // ErrInvalid: a seal bound to nothing
 	"zero-principal-epoch":       true, // ErrInvalid: zero is not an epoch
 	"zero-installation-revision": true, // ErrInvalid: zero is not a revision
-	"zero-build-incarnation":     true, // ErrInvalid: zero is not an incarnation
 	// The execution is a PAIR, set together or absent together: a digest with
 	// no incarnation, or an incarnation with no digest, is a seal that names a
 	// build nothing can supersede. This fixture arrived with core's per-hop
 	// execution change and the suite caught it by comparing against core's own
 	// list rather than against a constant here — which is the whole reason the
 	// comparison is written that way.
-	"seal-half-execution":       true, // ErrInvalid: half an execution is not one
 	"partial-operation-binding": true, // ErrInvalid: an id at no revision
 	"actor-without-epoch":       true, // ErrInvalid: a principal nobody can revoke
+	// An EMPTY audience is structural and an audience MISMATCH is not, which is
+	// why this one sits here while every other audience refusal is in the group
+	// below that must pass. The schema requires at least one character, so
+	// protovalidate reaches it inside core's Decode with no key and no network;
+	// deciding whether a NON-empty audience is the right one needs the route or
+	// the receiver, which a structural read cannot see. Arrived with core's
+	// non-consuming Decode (core#723, then named Inspect), and the comparison against core's own
+	// fixture list is what surfaced it rather than a constant here.
+	"empty-audience": true, // ErrInvalid: an audience of no characters
 
 	// The encoding itself. Core's Verify now refuses unknown fields
-	// recursively and non-canonical encodings, and Inspect reaches the same
+	// recursively and non-canonical encodings, and Decode reaches the same
 	// answer — so a capability with a field appended and re-signed is refused
 	// here too, with no key and no network. This fixture arrived with the
 	// settled surface and the exactness assertion below is what found it,
@@ -60,17 +67,17 @@ var structurallyRefused = map[string]bool{
 // issuer, audience, WINDOW and live-state refusals — must PASS: a structural
 // check that refused them would be claiming to have verified something it
 // cannot see. Expired and not-yet-valid are in that second group, which is
-// worth stating because it surprises: Inspect checks no window at all, and the
+// worth stating because it surprises: Decode checks no window at all, and the
 // mint client's own checkWindow is what refuses a credential that arrives
 // unusable.
 //
-// The list is not derived from Inspect's behaviour, deliberately — that would
+// The list is not derived from Decode's behaviour, deliberately — that would
 // be a tautology. It is written down, and the test requires every name on it to
 // be a fixture that exists, so a fixture core renames or retires fails here
 // rather than quietly dropping out of coverage.
 //
 // This is the test the conformance test is not. Driving fixtures through
-// `&Verifier{}` exercises core, because Verifier is an alias of core's type —
+// core.s verifier directly exercises core, because this package.s is an alias —
 // it is core testing core, and it would have passed unchanged beside the
 // implementation this PR deletes. The SDK's own decision paths are
 // readClaims/sealOf, SealedInstallation, FromHeaders and credentialFrom, and that
@@ -98,8 +105,8 @@ var structurallyRefused = map[string]bool{
 // rather than surfacing as a mismatched sentinel in somebody's gateway.
 //
 // It does not make this module's reading correct by construction — core's
-// Inspect does that, and this test is what holds the two in agreement. Core
-// built Inspect when it was asked for; this module applies no structural rule
+// Decode does that, and this test is what holds the two in agreement. Core
+// built Decode (first named Inspect) when it was asked for; this module applies no structural rule
 // of its own any more.
 func TestTheSDKParsePathsAgreeWithCore(t *testing.T) {
 	fixtures, err := corework.Fixtures(time.Now())

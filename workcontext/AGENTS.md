@@ -3,9 +3,19 @@
 A separate leaf module (`github.com/codefly-dev/sdk-go/workcontext`, Go 1.27,
 its own `go.mod`/`go.sum` and its own coverage gate). It mints nothing and
 verifies nothing: `codefly-dev/core/workcontext` is the only implementation of
-the capability and this module re-exports core's verifier by type alias, in
-`core.go`. Adding a dependency here is a design change — see
+the capability, reached here through the typed access in `core.go`; core's
+verifier itself is NOT re-exported (see "Core's verifier is NOT re-exported"
+below). Adding a dependency here is a design change — see
 `.claude/skills/dual-module-change`.
+
+Each module's `go.mod` owns its core pin. This leaf stays on core's **v0.19.1
+release tag** (`7f78302f`); the root is on core's candidate `835460f1`, the
+live-endpoint lane's green final, which is not released-pin qualification. Core
+owns the
+endpoint vocabulary: visibility is `private`/`internal`/`public`, and
+`location: external` describes an endpoint outside the system. The root SDK
+uses core's location predicate for local resolution; public visibility alone
+does not prevent it. Keep that resolution in the root SDK, outside this leaf.
 
 Depth that used to live in the root `AGENTS.md` and does not fit its 200-line
 budget. The root file carries the rule; this carries what the gates refuse.
@@ -18,7 +28,9 @@ budget. The root file carries the rule; this carries what the gates refuse.
 `TestNoCodecTouchesACapabilityByType` decides the codec rule with `go/types`.
 `TestNoSecondWorkContextImplementation` is the syntactic gate that remains.
 `scripts/check-one-implementation.sh` sweeps every published ref, reading
-imports with `go/parser`.
+imports with `go/parser`. Every ref, not a `compat/*` glob: a bullet forbidding
+the back-port of a breaking deletion once lived in the root `AGENTS.md`, and it is
+what kept the deleted implementation alive on refs CI builds, so it was deleted.
 
 **Deny by default is the spine, and it replaces an argument that lost ten
 times.** Every revision banned a LIST OF NAMES and every review found the next
@@ -83,6 +95,9 @@ qualifier, because the qualifier is the author's choice.
   *named* `mintResponse`. Types resolve package-qualified (`basev0.WorkScopeV1`,
   not `WorkScopeV1` from anywhere), in the scope of the use, before the use, and
   an ambiguous identifier is refused rather than guessed.
+  `encoding/asn1` is limited to `mint.go` decoding SAN GeneralNames into
+  `[]asn1.RawValue`; it cannot encode or decode any capability. This standard
+  library import adds no module dependency and preserves the signed URI bytes.
 - **No function-local type, and no second local name for core's types outside
   `core.go`** — alias or defined type, through a pointer or a slice, and a local
   name is CHASED to what it names. Either one hands a type-name allowlist
@@ -148,24 +163,141 @@ read a refusal's sentinel off the fixture, never off a constant here, because
 three fixtures changed sentinel under us and the tests that did that needed no
 edit.
 
+## Configuration is this module's to refuse; verification is not
+
+**Core's verifier is NOT re-exported, and that is the one deliberate difference
+between `core.go` and a plain re-export.** `type verifier = corework.Verifier` is
+unexported; `PinnedVerifier` is the only type here with a `Verify` method and
+`NewVerifier` is its only constructor. Exported, core's verifier was a second way
+in: a struct whose every field has a usable zero value, constructible beside the
+configuration that is supposed to be required — the shape `GuardStreams` already
+exists to avoid in this module, where the correct wiring took two calls and only
+one was reachable from the type system. `TestEveryVerificationPathIsPinned` holds
+it: nothing exported here may name core's `Verifier`, and the only exported
+`Verify`/`Recheck` are `PinnedVerifier`'s.
+
+A component that genuinely IS the issuer imports `core/workcontext` directly, as
+`core.go` already says about `ErrNoSeal` and the verify-only `Authenticator`.
+That is not a gap; at that point it is a participant in the capability rather
+than a client of it.
+
+**The endpoint, the fetch and the verifier are one operation.** `KeySetEndpoint`
+and `KeySet` are opaque with one constructor each, `AcquireKeySet` is the only
+thing that produces a `KeySet`, and `NewVerifier` takes nothing else. So "this
+location was admitted" and "these are the keys in use" are one fact. They were
+two, and a checked endpoint sitting beside independently supplied keys is a
+check that establishes nothing.
+
+**The decoding is the CALLER'S and the keys cross as plain bytes.** Reading a key
+set means naming a signature primitive, which is the one thing this module may
+never do — `crypto/ed25519`, base64 DECODE and `encoding/json` outside `mint.go`
+are each refused by the allowlist, and that allowlist is the thing ten rounds of
+review built. `fillVerificationKeys` is generic so the element type is INFERRED
+from the field it fills: a conversion through a type parameter whose core type is
+`[]byte` names nothing.
+
+**Every field of core's verifier has a usable zero value**, so an incomplete
+configuration is expressible and the invariant requires it to be refused BY NAME.
+Each missing value is named separately, the four sources included, where core
+names all four in one message. Key material of the wrong length is refused here
+too — core refuses it per request, and a configuration fault belongs in a refusal
+before anything is served.
+
+**`verificationKeySize` is a number here and a call in core**, which is the
+`sealCarriesAnExecution` arrangement again and for the same reason. The number is
+stated once and a `_test.go` — where the import is legitimate — holds it to
+`ed25519.PublicKeySize`. If core grows a key-configuration validator this becomes
+a call and the number goes.
+
+## The transport rule is the host's, reimplemented, and this is the SDK's one copy
+
+In-cell transport security is the mesh's, so a composition asserts it with
+`internal-transport/mesh-protected` and a service accepts plaintext to an
+in-cluster Service address exactly under that assertion. Both halves are
+required: the assertion covers only what a mesh can cover, and a name alone is
+not evidence a mesh wraps the wire.
+
+- **One function, `AdmitEndpoint`, exported, and two call sites here.**
+  `ResolveKeySetEndpoint` admits a verifier's key-set URL through it and
+  `validateMintURL` admits the mint endpoint through it, with
+  `MintOptions.Transport` as the mint client's `TransportSource`; a nil
+  `Transport` admits https alone, because nothing can read either fact. It is
+  exported for the URLs a consumer dials that are neither — a runtime calling the
+  gateway on the origin it mints against — so a consumer's boot refusal is this
+  rule and not a copy. The mint URL is not a mint-shaped variant of the rule:
+  `TestTheMintURLIsAdmittedByTheSameRuleAsTheKeySet` drives every branch
+  through both doors and requires the same answer in the same words. The rule
+  itself is the one the composed modules apply to `platform/gateway-endpoint`.
+- **`ClusterServiceHost` accepts `<service>.<namespace>.svc` or that followed by
+  `cluster.local` and nothing else**, with both leading labels held to DNS-1123.
+  The suffix is matched LITERALLY, because a name carrying an `svc` label in
+  another domain is an ordinary public name and an arbitrary suffix is not
+  evidence of a cluster domain.
+- **The assertion is compared LITERALLY.** `true` asserts; unset, empty and
+  `false` keep plaintext refused; every other value stops the process, a value
+  carrying whitespace included. An earlier revision trimmed first so a
+  file-delivered value would not be refused over its trailing newline — but
+  `TrimSpace` trims every Unicode space, so values that are not the assertion
+  asserted it. The delivery's shape is the delivery's to fix.
+- **A lookup failure is not absence.** A setting nothing carries is an answer; a
+  delivery that cannot be read, or an authority-bearing value that has drifted
+  from the one pinned at boot, is not. `TransportSource` requires
+  `WorkspaceValueIfSet` for exactly that: `WorkspaceValue` reports "not
+  configured" and "could not be read" with one error, and a failed read must not
+  decide a posture question. `(*Query).WorkspaceValueIfSet` is the root module's
+  three-valued accessor, added for this.
+- **Loopback is the LOCAL shape only.** A deployed runtime has one admission rule
+  and loopback is not an exception to it even with the assertion set, since a
+  mesh carries no hop that never leaves the pod.
+- **Both facts come from `TransportSource`, not from parameters.** A boolean
+  parameter is a per-service opt-in no address has to qualify for, which is the
+  shape the host deleted. `codefly.For(ctx)` satisfies the interface, and
+  `(*Query).IsLocalRun` exists so a leaf can require the runtime through an
+  interface rather than importing the root module.
+- **No refusal echoes a configured value** — not the URL, not the parser's own
+  message, and not the assertion, which is read from the secret namespace too.
+  Every plaintext refusal ends with `MeshTransportRemedy`.
+- **The fetch stays on the admitted address**: a redirect is refused rather than
+  followed, the body is bounded, and the HTTP client is this module's.
+
+## The posture checks are commands whose EXIT STATUS is the answer
+
+`scripts/security-posture.sh` is how SP-WC-01 and SP-WC-05 are re-audited here.
+It exists because the catalogue's own commands could not fail: they counted lines
+(`go test … | grep -c '^--- PASS'`), which answers 0 for a passing run without
+`-v`, 1 whatever the subtests did, and 0 for a test that no longer exists. **A
+check that cannot fail reports green forever, which is worse than no check** —
+the invariant stops being audited and nothing says so. So the script reads the
+exit status AND requires every named test to have run, and a renamed or deleted
+test is a failure rather than a silent pass.
+
+## A derived credential never outlives its parent, and the test for that lives here
+
+Core's `derive` clamps a derived expiry to the parent's and refuses a parent
+already past its own expiry; `TestDerivedContextNeverOutlivesParent` drives it
+over a matrix of parent lifetimes and requested windows, plus a chain, a grant
+capability and a widening hop. **The point of testing it from a module that
+derives nothing** is that the test binds the version of core THIS module resolves
+to, so the rule is required of whatever this module depends on rather than of
+core in general.
+
+What the test cannot assert, and says where it asserts the rest: a verifier holds
+the capability and not its parent, and `WorkContextV1` carries no
+absolute-deadline claim and no per-hop timestamp — so the verification half needs
+a claim, which is core's. A renewal in this module is not a derivation at all:
+`MintClient` presents the projected token for a fresh mint and never the
+credential it holds.
+
 ## A credential is sealed or it is not a credential, and core says what that means
 
 The seal and each actor hop's epoch are schema-required, so a missing one is a
-`protovalidate` refusal inside core's decode. The **execution** —
-`image_digest` and `build_incarnation` — is a PAIR OR NEITHER: it lives in
-`SealSource.ApprovedBuild` keyed on the principal, every hop attests its own,
-and a principal that bears none (a person at a terminal) seals none rather than
-inventing a value. An operation binding carries its id, revision and
-incarnation or none of them; and core refuses an unknown field or a
-non-canonical encoding, so nothing here may ever marshal a capability.
-
-**Zero is an answer, not a gap.** `GetBuildIncarnation()` returns 0 both for
-"bears no execution" and for a value core says is never legitimate, since an
-incarnation starts at 1. `mint.go`'s echo cross-check asks about PRESENCE
-before comparing, because a host echoing `"0"` otherwise matched a capability
-sealing no execution — a host asserting an execution the issuer does not hold,
-passing the check that exists to catch that. `Attach` refuses an unsealed
-capability with `corework.Inspect`'s answer — false for a while precisely
+`protovalidate` refusal inside core's decode. A seal carries no build: what a
+workload runs is checked by the host where it mints, and a change of approved
+builds revokes through the principal's epoch and the installation's revision.
+An operation binding carries its id, revision and incarnation or none of them;
+and core refuses an unknown field or a non-canonical encoding, so nothing here
+may ever marshal a capability. `Attach` refuses an unsealed
+capability with `corework.Decode`'s answer — false for a while precisely
 because we answered it ourselves and never read the actor chain.
 
 **One sentinel for every structural seal defect, `ErrInvalid`.** `ErrUnsealed`
@@ -212,11 +344,11 @@ the most ordinary mid-stream refusal there is. `errStreamMisuse` wraps
 ## The mint client holds a credential it cannot verify
 
 It is the party the credential is minted FOR, not a receiver, so it reads the
-window through `corework.Inspect` and checks no signature. Three consequences
+window through `corework.Decode` and checks no signature. Three consequences
 that are easy to get backwards:
 
-- **The lifetime bound is CORE'S**, in `decodeClaims`, so `Inspect` carries it
-  — and `Inspect` is this client's read path. Core's first two attempts bounded
+- **The lifetime bound is CORE'S**, in `decodeClaims`, so `Decode` carries it
+  — and `Decode` is this client's read path. Core's first two attempts bounded
   `Authority.Start` and then `Verify` alone, neither of which a holder can see,
   so a thirty-day capability every `Verify` refuses was reported to its holder
   as thirty days of validity. `MaxCredentialLifetime` survives as a DEPLOYMENT
@@ -227,12 +359,78 @@ that are easy to get backwards:
   and terminal — a process seeing one must stop serving — so anything transient
   classified that way permanently stops a process holding a good credential: an
   interrupted response read, a projected-token `EMFILE`, a momentarily empty
-  projection, a 408. All of those are `ErrMintUnavailable`. A TLS verification
-  failure is the opposite: not an outage but the one thing this transport
-  exists to refuse, so it latches. Local misuse is `ErrInvalid`, never
-  `ErrMintRefused`, or `Refused()` and `errors.Is` disagree.
+  projection, a 408. All of those are `ErrMintUnavailable`. TLS verification
+  and peer-admission failures are also retryable: the handshake refuses them
+  before any projected token leaves, and rotation or admission can recover.
+  Local misuse is `ErrInvalid`, never `ErrMintRefused`, or `Refused()` and
+  `errors.Is` disagree.
 - **The shared request is detached from whoever started it**, bounded by
   `RequestTimeout`. On the caller's context, a cancelled leader counted as no
   failure, so twenty callers with deadlines shorter than a degraded host's
   latency produced twenty mint requests — each of which the host may complete
   and audit while this process discards it.
+
+## The mint transport admits the peer before disclosing the projection
+
+`MintOptions` requires three sources for an https endpoint: `TrustAnchor`,
+`ClientCertificate` and `AdmittedPeers`. For an admitted plaintext endpoint —
+loopback on a local run, or an in-cluster Service under the mesh assertion — no
+handshake ever reads them, so all three must be nil, and one set beside a
+plaintext URL is refused at construction rather than ignored: an `AdmittedPeers`
+nothing consults reads, in the configuration, as peer admission that is
+happening. Construction checks configuration without calling any source.
+The SDK owns its HTTP client and transport; a caller can supply neither. The
+private TLS dialer reads the current anchor for normal chain and hostname
+verification. `GetClientCertificate` reads the workload's current X.509-SVID;
+the endpoint must request it. `VerifyConnection` reads admitted peers after
+chain verification. After the handshake, the dialer re-reads roots and peers,
+re-verifies the certificate chains and hostname, and repeats admission before
+returning the connection to HTTP.
+
+Before reading admission, check the parsed leaf's X.509-SVID server purpose:
+IsCA must be false; KeyUsage must include digitalSignature and exclude
+keyCertSign and cRLSign. If the EKU extension is present, it must explicitly
+include serverAuth, even if empty or carrying anyExtendedKeyUsage. Ordinary
+Go verification alone does not enforce these restrictions. An absent EKU is
+allowed. Both admission passes use the same leaf-purpose check.
+
+The leaf must contain exactly one URI SAN, read from the signed extension's
+original bytes: serializing x509's parsed URL loses an empty fragment delimiter.
+Both leaf and admitted SPIFFE IDs are validated before comparison; only scheme
+and trust-domain case are ignored. The trust domain uses ASCII letters, digits,
+dots, hyphens and underscores, with no empty labels; paths compare byte-for-byte.
+Empty segments, trailing slashes, dot segments, userinfo, ports, queries,
+fragments and percent-escapes are refused rather than normalized.
+
+Every mint, renewal and refresh dials fresh: TLS 1.3 minimum, no connection or
+TLS session reuse, no compression, proxy or redirect. HTTP/1.1 prevents
+multiplexing across admission decisions. Withdrawal during the handshake is
+caught by the post-handshake check. Each source value's residual freshness
+interval starts when it is sampled and ends at the transport's first HTTP
+write. Rechecking shortens this to the re-read-to-write window, including later
+source waits: the second peer callback may block after the second anchor was
+sampled. Independent sources are not a coordinated snapshot; stronger
+consistency requires a shared snapshot/version check. Withdrawal in this
+interval cannot retract an in-flight request.
+
+Every source wait is bounded by the dial and request contexts, including
+post-handshake reads. Cancellation closes the raw connection while a callback
+or private-key operation is blocked. Like `projectedToken`, all three transport
+sources and the TLS operations they trigger share one outstanding worker slot
+per client across retries, held through both handshake phases. Arbitrary
+callbacks and signers cannot be interrupted; cancellation bounds the wait and
+closes the socket, but only the worker's return releases its slot. Later
+attempts check the slot before dialing and refuse without a connection attempt
+until then; late answers are discarded and the worker exits. Recovery reads
+fresh data. TLS alone performs signing.
+
+A missing source is `ErrInvalid` at construction. A malformed admitted entry
+is `ErrInvalid` at the handshake, even alongside a valid entry. Unreadable or
+nil anchors, unreadable or empty certificates, empty or unreadable peer sets,
+malformed admitted IDs and TLS failures return `ErrMintUnavailable`; malformed
+admitted IDs also retain `ErrInvalid`. Invalid leaf purposes and invalid,
+ambiguous or unadmitted leaf identities additionally wrap
+`ErrMintPeerNotAdmitted`. These errors never latch.
+`mint_transport_test.go` requires no HTTP disclosure on refusal, withdrawal and
+rotation inside the handshake, bounded source reads and connection closure on
+cancellation, and recovery after release or corrected projections.

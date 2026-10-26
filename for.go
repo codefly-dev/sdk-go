@@ -6,28 +6,29 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 
 	"github.com/codefly-dev/core/configurations"
-	basev0 "github.com/codefly-dev/core/generated/go/codefly/base/v0"
 	"github.com/codefly-dev/core/network"
 	"github.com/codefly-dev/core/resources"
 	"github.com/codefly-dev/core/standards"
 	"github.com/codefly-dev/core/wool"
+	"github.com/codefly-dev/sdk-go/internal/enclosing"
 )
 
 type Query struct {
-	module             string
-	service            string
-	endpointName       string
-	endpointApi        string
-	ctx                context.Context
-	withDefaultNetwork bool
-	namingScope        string
+	module         string
+	consumerModule string
+	service        string
+	endpointName   string
+	endpointApi    string
+	ctx            context.Context
+	namingScope    string
 }
 
 func For(ctx context.Context) *Query {
-	q := &Query{ctx: ctx}
+	q := &Query{ctx: ctx, consumerModule: pinnedConsumerIdentity()}
 	// The process environment is the runtime authority. Falling back to the
 	// values captured by Init preserves callers that construct a query after
 	// startup, while the direct read also makes early queries and runtime
@@ -72,11 +73,6 @@ func (q *Query) Normalize() {
 	}
 }
 
-func (q *Query) WithDefaultNetwork() *Query {
-	q.withDefaultNetwork = true
-	return q
-}
-
 // NamingScope selects the same advanced local port namespace used by
 // `codefly run --naming-scope`. Leave empty for the normal interactive
 // workspace.
@@ -90,57 +86,198 @@ func (q *Query) NetworkInstance() *resources.NetworkInstance {
 	if err == nil {
 		return instance
 	}
-	w := wool.Get(q.ctx).In("NetworkInstance")
-	if q.withDefaultNetwork {
-		w.Warn("Cannot find network instance, returning default", wool.Field("error", err))
-		return resources.DefaultNetworkInstance(q.endpointApi)
-	}
 	return nil
 }
 
+// ErrEndpointCarrierAbsent reports that a process has no carrier for the
+// endpoint the query names and cannot use a local workspace fallback.
+// The composition injects a carrier for every endpoint it grants a consumer,
+// so absence is its answer and nothing is substituted for it: a deployed process
+// has no workspace to compute a native address from, and a process that ships
+// its workspace never falls back outside local.
+var ErrEndpointCarrierAbsent = errors.New("codefly: no carrier for the endpoint the query names")
+
 // ResolveNetworkInstance returns one typed endpoint or a diagnostic error.
 //
-// Runtime-injected endpoint capabilities always win. In Codefly LOCAL (and
-// before an environment is explicitly selected), the SDK falls back to the
-// workspace's deterministic native endpoint map. This lets independently
-// loaded agents use the same address as `codefly endpoint` without parsing
-// Codefly environment carriers or shelling out to the CLI.
+// With a workspace on disk, every query first asks core to select an eligible
+// declared endpoint for the calling module, and only then reads the carrier
+// keyed from the selected declaration. In Codefly LOCAL (and before an
+// environment is explicitly selected), an absent carrier falls back to the
+// workspace's deterministic native endpoint map, so independently loaded
+// agents use the same address as `codefly endpoint` without parsing Codefly
+// environment carriers or shelling out to the CLI.
+//
+// A deployed process has no workspace: the builder image ships the binary
+// alone. There the carriers the composition injected are the composition's
+// judgement — the CLI's join decided at render which endpoints this consumer
+// may reach, and the mesh enforces it on the cell. A process in any environment
+// with no workspace resolves from the carrier keyed by the query's canonical
+// identity and refuses only an absent carrier (ErrEndpointCarrierAbsent) or a
+// malformed one. It never computes a native address. No flag selects the
+// path: the presence of a workspace decides. Native fallback requires a
+// workspace and a local or unset environment.
+//
+// The workspace found above the process is only consulted if it is the
+// process's composition (internal/enclosing): its declared name is the one the
+// runtime injected, and it carries the queried module. A module run from its
+// own checkout, a released tag in the module cache and a solution's tag all
+// ship the producer's workspace, under a name that is not the composition's;
+// that workspace is never loaded, and the process is answered exactly as one
+// with no workspace is — from the carriers, never from that workspace's
+// declarations or native map. With no injected composition, the enclosing
+// workspace is the only one there is and is used as found. The composition's
+// own workspace that only the host can compose — it imports a workspace by
+// release, which this SDK does not acquire — is answered the same way: from the
+// carriers the composition injected, and an absent carrier says why no
+// declaration was judged here.
 func (q *Query) ResolveNetworkInstance() (*resources.NetworkInstance, error) {
+	if err := checkConsumerIdentity(q.consumerModule); err != nil {
+		return nil, err
+	}
 	q.Normalize()
-	info := &resources.EndpointInformation{
-		Module:  q.module,
-		Service: q.service,
-		API:     q.endpointApi,
-		Name:    q.endpointName,
-	}
-	instance, err := resources.FindNetworkInstanceInEnvironmentVariables(q.ctx, info, codeflyEnvironmentVariables())
-	if err == nil {
-		return instance, nil
-	}
-	if Environment() == "" || IsLocal() {
-		local, localErr := q.resolveLocalNetworkInstance()
-		if localErr == nil {
-			return local, nil
-		}
-		err = fmt.Errorf("runtime endpoint unavailable (%v); local endpoint unavailable (%w)", err, localErr)
-	}
-	if q.withDefaultNetwork {
-		return resources.DefaultNetworkInstance(q.endpointApi), nil
-	}
-	return nil, err
-}
-
-func (q *Query) resolveLocalNetworkInstance() (*resources.NetworkInstance, error) {
 	if strings.TrimSpace(q.module) == "" || strings.TrimSpace(q.service) == "" {
-		return nil, errors.New("module and service are required for local endpoint resolution")
+		return nil, errors.New("module and service are required for endpoint selection")
 	}
-	workspace, err := resources.FindWorkspaceUp(q.ctx)
+	workspace, unreadable, hostComposed, err := enclosing.Composition(q.ctx)
 	if err != nil {
 		return nil, err
 	}
 	if workspace == nil {
-		return nil, errors.New("workspace not found")
+		instance, carrierErr := q.resolveFromAuthoritativeCarrier()
+		if errors.Is(carrierErr, ErrEndpointCarrierAbsent) {
+			if unreadable != nil {
+				return nil, fmt.Errorf("%w; the workspace file in %s could not be read, so it was not taken for the composition %q: %w",
+					carrierErr, unreadable.Dir, enclosing.Injected(), unreadable.Err)
+			}
+			if hostComposed != nil {
+				return nil, fmt.Errorf("%w; the workspace in %s is the composition's own but only the host can compose it, so no declaration was judged here and the composition's carriers are the only answer: %w",
+					carrierErr, hostComposed.Dir, hostComposed.Err)
+			}
+		}
+		return instance, carrierErr
 	}
+	if !carries(workspace, q.module) {
+		return q.resolveUncomposedFromCarrier(workspace)
+	}
+	// The declaration decides eligibility before any carrier can supply an
+	// address. An explicit API is a qualifier core must judge, not a bypass.
+	selected, err := q.selectEndpoint(workspace, &resources.EndpointInformation{
+		Module:  q.module,
+		Service: q.service,
+		API:     q.endpointApi,
+		Name:    q.endpointName,
+	})
+	if err != nil {
+		return nil, err
+	}
+	info := selected.Information()
+	instance, present, err := q.carrierInstance(info)
+	if present {
+		return instance, err
+	}
+	if Environment() != "" && !IsLocal() {
+		return nil, absentCarrier(info)
+	}
+	local, localErr := q.localNetworkInstance(workspace, selected)
+	if localErr != nil {
+		return nil, fmt.Errorf("%w; local endpoint unavailable (%w)", absentCarrier(info), localErr)
+	}
+	return local, nil
+}
+
+// carries reports whether the composition carries the queried module, by core's
+// own membership rule — the one LoadModuleFromName resolves through, which sees
+// modules composed through `workspaces:` and `solutions:` and aliases.
+func carries(workspace *resources.Workspace, module string) bool {
+	_, carried := workspace.Member(module)
+	return carried
+}
+
+// resolveUncomposedFromCarrier answers a query for a module the workspace on
+// disk does not carry. With nothing injected to compare its name against, that
+// workspace may be a producer's own, so its declarations are not judged and
+// the carrier answers. An absent carrier keeps what the workspace did say —
+// which modules it carries — because a mistyped module name at a composition
+// root lands here too.
+func (q *Query) resolveUncomposedFromCarrier(workspace *resources.Workspace) (*resources.NetworkInstance, error) {
+	instance, err := q.resolveFromAuthoritativeCarrier()
+	if errors.Is(err, ErrEndpointCarrierAbsent) {
+		return nil, fmt.Errorf("%w; workspace <%s> does not compose module <%s>, present: %v",
+			err, workspace.Name, q.module, workspace.ModulesNames())
+	}
+	return instance, err
+}
+
+// resolveFromAuthoritativeCarrier answers a workspace-free process from its carriers
+// alone. The carrier is keyed by the query's canonical identity — the
+// declaration is not on disk to supply any part of it — and nothing is judged
+// here: the composition already decided, at render, that this consumer may
+// reach what it injected.
+func (q *Query) resolveFromAuthoritativeCarrier() (*resources.NetworkInstance, error) {
+	info := q.canonicalInformation()
+	if strings.TrimSpace(info.Name) == "" {
+		return nil, fmt.Errorf("%w: the query names no endpoint", resources.ErrNoSuchEndpoint)
+	}
+	if info.UnknownAPI() {
+		// Only the declaration could say which API an endpoint named this way
+		// serves, and there is none on disk; the carrier cannot be keyed.
+		return nil, fmt.Errorf("%w: %s does not qualify its API and no declaration is on disk to supply it; name it with API(...)",
+			ErrEndpointCarrierAbsent, endpointReference(info))
+	}
+	instance, present, err := q.carrierInstance(info)
+	if !present {
+		return nil, absentCarrier(info)
+	}
+	return instance, err
+}
+
+// canonicalInformation is the identity the query names, as the composition
+// keys the carrier: module, service, name and API. Normalize already lets the
+// API name the endpoint; the converse is core's own rule for a declaration
+// (Endpoint.postLoad): an endpoint named after a supported API serves that
+// API. Applied to the reference, Endpoint("rest") and API("rest") key the same
+// carrier, as they do once selection has read the declaration.
+func (q *Query) canonicalInformation() *resources.EndpointInformation {
+	info := &resources.EndpointInformation{
+		Module:  q.module,
+		Service: q.service,
+		Name:    q.endpointName,
+		API:     q.endpointApi,
+	}
+	if info.UnknownAPI() && standards.IsSupportedAPI(info.Name) == nil {
+		info.API = info.Name
+	}
+	return info
+}
+
+// carrierInstance reads the carrier keyed by info from the snapshot. It tells
+// an absent carrier (present false) from a present one whose value does not
+// parse (present true, err non-nil): core returns a partial instance beside a
+// parse error, and it is discarded here so that no entrypoint can hand it out.
+// A present but empty value is a malformed carrier, never an absent one.
+func (q *Query) carrierInstance(info *resources.EndpointInformation) (*resources.NetworkInstance, bool, error) {
+	key := resources.EndpointAsEnvironmentVariableKey(info)
+	address, err := resources.FindValueInEnvironmentVariables(q.ctx, key, codeflyEnvironmentVariables())
+	if err != nil {
+		return nil, false, nil
+	}
+	instance, err := resources.ParseAddress(address)
+	if err != nil {
+		return nil, true, fmt.Errorf("endpoint carrier %s for %s holds a malformed address: %w", key, endpointReference(info), err)
+	}
+	return instance, true, nil
+}
+
+func absentCarrier(info *resources.EndpointInformation) error {
+	return fmt.Errorf("%w: %s (carrier %s)", ErrEndpointCarrierAbsent, endpointReference(info), resources.EndpointAsEnvironmentVariableKey(info))
+}
+
+// endpointReference spells the identity as a reference, module/service/name::api.
+func endpointReference(info *resources.EndpointInformation) string {
+	return resources.ServiceUnique(info.Module, info.Service) + info.Identifier()
+}
+
+func (q *Query) selectEndpoint(workspace *resources.Workspace, info *resources.EndpointInformation) (*resources.Endpoint, error) {
 	module, err := workspace.LoadModuleFromName(q.ctx, q.module)
 	if err != nil {
 		return nil, err
@@ -149,60 +286,25 @@ func (q *Query) resolveLocalNetworkInstance() (*resources.NetworkInstance, error
 	if err != nil {
 		return nil, err
 	}
-	var selected *resources.Endpoint
-	for _, endpoint := range service.Endpoints {
-		api := endpoint.API
-		if api == "" && standards.IsSupportedAPI(endpoint.Name) == nil {
-			api = endpoint.Name
-		}
-		if q.endpointName != "" && !resources.Match(endpoint.Name, q.endpointName) {
-			continue
-		}
-		if q.endpointApi != "" && !resources.Match(api, q.endpointApi) {
-			continue
-		}
-		if selected != nil {
-			return nil, fmt.Errorf(
-				"multiple endpoints match %s/%s name=%q api=%q",
-				q.module,
-				q.service,
-				q.endpointName,
-				q.endpointApi,
-			)
-		}
-		selected = endpoint
+	selection, err := resources.SelectEndpointForReference(q.consumerModule, info, service.Endpoints)
+	if err != nil {
+		return nil, err
 	}
-	if selected == nil {
-		return nil, fmt.Errorf(
-			"no endpoint matches %s/%s name=%q api=%q",
-			q.module,
-			q.service,
-			q.endpointName,
-			q.endpointApi,
-		)
-	}
-	if selected.Visibility == resources.VisibilityExternal {
+	return selection.Endpoint, nil
+}
+
+func (q *Query) localNetworkInstance(workspace *resources.Workspace, selected *resources.Endpoint) (*resources.NetworkInstance, error) {
+	if selected.External() {
 		return nil, errors.New("external endpoint cannot be resolved from the local native map")
 	}
-	api := selected.API
-	if api == "" && standards.IsSupportedAPI(selected.Name) == nil {
-		api = selected.Name
+	endpoint, err := selected.Proto()
+	if err != nil {
+		return nil, err
 	}
-	if standards.IsSupportedAPI(api) != nil {
-		return nil, fmt.Errorf("endpoint API %q is not supported by the local native map", api)
+	if standards.IsSupportedAPI(endpoint.Api) != nil {
+		return nil, fmt.Errorf("endpoint API %q is not supported by the local native map", endpoint.Api)
 	}
-	native := network.NativeFor(
-		q.ctx,
-		workspace.Name,
-		q.module,
-		q.service,
-		q.namingScope,
-		&basev0.Endpoint{
-			Name:       selected.Name,
-			Api:        api,
-			Visibility: selected.Visibility,
-		},
-	)
+	native := network.NativeFor(q.ctx, workspace.Name, q.module, q.service, q.namingScope, endpoint)
 	if native.Port > uint32(^uint16(0)) {
 		return nil, fmt.Errorf("resolved endpoint port %d exceeds uint16", native.Port)
 	}
@@ -263,6 +365,21 @@ func runtimeServiceConfigurationValue(ctx context.Context, candidates ...string)
 	return "", false, nil
 }
 
+// IsLocalRun reports whether the Codefly environment is local, as a METHOD so a
+// leaf module can require it through an interface rather than importing this
+// one.
+//
+// It is the same answer as the package-level IsLocal, and it exists because the
+// alternative is worse. A plaintext-transport admission decision needs two facts
+// — the composition's mesh assertion and whether this is a local run — and a
+// caller that passed the second as a boolean would be holding a per-service
+// opt-in that no address has to qualify for. With both on one object that this
+// SDK answers from the carriers, the only way to say a hop is safe is for the
+// composition to have said it. See workcontext.TransportSource.
+func (q *Query) IsLocalRun() bool {
+	return IsLocal()
+}
+
 // WorkspaceConfiguration returns one non-secret workspace configuration value.
 // Product services must use this API instead of depending on Codefly's environment
 // variable encoding, which is an SDK/runtime implementation detail.
@@ -276,19 +393,93 @@ func (q *Query) WorkspaceSecret(name string, key string) (string, error) {
 	return q.workspaceConfigurationValue(resources.WorkspaceSecretConfigurationPrefix, name, key)
 }
 
+// ErrWorkspaceConfigurationAbsent reports that no carrier holds the workspace
+// configuration asked for: a group with no key, or a key with no value. It is
+// absence, an answer; a carrier that is there and cannot be read is a
+// different error and never wraps it.
+var ErrWorkspaceConfigurationAbsent = errors.New("no workspace configuration value")
+
+// WorkspaceConfigurationKeys lists, sorted, the keys of one non-secret
+// workspace configuration group this process received. A group whose keys
+// carry an identity the caller must discover (a group keyed by generated
+// names, read value by value) is enumerated here rather than by reading
+// Codefly's environment variable encoding.
+//
+// Each key is spelled so that WorkspaceConfiguration(name, key) reads its
+// value. A key is listed when a carrier names it: an inline value that is
+// non-empty, or a file carrier whose path is non-empty. A group no carrier
+// holds returns an empty list and an error wrapping
+// ErrWorkspaceConfigurationAbsent.
+//
+// Listing reads names, never values: no file a carrier names is opened, and
+// no authority pin is read. A file's content is judged only by the per-key
+// accessors, which apply their own rules, so a listed key can still fail with
+// a named reason (its file is missing or empty, or it is delivered both inline
+// and by file). It is never dropped from the list.
+func (q *Query) WorkspaceConfigurationKeys(name string) ([]string, error) {
+	return workspaceConfigurationKeys(resources.WorkspaceConfigurationPrefix, name)
+}
+
+// WorkspaceSecretKeys is WorkspaceConfigurationKeys for the secret namespace:
+// each key it lists is read with WorkspaceSecret(name, key). Listing opens no
+// secret file and caches no secret value.
+func (q *Query) WorkspaceSecretKeys(name string) ([]string, error) {
+	return workspaceConfigurationKeys(resources.WorkspaceSecretConfigurationPrefix, name)
+}
+
+// workspaceConfigurationKeys matches every delivered name against the group's
+// spellings (exact, then normalized, as workspaceConfigurationValue reads
+// them). A key is kept only in the spelling the per-key lookup builds, so the
+// name it lists is exactly the carrier that lookup reads.
+func workspaceConfigurationKeys(prefix string, name string) ([]string, error) {
+	groups := []string{
+		fmt.Sprintf("%s__%s__", prefix, strings.ToUpper(name)),
+		fmt.Sprintf("%s__%s__", prefix, normalizeWorkspaceEnvironmentKey(name)),
+	}
+	found := map[string]struct{}{}
+	for _, carrier := range deliveredNames() {
+		for _, group := range groups {
+			key, ok := strings.CutPrefix(carrier, group)
+			if ok && key != "" && key == normalizeWorkspaceEnvironmentKey(key) {
+				found[key] = struct{}{}
+			}
+		}
+	}
+	if len(found) == 0 {
+		return []string{}, fmt.Errorf("%w in group %s", ErrWorkspaceConfigurationAbsent, name)
+	}
+	keys := make([]string, 0, len(found))
+	for key := range found {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	return keys, nil
+}
+
 // WorkspaceValue resolves a workspace value from the public namespace first,
 // then the secret namespace. It is intended for settings whose sensitivity is
 // deployment-defined while preserving a single SDK-only lookup boundary.
 //
+// A value lives in exactly one namespace. A public delivery that cannot be read
+// (a missing or empty file, a value delivered both inline and by file) is
+// refused with that reason, and the secret namespace does not answer in its
+// place. A name carried in both namespaces is refused with
+// ErrWorkspaceValueInBothNamespaces: two sources for one value, neither of
+// which can be preferred silently.
+//
 // A value this process read as authority-bearing (see ReadAuthority) answers
-// from what was read at boot, and a live value that has since drifted is
-// refused with ErrAuthorityValueChanged rather than returned. Without that, a
-// process could seal its credential to the boot value and then authorize
-// against a different one through the ordinary accessor.
+// from what was read at boot. A live value that has since drifted, been
+// withdrawn, or become unreadable is refused with ErrAuthorityValueChanged
+// (wrapping the read failure, if there was one) rather than returned. Without
+// that, a process could seal its credential to the boot value and then
+// authorize against a different one through the ordinary accessor.
 func (q *Query) WorkspaceValue(name string, key string) (string, error) {
 	addressed := AuthorityValueName{Name: name, Key: key}.canonical()
 	pinned, isPinned := authorityPin(addressed)
 	value, err := q.workspaceValueLive(name, key)
+	if err != nil && !isWorkspaceValueAbsent(err) {
+		return "", pinnedReadFailure(addressed, isPinned, err)
+	}
 	if !isPinned {
 		return value, err
 	}
@@ -301,14 +492,118 @@ func (q *Query) WorkspaceValue(name string, key string) (string, error) {
 	return pinned, nil
 }
 
+// WorkspaceValueIfSet resolves a workspace value and answers absence without
+// an error: the value is set, the value is genuinely not configured, or the
+// lookup FAILED.
+//
+// WorkspaceValue answers absence with an error, because its callers want a
+// value or nothing. A caller deciding a posture question needs absence as an
+// answer: a setting that must be asserted before something is permitted has to
+// treat an unreadable delivery, and an authority-bearing value that has
+// drifted, as a refusal rather than as "the operator did not assert it".
+// Absence is an answer; a failed read is not.
+//
+// So an unreadable or empty file carrier, a value delivered both inline and by
+// file, a name carried in both namespaces, and ErrAuthorityValueChanged all
+// come back as errors here, and only a value no namespace carries comes back
+// as ("", false, nil). For a pinned name, a read failure is
+// ErrAuthorityValueChanged wrapping it, as Authority.Recheck reports it.
+func (q *Query) WorkspaceValueIfSet(name string, key string) (string, bool, error) {
+	addressed := AuthorityValueName{Name: name, Key: key}.canonical()
+	pinned, isPinned := authorityPin(addressed)
+	value, found, err := q.workspaceValueIfSetLive(name, key)
+	if err != nil {
+		return "", false, pinnedReadFailure(addressed, isPinned, err)
+	}
+	if !isPinned {
+		return value, found, nil
+	}
+	if !found || strings.TrimSpace(value) == "" {
+		return "", false, fmt.Errorf("%w: %s is no longer configured", ErrAuthorityValueChanged, addressed)
+	}
+	if value != pinned {
+		return "", false, fmt.Errorf("%w: %s", ErrAuthorityValueChanged, addressed)
+	}
+	return pinned, true, nil
+}
+
+// ErrWorkspaceValueInBothNamespaces reports a workspace value carried in both
+// the public and the secret namespace under one name. They are two sources for
+// one value, like a value delivered both inline and by file, and the SDK
+// refuses rather than choose: preferring either would let a stale copy left in
+// the other answer, with nothing reported.
+var ErrWorkspaceValueInBothNamespaces = errors.New("workspace value is carried in both the public and the secret namespace")
+
+// workspaceValueIfSetLive reads the public and the secret namespace and
+// answers from the one that carries the value. A lookup failure in either is
+// returned rather than continued past, because continuing is what makes an
+// unreadable value indistinguishable from an absent one, and a value carried
+// in both is refused.
+func (q *Query) workspaceValueIfSetLive(name string, key string) (string, bool, error) {
+	public, publicFound, err := q.workspaceNamespaceValue(resources.WorkspaceConfigurationPrefix, name, key)
+	if err != nil {
+		return "", false, err
+	}
+	secret, secretFound, err := q.workspaceNamespaceValue(resources.WorkspaceSecretConfigurationPrefix, name, key)
+	if err != nil {
+		return "", false, err
+	}
+	switch {
+	case publicFound && secretFound:
+		return "", false, fmt.Errorf("%w: %s/%s", ErrWorkspaceValueInBothNamespaces, name, key)
+	case publicFound:
+		return public, true, nil
+	case secretFound:
+		return secret, true, nil
+	}
+	return "", false, nil
+}
+
+// workspaceNamespaceValue is one namespace's answer with absence as a result
+// rather than an error.
+func (q *Query) workspaceNamespaceValue(prefix string, name string, key string) (string, bool, error) {
+	value, err := q.workspaceConfigurationValue(prefix, name, key)
+	if err != nil {
+		if isWorkspaceValueAbsent(err) {
+			return "", false, nil
+		}
+		return "", false, err
+	}
+	return value, value != "", nil
+}
+
+// pinnedReadFailure is what a failed live read means for name: for a value
+// pinned as authority it is ErrAuthorityValueChanged wrapping the failure, as
+// Authority.Recheck reports it, so a caller that stops or re-seals on that
+// sentinel sees a broken delivery of a pinned value; otherwise it is the
+// failure itself.
+func pinnedReadFailure(name AuthorityValueName, isPinned bool, err error) error {
+	if !isPinned {
+		return err
+	}
+	return fmt.Errorf("%w: %s cannot be read: %w", ErrAuthorityValueChanged, name, err)
+}
+
+// isWorkspaceValueAbsent reports whether err is the "nothing carries this name"
+// answer rather than a failure to read something that is there.
+func isWorkspaceValueAbsent(err error) bool {
+	return errors.Is(err, ErrWorkspaceConfigurationAbsent)
+}
+
+// workspaceValueLive is workspaceValueIfSetLive with absence as an error. A
+// delivery that cannot be read is returned as the failure it is, never
+// stepped over to the other namespace: a value under the same name there is a
+// different delivery, and answering with it would let an unreadable value be
+// silently replaced.
 func (q *Query) workspaceValueLive(name string, key string) (string, error) {
-	if value, err := q.WorkspaceConfiguration(name, key); err == nil && value != "" {
-		return value, nil
+	value, found, err := q.workspaceValueIfSetLive(name, key)
+	if err != nil {
+		return "", err
 	}
-	if value, err := q.WorkspaceSecret(name, key); err == nil && value != "" {
-		return value, nil
+	if !found {
+		return "", fmt.Errorf("%w for %s/%s", ErrWorkspaceConfigurationAbsent, name, key)
 	}
-	return "", wool.Get(q.ctx).In("WorkspaceValue").NewError("no workspace configuration value for %s/%s", name, key)
+	return value, nil
 }
 
 func (q *Query) workspaceConfigurationValue(prefix string, name string, key string) (string, error) {
@@ -331,7 +626,7 @@ func (q *Query) workspaceConfigurationValue(prefix string, name string, key stri
 			break
 		}
 	}
-	return "", wool.Get(q.ctx).In("WorkspaceConfiguration").NewError("no workspace configuration value for %s/%s", name, key)
+	return "", fmt.Errorf("%w for %s/%s", ErrWorkspaceConfigurationAbsent, name, key)
 }
 
 func normalizeWorkspaceEnvironmentKey(value string) string {
@@ -343,16 +638,32 @@ func (q *Query) localConfigurationValue(infoName string, key string, secret bool
 	if q.service == "" {
 		return "", w.NewError("service is not set")
 	}
-	workspace, workspaceErr := resources.FindWorkspaceUp(q.ctx)
+	// Only the process's own composition holds its local configuration files: a
+	// producer's workspace above a composed module's checkout or cached tag
+	// holds the producer's, under a module name that may even match.
+	workspace, unreadable, hostComposed, workspaceErr := enclosing.Composition(q.ctx)
 	if workspaceErr != nil {
 		return "", workspaceErr
 	}
+	if unreadable != nil {
+		return "", w.NewError("no %s value for %s/%s in service %s: the workspace file in %s could not be read, so it was not taken for the composition %q: %s",
+			localValueKind(secret), infoName, key, q.service, unreadable.Dir, enclosing.Injected(), unreadable.Err)
+	}
+	if hostComposed != nil {
+		return "", w.NewError("no %s value for %s/%s in service %s: the workspace in %s is the composition's own but only the host can compose it, so its local configuration files were not read: %s",
+			localValueKind(secret), infoName, key, q.service, hostComposed.Dir, hostComposed.Err)
+	}
 	if workspace == nil {
-		return "", w.NewError("workspace not found")
+		return "", w.NewError("no %s value for %s/%s in service %s: no workspace on disk is this process's composition",
+			localValueKind(secret), infoName, key, q.service)
 	}
 
 	var svc *resources.Service
 	if q.module != "" {
+		if !carries(workspace, q.module) {
+			return "", w.NewError("no %s value for %s/%s in service %s: workspace <%s> does not compose module <%s>, present: %v",
+				localValueKind(secret), infoName, key, q.service, workspace.Name, q.module, workspace.ModulesNames())
+		}
 		mod, moduleErr := workspace.LoadModuleFromName(q.ctx, q.module)
 		if moduleErr != nil {
 			return "", moduleErr
@@ -385,12 +696,15 @@ func (q *Query) localConfigurationValue(infoName string, key string, secret bool
 			}
 		}
 	}
-	kind := "configuration"
-	if secret {
-		kind = "secret"
-	}
 	return "", w.NewError("no %s value for %s/%s in service %s (env=%s)",
-		kind, infoName, key, q.service, envName)
+		localValueKind(secret), infoName, key, q.service, envName)
+}
+
+func localValueKind(secret bool) string {
+	if secret {
+		return "secret"
+	}
+	return "configuration"
 }
 
 func localConfigurationEnvironmentName() string {

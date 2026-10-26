@@ -137,7 +137,7 @@ func checkCarriedInstallation(headers http.Header, encoded string) error {
 // read just the installation id and revision, which made "Attach refuses an
 // unsealed capability" true of two fields out of four; then it grew a local
 // rule, which disagreed with core's fixtures about which sentinel each refusal
-// earns. Now it asks corework.Inspect, so there is one answer to "is this
+// earns. Now it asks corework.Decode, so there is one answer to "is this
 // sealed" for every carrier in this module — HTTP attach, HTTP read, outgoing
 // gRPC metadata, incoming gRPC metadata — and that answer is core's.
 //
@@ -166,27 +166,27 @@ func SealedInstallation(encoded string) (id string, revision string, err error) 
 // condition with two messages is the fragmentation the one-implementation rule
 // exists to end, and it had been relocated from the signature to the seal.
 //
-// Core's Inspect is the one answer now. It runs the size bound, the envelope,
+// Core's Decode is the one answer now. It runs the size bound, the envelope,
 // CheckEncoding, proto.Unmarshal, protovalidate — which is where the seal and
 // every actor epoch are REQUIRED by the schema — and the structural seal
 // check, and Verify runs the same decode, so an early refusal here and core's
 // verification cannot disagree about what a token is.
 //
-// Nothing here trusts the result. Inspect checks NO signature, and core has a
+// Nothing here trusts the result. Decode checks NO signature, and core has a
 // test asserting that a token re-signed with a key nobody holds passes it, so
 // nil means "shaped like a sealed capability" and never "permitted". The
 // carriers this fills are a pre-check; the receiver verifies.
 //
-// The claims are CLONED. Inspected.Context hands back core's own pointer, so a
+// The claims are CLONED. Decoded.Context hands back core's own pointer, so a
 // caller that mutated what it was given would be mutating core's value.
 func readClaims(encoded string) (*Claims, error) {
-	inspected, err := corework.Inspect(encoded)
+	decoded, err := corework.Decode(encoded)
 	if err != nil {
 		return nil, err
 	}
-	claims, ok := proto.Clone(inspected.Context()).(*Claims)
+	claims, ok := proto.Clone(decoded.Context()).(*Claims)
 	if !ok {
-		return nil, fmt.Errorf("%w: inspected claims are not a WorkContextV1", ErrInvalid)
+		return nil, fmt.Errorf("%w: decoded claims are not a WorkContextV1", ErrInvalid)
 	}
 	return claims, nil
 }
@@ -205,7 +205,7 @@ func readClaims(encoded string) (*Claims, error) {
 // Every refusal a capability's own bytes can earn — another encoding, a bad
 // envelope, a schema violation, no seal, a seal naming no installation, a zero
 // epoch, revision or incarnation, a partial binding, a widening hop, an actor
-// hop with no epoch — is corework.Inspect's answer, with corework's sentinel.
+// hop with no epoch — is corework.Decode's answer, with corework's sentinel.
 // TestTheSDKParsePathsAgreeWithCore drives every fixture in core's kit through
 // this path and requires core's declared sentinel for each, so the agreement is
 // tested rather than described.

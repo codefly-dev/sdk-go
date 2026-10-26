@@ -3,6 +3,7 @@ package codefly_test
 import (
 	"encoding/json"
 	"fmt"
+	"golang.org/x/mod/semver"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -202,7 +203,11 @@ func localTags(t *testing.T) []string {
 	require.NoError(t, err)
 	var tags []string
 	for _, line := range strings.Split(strings.TrimSpace(string(output)), "\n") {
-		if line != "" {
+		// A VERSION tag is a published version; any other tag is not one. Go reads only
+		// `vX.Y.Z` (and a module subdirectory prefix) as a version, so a reachability
+		// tag such as `compat-v0.1.65-pins` publishes no version of its own — what it
+		// keeps reachable is pseudo-versions, which go.mod retracts by name below.
+		if line != "" && semver.IsValid(strings.TrimPrefix(line, "workcontext/")) {
 			tags = append(tags, line)
 		}
 	}
@@ -244,6 +249,12 @@ func retractedVersions(t *testing.T, dir string) map[string]bool {
 	covered := map[string]bool{}
 	for _, tag := range localTags(t) {
 		for _, span := range spans {
+			// A single retracted PSEUDO-version (a commit a release pinned, never a
+			// tag) cannot be any tag: tags are plain releases here, and the ordering
+			// below refuses a prerelease by design. It is what go.mod retracts by name.
+			if span.Low == span.High && semver.Prerelease(span.Low) != "" {
+				continue
+			}
 			// `go mod edit -json` writes a single version as Low == High, so
 			// one comparison covers both shapes.
 			if semverAtMost(t, span.Low, tag) && semverAtMost(t, tag, span.High) {
