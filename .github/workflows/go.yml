@@ -114,15 +114,26 @@ jobs:
         # The script lists by prefix and asserts SWEPT AGAINST WHAT THE REMOTE
         # PUBLISHES, because a gate that sweeps a subset and reports success is
         # worse than no gate — the green is the evidence somebody acts on.
-        # SWEEP_BASE is passed EXPLICITLY, from the repository's own default
-        # branch, so the sweep does not have to guess which ref this change
-        # merges into. Guessing is what made this check answer differently on a
-        # push build than on a pull_request build: GITHUB_BASE_REF is empty on
-        # a push, the base fell through to the pushed branch, and the default
-        # branch — which carries the implementation until this merges — was
-        # swept and failed.
+        # SWEEP_BASE is passed EXPLICITLY, so the sweep does not guess which
+        # ref this change merges into. Guessing is what made this check answer
+        # differently on a push build than on a pull_request build:
+        # GITHUB_BASE_REF is empty on a push, the base fell through to the
+        # pushed branch, and the default branch — which carried the deleted
+        # implementation until that change merged — was swept and failed.
+        #
+        # THE PR'S OWN TARGET FIRST, the default branch only as the fallback.
+        # This read the default branch unconditionally, which is right for
+        # every pull request this repository has had and wrong for one
+        # targeting anything else: a PR into a release branch would have had
+        # that branch SWEPT — failing circularly on content the PR is changing
+        # — while the default branch was excluded and went unchecked. Both
+        # halves of that are wrong and they hide each other.
+        #
+        # `github.base_ref` is set on a pull_request and empty on a push, which
+        # is exactly the distinction needed: a push build has no base, and for
+        # it the default branch is the right answer.
         env:
-          SWEEP_BASE: ${{ github.event.repository.default_branch }}
+          SWEEP_BASE: ${{ github.base_ref || github.event.repository.default_branch }}
           SWEEP_HEAD: ${{ github.head_ref || github.ref_name }}
         run: |
           git fetch --no-tags --prune --quiet origin \
