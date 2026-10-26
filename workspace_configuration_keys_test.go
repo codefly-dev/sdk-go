@@ -176,4 +176,36 @@ func TestWorkspaceConfigurationKeysSeparatesAbsenceFromFailure(t *testing.T) {
 		assert.NotErrorIs(t, err, codefly.ErrWorkspaceConfigurationAbsent, "an unreadable delivery is not absence")
 		assert.ErrorIs(t, err, resources.ErrFileCarrier)
 	})
+
+	t.Run("a file carrier naming an empty file", func(t *testing.T) {
+		key := "CODEFLY__WORKSPACE_CONFIGURATION__KEYS_EMPTY_FILE__BINDING"
+		path := filepath.Join(t.TempDir(), "empty")
+		require.NoError(t, os.WriteFile(path, nil, 0o600))
+		t.Setenv(resources.FileCarrierKey(key), path)
+
+		keys, err := codefly.For(ctx).WorkspaceConfigurationKeys("keys-empty-file")
+
+		require.NoError(t, err)
+		assert.Equal(t, []string{"BINDING"}, keys, "listing opens no file, so the carrier's path is what it sees")
+		_, err = codefly.For(ctx).WorkspaceConfiguration("keys-empty-file", "BINDING")
+		assert.ErrorIs(t, err, codefly.ErrWorkspaceConfigurationAbsent, "an empty file reads as absent")
+	})
+
+	t.Run("a value delivered both inline and by file", func(t *testing.T) {
+		key := "CODEFLY__WORKSPACE_CONFIGURATION__KEYS_TWICE__BINDING"
+		path := filepath.Join(t.TempDir(), "binding")
+		require.NoError(t, os.WriteFile(path, []byte("by file"), 0o600))
+		t.Setenv(key, "inline")
+		t.Setenv(resources.FileCarrierKey(key), path)
+
+		keys, err := codefly.For(ctx).WorkspaceConfigurationKeys("keys-twice")
+
+		require.NoError(t, err)
+		assert.Equal(t, []string{"BINDING"}, keys)
+		_, err = codefly.For(ctx).WorkspaceConfiguration("keys-twice", "BINDING")
+		require.Error(t, err)
+		assert.NotErrorIs(t, err, codefly.ErrWorkspaceConfigurationAbsent, "two sources for one fact is not absence")
+		assert.ErrorIs(t, err, resources.ErrFileCarrier)
+		assert.ErrorContains(t, err, "delivered both inline and by file")
+	})
 }

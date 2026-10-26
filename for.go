@@ -396,14 +396,17 @@ var ErrWorkspaceConfigurationAbsent = errors.New("no workspace configuration val
 // Codefly's environment variable encoding.
 //
 // Each key is spelled so that WorkspaceConfiguration(name, key) reads its
-// value, and only keys a carrier delivers non-empty are listed. A group no
-// carrier holds returns an empty list and an error wrapping
+// value. A key is listed when a carrier names it: an inline value that is
+// non-empty, or a file carrier whose path is non-empty. A group no carrier
+// holds returns an empty list and an error wrapping
 // ErrWorkspaceConfigurationAbsent.
 //
 // Listing reads names, never values: no file a carrier names is opened, and
-// no authority pin is read. A value is read through the per-key accessors,
-// which apply their own rules, so a listed key whose delivery cannot be read
-// fails there, naming its reason, rather than being dropped from the list.
+// no authority pin is read. A file's content is judged only by the per-key
+// accessors, which apply their own rules, so a listed key can still read as
+// absent (its file is empty) or fail with a named reason (its file is missing,
+// or it is delivered both inline and by file). It is never dropped from the
+// list.
 func (q *Query) WorkspaceConfigurationKeys(name string) ([]string, error) {
 	return workspaceConfigurationKeys(resources.WorkspaceConfigurationPrefix, name)
 }
@@ -448,6 +451,11 @@ func workspaceConfigurationKeys(prefix string, name string) ([]string, error) {
 // then the secret namespace. It is intended for settings whose sensitivity is
 // deployment-defined while preserving a single SDK-only lookup boundary.
 //
+// Only an absent public value moves the lookup on to the secret namespace. A
+// public delivery that cannot be read (a missing file, a value delivered both
+// inline and by file) is refused with that reason, and the secret namespace
+// is not consulted.
+//
 // A value this process read as authority-bearing (see ReadAuthority) answers
 // from what was read at boot, and a live value that has since drifted is
 // refused with ErrAuthorityValueChanged rather than returned. Without that, a
@@ -457,6 +465,9 @@ func (q *Query) WorkspaceValue(name string, key string) (string, error) {
 	addressed := AuthorityValueName{Name: name, Key: key}.canonical()
 	pinned, isPinned := authorityPin(addressed)
 	value, err := q.workspaceValueLive(name, key)
+	if err != nil && !isWorkspaceValueAbsent(err) {
+		return "", err
+	}
 	if !isPinned {
 		return value, err
 	}
@@ -469,16 +480,16 @@ func (q *Query) WorkspaceValue(name string, key string) (string, error) {
 	return pinned, nil
 }
 
-// WorkspaceValueIfSet resolves a workspace value and distinguishes the three
-// answers WorkspaceValue flattens into two: the value is set, the value is
-// genuinely not configured, or the lookup FAILED.
+// WorkspaceValueIfSet resolves a workspace value and answers absence without
+// an error: the value is set, the value is genuinely not configured, or the
+// lookup FAILED.
 //
-// WorkspaceValue reports "not configured" and "the delivery could not be read"
-// with the same error, because its callers want a value or nothing. A caller
-// deciding a posture question cannot live with that: a setting that must be
-// asserted before something is permitted has to treat an unreadable delivery,
-// and an authority-bearing value that has drifted, as a refusal rather than as
-// "the operator did not assert it". Absence is an answer; a failed read is not.
+// WorkspaceValue answers absence with an error, because its callers want a
+// value or nothing. A caller deciding a posture question needs absence as an
+// answer: a setting that must be asserted before something is permitted has to
+// treat an unreadable delivery, and an authority-bearing value that has
+// drifted, as a refusal rather than as "the operator did not assert it".
+// Absence is an answer; a failed read is not.
 //
 // So an unreadable file carrier, a value delivered both inline and by file, and
 // ErrAuthorityValueChanged all come back as errors here, and only a value no
@@ -530,14 +541,20 @@ func isWorkspaceValueAbsent(err error) bool {
 	return errors.Is(err, ErrWorkspaceConfigurationAbsent)
 }
 
+// workspaceValueLive is workspaceValueIfSetLive with absence as an error. A
+// public delivery that cannot be read is returned as the failure it is, never
+// stepped over to the secret namespace: a value under the same name there is a
+// different delivery, and answering with it would let an unreadable public
+// value be silently replaced.
 func (q *Query) workspaceValueLive(name string, key string) (string, error) {
-	if value, err := q.WorkspaceConfiguration(name, key); err == nil && value != "" {
-		return value, nil
+	value, found, err := q.workspaceValueIfSetLive(name, key)
+	if err != nil {
+		return "", err
 	}
-	if value, err := q.WorkspaceSecret(name, key); err == nil && value != "" {
-		return value, nil
+	if !found {
+		return "", fmt.Errorf("%w for %s/%s", ErrWorkspaceConfigurationAbsent, name, key)
 	}
-	return "", fmt.Errorf("%w for %s/%s", ErrWorkspaceConfigurationAbsent, name, key)
+	return value, nil
 }
 
 func (q *Query) workspaceConfigurationValue(prefix string, name string, key string) (string, error) {
