@@ -7,6 +7,8 @@ import (
 	"io"
 	"os"
 	"strings"
+
+	"github.com/codefly-dev/core/resources"
 )
 
 const (
@@ -89,6 +91,9 @@ func validRuntimeEnvironmentName(name string) bool {
 	if !strings.HasPrefix(name, "CODEFLY__") || len(name) == len("CODEFLY__") {
 		return false
 	}
+	if isConfigurationDocumentCarrier(name) {
+		return true
+	}
 	for _, character := range name {
 		switch {
 		case character >= 'A' && character <= 'Z':
@@ -99,4 +104,39 @@ func validRuntimeEnvironmentName(name string) bool {
 		}
 	}
 	return true
+}
+
+// configurationDocumentDigestLength is the length of the digest core appends
+// to a document prefix, read from core's own key rather than recomputed: this
+// package hashes nothing (scripts/allowed-imports.txt).
+var configurationDocumentDigestLength = len(resources.ConfigurationDocumentKey("", "", "", false)) - len(resources.ConfigurationDocumentPrefix)
+
+// isConfigurationDocumentCarrier reports a structured configuration document's
+// carrier exactly as core mints it (resources.ConfigurationDocumentKey): one of
+// the two document prefixes and a lowercase hex SHA-256, nothing else.
+//
+// It is the one name outside [A-Z0-9_] an artifact carries. The digest is
+// lowercase because core spells it so, and this SDK finds the document by
+// calling that same function and looking the result up exactly
+// (configurationDocument), as does every consumer built on an earlier core.
+// So the grammar admits the name core mints rather than the name changing
+// under its readers, and only that shape: a lowercase letter anywhere else is
+// still refused.
+func isConfigurationDocumentCarrier(name string) bool {
+	for _, prefix := range []string{resources.ConfigurationDocumentPrefix, resources.SecretConfigurationDocumentPrefix} {
+		digest, found := strings.CutPrefix(name, prefix)
+		if !found {
+			continue
+		}
+		if len(digest) != configurationDocumentDigestLength {
+			return false
+		}
+		for _, character := range digest {
+			if (character < '0' || character > '9') && (character < 'a' || character > 'f') {
+				return false
+			}
+		}
+		return true
+	}
+	return false
 }
