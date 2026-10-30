@@ -2,8 +2,6 @@ package codefly
 
 import (
 	"bufio"
-	"crypto/sha256"
-	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -108,6 +106,11 @@ func validRuntimeEnvironmentName(name string) bool {
 	return true
 }
 
+// configurationDocumentDigestLength is the length of the digest core appends
+// to a document prefix, read from core's own key rather than recomputed: this
+// package hashes nothing (scripts/allowed-imports.txt).
+var configurationDocumentDigestLength = len(resources.ConfigurationDocumentKey("", "", "", false)) - len(resources.ConfigurationDocumentPrefix)
+
 // isConfigurationDocumentCarrier reports a structured configuration document's
 // carrier exactly as core mints it (resources.ConfigurationDocumentKey): one of
 // the two document prefixes and a lowercase hex SHA-256, nothing else.
@@ -125,7 +128,7 @@ func isConfigurationDocumentCarrier(name string) bool {
 		if !found {
 			continue
 		}
-		if len(digest) != hex.EncodedLen(sha256.Size) {
+		if len(digest) != configurationDocumentDigestLength {
 			return false
 		}
 		for _, character := range digest {
