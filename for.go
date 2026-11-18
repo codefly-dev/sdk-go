@@ -178,11 +178,33 @@ func (q *Query) ResolveNetworkInstance() (*resources.NetworkInstance, error) {
 	if Environment() != "" && !IsLocal() {
 		return nil, absentCarrier(info)
 	}
+	// A run under a naming scope delivered this process the address of every
+	// endpoint it hands it. One it did not deliver has no address here: the
+	// native map for no scope names a port where nothing of this run listens,
+	// and a scoped run's ports may be probed rather than derived, so the map
+	// for its scope is a guess too. A query that names a scope itself asked
+	// for that scope's map and gets it.
+	if scope := runNamingScope(q.ctx); scope != "" && q.namingScope == "" {
+		return nil, fmt.Errorf("%w; this process runs under naming scope %q, whose run delivered it no address for this endpoint: "+
+			"a run hands a service the endpoints of the dependencies it declares, and none of a dependency declared `kind: external`, "+
+			"which it neither starts nor orders. Declare the dependency without `kind: external` for the run to provide it",
+			absentCarrier(info), scope)
+	}
 	local, localErr := q.localNetworkInstance(workspace, selected)
 	if localErr != nil {
 		return nil, fmt.Errorf("%w; local endpoint unavailable (%w)", absentCarrier(info), localErr)
 	}
 	return local, nil
+}
+
+// runNamingScope is the naming scope of the run that started this process, as
+// the run injected it; empty for a plain run and for a process no run started.
+func runNamingScope(ctx context.Context) string {
+	scope, err := resources.FindValueInEnvironmentVariables(ctx, resources.NamingScopePrefix, codeflyEnvironmentVariables())
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(scope)
 }
 
 // carries reports whether the composition carries the queried module, by core's

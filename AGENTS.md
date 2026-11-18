@@ -158,8 +158,7 @@ implementation of the capability, reached through typed access; a new dependency
   (`ErrEndpointCarrierAbsent`) or a malformed value: the composition judged
   eligibility at render and the mesh enforces it. With a workspace, selection
   comes first in every environment. No flag decides the path; the workspace's
-  presence does. Native fallback requires a workspace and a `local` or unset
-  environment. A workspace that is not this process's composition counts as none
+  presence does. Native fallback requires a workspace, a `local` or unset environment and no injected naming scope (there, an endpoint the run did not deliver is refused: a `kind: external` dependency). A workspace that is not this process's composition counts as none
   (`internal/enclosing`, #66): with `CODEFLY__WORKSPACE` injected only that name
   counts, and another is never even loaded; it must also carry the queried
   module. With nothing injected, the workspace found is used as found. A
