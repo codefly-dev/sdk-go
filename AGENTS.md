@@ -55,7 +55,7 @@ This is a *library*: its defects show up in someone else's service.
 
 ## Build and test
 
-Two modules, both Go 1.27.0. Derived from `.github/workflows/go.yml`, which runs
+Two modules, both Go 1.27.4. Derived from `.github/workflows/go.yml`, which runs
 every job against the matrix `[".", "workcontext"]` except coverage.
 
 ```bash

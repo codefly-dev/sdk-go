@@ -57,12 +57,28 @@ var structurallyRefused = map[string]bool{
 	// settled surface and the exactness assertion below is what found it,
 	// which is the reason that assertion exists.
 	"unknown-field": true, // ErrInvalid: an appended field, re-signed
+
+	// The window's two ends are CLAIMS before they are instants. An expired or
+	// not-yet-valid capability still passes here, because judging an instant
+	// needs a clock this read does not have; a capability stating no expiry or
+	// no not-before at all is refused by core's Decode on its own bytes, as the
+	// missing claim rather than as "expired in 1970". Both arrived with the
+	// core pin this module moved to (95a426c5), and the exactness assertion
+	// below is what asked for them.
+	"no-expiry":     true, // ErrInvalid: no instant the window closes
+	"no-not-before": true, // ErrInvalid: no instant the window opens
+
+	// Containment along the actor chain is read from the capability itself: a
+	// hop that drops or renames its parent's resource owner widens authority,
+	// and core's Decode refuses it with no key and no live state. Same arrival.
+	"owner-dropped-by-hop": true, // ErrInvalid: a hop reading one owner's records as the whole kind
+	"owner-changed-by-hop": true, // ErrInvalid: a hop naming another owner than its parent's
 }
 
 // TestTheSDKParsePathsAgreeWithCore drives every fixture in core's kit through
 // THIS MODULE's parse paths and requires core's declared sentinel for each one.
 //
-// The twelve above are the ones a capability's own bytes earn, so this module
+// The ones listed above are the ones a capability's own bytes earn, so this module
 // must reach them with no network and no key. Every other fixture — signature,
 // issuer, audience, WINDOW and live-state refusals — must PASS: a structural
 // check that refused them would be claiming to have verified something it
