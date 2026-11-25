@@ -29,8 +29,8 @@ import (
 // through a codec only where a row names it — and typeName returned a local
 // identifier as written. So
 //
-//	type carrier = *basev0.WorkContextV1
-//	var c carrier = &basev0.WorkContextV1{}
+//	type carrier = *basev1.WorkContextV1
+//	var c carrier = &basev1.WorkContextV1{}
 //	proto.Unmarshal(raw, c)
 //
 // resolved to "carrier": not a capability, not a codec interface, not
@@ -45,19 +45,19 @@ func TestAPointerAliasDoesNotRenameACapability(t *testing.T) {
 		"a pointer alias in the root module": `package codefly
 import (
 	"google.golang.org/protobuf/proto"
-	basev0 "github.com/codefly-dev/core/generated/go/codefly/base/v0"
+	basev1 "github.com/codefly-dev/core/generated/go/codefly/base/v1"
 )
-type carrier = *basev0.WorkContextV1
-func readit(raw []byte) (*basev0.WorkContextV1, error) {
-	var c carrier = &basev0.WorkContextV1{}
+type carrier = *basev1.WorkContextV1
+func readit(raw []byte) (*basev1.WorkContextV1, error) {
+	var c carrier = &basev1.WorkContextV1{}
 	return c, proto.Unmarshal(raw, c)
 }`,
 		"a chain of aliases": `package codefly
 import (
 	"google.golang.org/protobuf/proto"
-	basev0 "github.com/codefly-dev/core/generated/go/codefly/base/v0"
+	basev1 "github.com/codefly-dev/core/generated/go/codefly/base/v1"
 )
-type inner = basev0.WorkContextV1
+type inner = basev1.WorkContextV1
 type carrier = *inner
 func readit(raw []byte) (*inner, error) {
 	var c carrier = &inner{}
@@ -66,16 +66,16 @@ func readit(raw []byte) (*inner, error) {
 		"a slice alias": `package codefly
 import (
 	"google.golang.org/protobuf/proto"
-	basev0 "github.com/codefly-dev/core/generated/go/codefly/base/v0"
+	basev1 "github.com/codefly-dev/core/generated/go/codefly/base/v1"
 )
-type batch = []*basev0.WorkContextV1
+type batch = []*basev1.WorkContextV1
 func readit(raw []byte, all batch) error { return proto.Unmarshal(raw, all[0]) }`,
 		// A DEFINED type cannot reach proto.Unmarshal — it inherits no methods
 		// — but a rule true for one spelling and silent for the other is a
 		// rule a reader has to test to know.
 		"a defined type over a capability": `package codefly
-import basev0 "github.com/codefly-dev/core/generated/go/codefly/base/v0"
-type carrier basev0.WorkContextV1
+import basev1 "github.com/codefly-dev/core/generated/go/codefly/base/v1"
+type carrier basev1.WorkContextV1
 var _ = carrier{}`,
 	} {
 		t.Run(name, func(t *testing.T) {
@@ -103,10 +103,10 @@ type Claims = corework.Claims`)))
 // round four and for the same reason. So each rule is asserted at the rule.
 func TestTypeNameChasesALocalNameToWhatItNames(t *testing.T) {
 	file := parseSource(t, "second_parser.go", `package codefly
-import basev0 "github.com/codefly-dev/core/generated/go/codefly/base/v0"
-type carrier = *basev0.WorkContextV1
+import basev1 "github.com/codefly-dev/core/generated/go/codefly/base/v1"
+type carrier = *basev1.WorkContextV1
 type chained = carrier
-var direct *basev0.WorkContextV1
+var direct *basev1.WorkContextV1
 var aliased carrier
 var twice chained`)
 
@@ -127,16 +127,16 @@ var count int`)
 }
 
 func TestTheCoreAliasRuleSeesThroughAPointer(t *testing.T) {
-	core := map[string]bool{"basev0": true}
+	core := map[string]bool{"basev1": true}
 	for name, declaration := range map[string]string{
-		"a value alias":   "type carrier = basev0.WorkContextV1",
-		"a pointer alias": "type carrier = *basev0.WorkContextV1",
-		"a slice alias":   "type batch = []*basev0.WorkContextV1",
-		"a defined type":  "type carrier basev0.WorkContextV1",
+		"a value alias":   "type carrier = basev1.WorkContextV1",
+		"a pointer alias": "type carrier = *basev1.WorkContextV1",
+		"a slice alias":   "type batch = []*basev1.WorkContextV1",
+		"a defined type":  "type carrier basev1.WorkContextV1",
 	} {
 		t.Run(name, func(t *testing.T) {
 			file := parseSource(t, "second_parser.go", `package codefly
-import basev0 "github.com/codefly-dev/core/generated/go/codefly/base/v0"
+import basev1 "github.com/codefly-dev/core/generated/go/codefly/base/v1"
 `+declaration)
 			require.NotEmpty(t, inspectCoreAliases(file, core),
 				"a second local name for one of core's types belongs in %s", coreAliasFile)

@@ -6,7 +6,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	basev0 "github.com/codefly-dev/core/generated/go/codefly/base/v0"
+	basev1 "github.com/codefly-dev/core/generated/go/codefly/base/v1"
 	"github.com/codefly-dev/core/network"
 	"github.com/codefly-dev/core/resources"
 	"github.com/codefly-dev/core/standards"
@@ -56,12 +56,12 @@ func TestEnvironmentVariables(t *testing.T) {
 	assert.Equal(t, uint16(1234), net.Port)
 	assert.Equal(t, "http://localhost:1234", net.Address)
 
-	outputConf := &basev0.Configuration{
+	outputConf := &basev1.Configuration{
 		Origin:         "mod/store",
 		RuntimeContext: resources.NewRuntimeContextNative(),
-		Infos: []*basev0.ConfigurationInformation{
+		Infos: []*basev1.ConfigurationInformation{
 			{Name: "postgres",
-				ConfigurationValues: []*basev0.ConfigurationValue{
+				ConfigurationValues: []*basev1.ConfigurationValue{
 					{Key: "connection", Value: "secret", Secret: true},
 					{Key: "connection", Value: "plain"},
 				},
@@ -258,7 +258,7 @@ endpoints:
 		"platform",
 		"records",
 		"",
-		&basev0.Endpoint{Name: "rest", Api: "rest"},
+		&basev1.Endpoint{Name: "rest", Api: "rest"},
 	)
 	assert.Equal(t, expected.Address, instance.Address)
 	assert.Equal(t, expected.Host, instance.Host)
@@ -383,11 +383,11 @@ func TestInjectConfigurationsReplacesSnapshotWithoutProcessMutation(t *testing.T
 		requireNoError(t, codefly.InjectConfigurations())
 	})
 
-	configuration := &basev0.Configuration{
+	configuration := &basev1.Configuration{
 		Origin: "embedded/store",
-		Infos: []*basev0.ConfigurationInformation{{
+		Infos: []*basev1.ConfigurationInformation{{
 			Name: "postgres",
-			ConfigurationValues: []*basev0.ConfigurationValue{{
+			ConfigurationValues: []*basev1.ConfigurationValue{{
 				Key:    "connection",
 				Value:  "postgresql://in-process",
 				Secret: true,
@@ -426,21 +426,21 @@ func TestInjectConfigurationsDropsPriorInjectedValues(t *testing.T) {
 	t.Cleanup(func() {
 		requireNoError(t, codefly.InjectConfigurations())
 	})
-	first := &basev0.Configuration{
+	first := &basev1.Configuration{
 		Origin: "embedded/first",
-		Infos: []*basev0.ConfigurationInformation{{
+		Infos: []*basev1.ConfigurationInformation{{
 			Name: "settings",
-			ConfigurationValues: []*basev0.ConfigurationValue{{
+			ConfigurationValues: []*basev1.ConfigurationValue{{
 				Key:   "value",
 				Value: "first",
 			}},
 		}},
 	}
-	second := &basev0.Configuration{
+	second := &basev1.Configuration{
 		Origin: "embedded/second",
-		Infos: []*basev0.ConfigurationInformation{{
+		Infos: []*basev1.ConfigurationInformation{{
 			Name: "settings",
-			ConfigurationValues: []*basev0.ConfigurationValue{{
+			ConfigurationValues: []*basev1.ConfigurationValue{{
 				Key:   "value",
 				Value: "second",
 			}},
@@ -449,7 +449,7 @@ func TestInjectConfigurationsDropsPriorInjectedValues(t *testing.T) {
 	requireNoError(t, codefly.InjectConfigurations(first))
 	requireNoError(t, codefly.InjectConfigurations(second))
 
-	err := codefly.InjectConfigurations(&basev0.Configuration{})
+	err := codefly.InjectConfigurations(&basev1.Configuration{})
 	assert.Error(t, err)
 
 	_, err = codefly.For(ctx).
@@ -473,13 +473,13 @@ func TestInjectEndpointsUsesTypedSnapshotAndRejectsInvalidReplacement(t *testing
 		requireNoError(t, codefly.InjectEndpoints())
 	})
 	endpoint := &resources.EndpointAccess{
-		Endpoint: &basev0.Endpoint{
+		Endpoint: &basev1.Endpoint{
 			Module:  "embedded",
 			Service: "store",
 			Name:    "tcp",
 			Api:     "tcp",
 		},
-		NetworkInstance: &basev0.NetworkInstance{Address: "127.0.0.1:5432"},
+		NetworkInstance: &basev1.NetworkInstance{Address: "127.0.0.1:5432"},
 	}
 	requireNoError(t, codefly.InjectEndpoints(endpoint))
 

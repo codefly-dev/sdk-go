@@ -7,7 +7,7 @@ import (
 	"strings"
 	"testing"
 
-	basev0 "github.com/codefly-dev/core/generated/go/codefly/base/v0"
+	basev1 "github.com/codefly-dev/core/generated/go/codefly/base/v1"
 	"github.com/codefly-dev/core/resources"
 	codefly "github.com/codefly-dev/sdk-go"
 	"github.com/stretchr/testify/require"
@@ -62,12 +62,12 @@ func TestLoadRuntimeEnvironmentFileCarriesAConfigurationDocument(t *testing.T) {
 	t.Cleanup(func() { require.NoError(t, codefly.LoadEnvironmentVariables()) })
 	t.Setenv(resources.EnvironmentPrefix, "local")
 	manager := resources.NewEnvironmentVariableManager()
-	manager.SetEnvironment(&basev0.Environment{Name: "local"})
-	require.NoError(t, manager.AddConfigurations(context.Background(), &basev0.Configuration{
+	manager.SetEnvironment(&basev1.Environment{Name: "local"})
+	require.NoError(t, manager.AddConfigurations(context.Background(), &basev1.Configuration{
 		Origin: resources.ConfigurationWorkspace,
-		Infos: []*basev0.ConfigurationInformation{{
+		Infos: []*basev1.ConfigurationInformation{{
 			Name: "fixture-composition",
-			Data: &basev0.ConfigurationData{Kind: "json", Content: []byte(`{"roles":[]}`)},
+			Data: &basev1.ConfigurationData{Kind: "json", Content: []byte(`{"roles":[]}`)},
 		}},
 	}))
 	variables, err := manager.All()

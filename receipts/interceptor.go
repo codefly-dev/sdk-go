@@ -37,7 +37,7 @@ type Options struct {
 }
 
 // Interceptor applies the replay and conflict rules to every method carrying
-// codefly.runnable.v0.operation. A method without the option is untouched.
+// codefly.runnable.v1.operation. A method without the option is untouched.
 //
 // It never writes a receipt. The write is the handler's, inside the transaction
 // that commits the effect; see the package documentation.

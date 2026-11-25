@@ -15,7 +15,7 @@ That is the contract. Everything below follows from it.
 ## The dependency budget
 
 `workcontext/go.mod` has four direct requirements — `core` (the
-`codefly/base/v0` proto types **and** `core/workcontext`), `protobuf`,
+`codefly/base/v1` proto types **and** `core/workcontext`), `protobuf`,
 `testify`, `grpc`. The root SDK's indirect list is roughly fifty.
 
 The fourth one arrived by decision, not by accident, and the decision is worth
@@ -29,7 +29,7 @@ keeps it that way".
 **Adding a further import to `workcontext` is still a design change.** Before
 you do:
 
-- Can the type come from `codefly/base/v0` or `core/workcontext`, which the
+- Can the type come from `codefly/base/v1` or `core/workcontext`, which the
   module already has?
 - Does it belong in `workcontext/grpctransport/` instead? That subpackage exists
   so a consumer that makes no gRPC call never compiles grpc. Anything

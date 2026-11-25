@@ -10,7 +10,7 @@ import (
 	"testing"
 	"time"
 
-	basev0 "github.com/codefly-dev/core/generated/go/codefly/base/v0"
+	basev1 "github.com/codefly-dev/core/generated/go/codefly/base/v1"
 	corework "github.com/codefly-dev/core/workcontext"
 	"github.com/codefly-dev/core/workcontext/conformance"
 	"github.com/stretchr/testify/require"
@@ -51,7 +51,7 @@ func partitionKeyPrefix(tenant string, revision uint64) string {
 // the same data.
 func TestCachePartitionIsStableAcrossHopsWithTheSameView(t *testing.T) {
 	a := newAuthority(t)
-	scopes := []*basev0.WorkScopeV1{scope("document", "read", "write")}
+	scopes := []*basev1.WorkScopeV1{scope("document", "read", "write")}
 	owner := a.verified(t, mintInput{scopes: scopes})
 	delegated, err := a.verifier(t).Verify(
 		context.Background(), a.child(t, a.start(t, mintInput{scopes: scopes}), "actor-1", scopes),
@@ -71,8 +71,8 @@ func TestCachePartitionIsStableAcrossHopsWithTheSameView(t *testing.T) {
 // caller asks for a view.
 func TestCachePartitionSeparatesTenantRevisionAndView(t *testing.T) {
 	a := newAuthority(t)
-	read := []*basev0.WorkScopeV1{scope("document", "read")}
-	write := []*basev0.WorkScopeV1{scope("document", "read", "write")}
+	read := []*basev1.WorkScopeV1{scope("document", "read")}
+	write := []*basev1.WorkScopeV1{scope("document", "read", "write")}
 
 	base := a.verified(t, mintInput{scopes: read})
 	require.Equal(t, partitionKeyPrefix(testTenant, 3), partition(t, base).Key)
@@ -146,10 +146,10 @@ func TestAuthorizationViewDigestCanonicalizesScopeOrder(t *testing.T) {
 
 // randomScopes returns a valid, non-empty scope set in a random order with
 // duplicated entries, so canonicalization is always exercised.
-func randomScopes(random *rand.Rand) []*basev0.WorkScopeV1 {
+func randomScopes(random *rand.Rand) []*basev1.WorkScopeV1 {
 	kinds := []string{"repository", "record", "document", "profile", "account"}
 	random.Shuffle(len(kinds), func(i, j int) { kinds[i], kinds[j] = kinds[j], kinds[i] })
-	scopes := make([]*basev0.WorkScopeV1, 0, len(kinds))
+	scopes := make([]*basev1.WorkScopeV1, 0, len(kinds))
 	for _, kind := range kinds[:1+random.IntN(len(kinds))] {
 		actions := []string{"read", "write", "append", "invoke"}
 		random.Shuffle(len(actions), func(i, j int) { actions[i], actions[j] = actions[j], actions[i] })
@@ -159,7 +159,7 @@ func randomScopes(random *rand.Rand) []*basev0.WorkScopeV1 {
 		for index := range random.IntN(4) {
 			resourceIDs = append(resourceIDs, fmt.Sprintf("%s-%d", kind, index))
 		}
-		scopes = append(scopes, &basev0.WorkScopeV1{
+		scopes = append(scopes, &basev1.WorkScopeV1{
 			ResourceKind: kind, Actions: actions, ResourceIds: resourceIDs,
 		})
 	}
@@ -167,10 +167,10 @@ func randomScopes(random *rand.Rand) []*basev0.WorkScopeV1 {
 }
 
 // shuffledScopes is the same authority in a different order.
-func shuffledScopes(random *rand.Rand, scopes []*basev0.WorkScopeV1) []*basev0.WorkScopeV1 {
-	out := make([]*basev0.WorkScopeV1, 0, len(scopes))
+func shuffledScopes(random *rand.Rand, scopes []*basev1.WorkScopeV1) []*basev1.WorkScopeV1 {
+	out := make([]*basev1.WorkScopeV1, 0, len(scopes))
 	for _, source := range scopes {
-		clone, ok := proto.Clone(source).(*basev0.WorkScopeV1)
+		clone, ok := proto.Clone(source).(*basev1.WorkScopeV1)
 		if !ok {
 			continue
 		}
@@ -191,7 +191,7 @@ func shuffledScopes(random *rand.Rand, scopes []*basev0.WorkScopeV1) []*basev0.W
 // by authorizing the caller rather than by reading their scopes.
 func TestCachePartitionByViewerSeparatesSubjectsSharingAView(t *testing.T) {
 	a := newAuthority(t)
-	scopes := []*basev0.WorkScopeV1{scope("document", "read")}
+	scopes := []*basev1.WorkScopeV1{scope("document", "read")}
 	parent := a.start(t, mintInput{scopes: scopes})
 
 	first, err := a.verifier(t).Verify(context.Background(), a.child(t, parent, "actor-1", scopes))
@@ -218,7 +218,7 @@ func TestCachePartitionByViewerSeparatesSubjectsSharingAView(t *testing.T) {
 // owner acts directly — which is the identity core's Verified.Actor reports.
 func TestCachePartitionByViewerFollowsTheEffectiveActor(t *testing.T) {
 	a := newAuthority(t)
-	scopes := []*basev0.WorkScopeV1{scope("document", "read")}
+	scopes := []*basev1.WorkScopeV1{scope("document", "read")}
 	owner := a.verified(t, mintInput{scopes: scopes})
 	delegated, err := a.verifier(t).Verify(
 		context.Background(), a.child(t, a.start(t, mintInput{scopes: scopes}), "actor-1", scopes),
@@ -278,7 +278,7 @@ func TestCachePartitionWritesAroundAnApprovalGrant(t *testing.T) {
 // dimension has a test that fails when it leaves the digest.
 func TestCachePartitionByViewerSeparatesTheSameAgentPrincipalAtDifferentAgents(t *testing.T) {
 	a := newAuthority(t)
-	scopes := []*basev0.WorkScopeV1{scope("document", "read")}
+	scopes := []*basev1.WorkScopeV1{scope("document", "read")}
 	parent := a.start(t, mintInput{scopes: scopes})
 
 	// One principal, one kind, one organization, two agent manifests. An agent
@@ -308,7 +308,7 @@ func TestCachePartitionByViewerSeparatesTheSameAgentPrincipalAtDifferentAgents(t
 
 func TestCachePartitionByViewerSeparatesOneActorActingInTwoOrganizations(t *testing.T) {
 	a := newAuthority(t)
-	scopes := []*basev0.WorkScopeV1{scope("document", "read")}
+	scopes := []*basev1.WorkScopeV1{scope("document", "read")}
 	parent := a.start(t, mintInput{scopes: scopes})
 
 	// One principal, two organizations. Authorization is evaluated per
@@ -339,7 +339,7 @@ func TestCachePartitionByViewerSeparatesOneActorActingInTwoOrganizations(t *test
 // within a kind, not across kinds.
 func TestCachePartitionByViewerSeparatesTheSameIdAtDifferentKinds(t *testing.T) {
 	a := newAuthority(t)
-	scopes := []*basev0.WorkScopeV1{scope("document", "read")}
+	scopes := []*basev1.WorkScopeV1{scope("document", "read")}
 	parent := a.start(t, mintInput{scopes: scopes})
 
 	// ONE field varies. The earlier version changed kind AND agent together,

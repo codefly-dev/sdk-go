@@ -1,7 +1,7 @@
 package workcontext
 
 import (
-	basev0 "github.com/codefly-dev/core/generated/go/codefly/base/v0"
+	basev1 "github.com/codefly-dev/core/generated/go/codefly/base/v1"
 	corework "github.com/codefly-dev/core/workcontext"
 )
 
@@ -63,7 +63,7 @@ type OperationBinding = corework.OperationBinding
 // SealedOperationBinding is the operation binding a capability carries: the
 // binding's id, and its revision and incarnation at mint time. It is core's own
 // message for that, so there is no second spelling of what travels.
-type SealedOperationBinding = basev0.WorkOperationBindingV1
+type SealedOperationBinding = basev1.WorkOperationBindingV1
 
 // SealedValues is the SEAL a capability carries, as core's own message.
 //
@@ -76,7 +76,7 @@ type SealedOperationBinding = basev0.WorkOperationBindingV1
 // the hazard this module already hit once with OperationBinding's PrincipalID.
 //
 // Credential.Seal returns one of these, cloned from what core decoded.
-type SealedValues = basev0.WorkSealV1
+type SealedValues = basev1.WorkSealV1
 
 // SealSource answers the live values a seal is compared against.
 type SealSource = corework.SealSource
@@ -99,7 +99,7 @@ type (
 
 // Claims are the capability's fields. Read them off a Verified, never off the
 // wire.
-type Claims = basev0.WorkContextV1
+type Claims = basev1.WorkContextV1
 
 // Core's verify-only Authenticator and Authenticated are deliberately not
 // aliased either. They require the issuer's revision and seal sources, which is

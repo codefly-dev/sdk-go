@@ -6,7 +6,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	basev0 "github.com/codefly-dev/core/generated/go/codefly/base/v0"
+	basev1 "github.com/codefly-dev/core/generated/go/codefly/base/v1"
 	"github.com/codefly-dev/core/network"
 	"github.com/codefly-dev/core/resources"
 	codefly "github.com/codefly-dev/sdk-go"
@@ -85,8 +85,8 @@ func TestACompositionRootSelectsModulesItComposes(t *testing.T) {
 				// A carrier is present: only selection can refuse the query, so a
 				// refusal proves the root's declarations were judged first.
 				injectEndpointForTest(t, "runtime", &resources.EndpointAccess{
-					Endpoint:        &basev0.Endpoint{Module: carried.module, Service: carried.service, Name: "rest", Api: "rest"},
-					NetworkInstance: &basev0.NetworkInstance{Address: "http://localhost:24601"},
+					Endpoint:        &basev1.Endpoint{Module: carried.module, Service: carried.service, Name: "rest", Api: "rest"},
+					NetworkInstance: &basev1.NetworkInstance{Address: "http://localhost:24601"},
 				})
 				instance, err := codefly.For(context.Background()).Module(carried.module).Service(carried.service).
 					Endpoint("rest").API("rest").ResolveNetworkInstance()
@@ -106,9 +106,9 @@ func TestACompositionRootComputesTheNativeAddressUnderItsOwnName(t *testing.T) {
 	instance, err := codefly.For(ctx).Module("producer").Service("records").Endpoint("health").API("rest").ResolveNetworkInstance()
 	require.NoError(t, err)
 	require.NotNil(t, instance)
-	expected := network.NativeFor(ctx, compositionRoot, "producer", "records", "", &basev0.Endpoint{Name: "health", Api: "rest"})
+	expected := network.NativeFor(ctx, compositionRoot, "producer", "records", "", &basev1.Endpoint{Name: "health", Api: "rest"})
 	require.Equal(t, expected.Address, instance.Address)
-	require.NotEqual(t, network.NativeFor(ctx, "platform-core", "producer", "records", "", &basev0.Endpoint{Name: "health", Api: "rest"}).Address,
+	require.NotEqual(t, network.NativeFor(ctx, "platform-core", "producer", "records", "", &basev1.Endpoint{Name: "health", Api: "rest"}).Address,
 		instance.Address, "the premise: the imported workspace's name derives another address")
 }
 
@@ -136,8 +136,8 @@ func TestACompositionRootNamesWhatItCarriesWhenAModuleIsUnknown(t *testing.T) {
 func TestACompositionRootCountsOnlyUnderTheExactInjectedName(t *testing.T) {
 	prepareCompositionRoot(t, "PLATFORM-OBIN")
 	injectEndpointForTest(t, "runtime", &resources.EndpointAccess{
-		Endpoint:        &basev0.Endpoint{Module: "producer", Service: "records", Name: "rest", Api: "rest"},
-		NetworkInstance: &basev0.NetworkInstance{Address: "http://localhost:24601"},
+		Endpoint:        &basev1.Endpoint{Module: "producer", Service: "records", Name: "rest", Api: "rest"},
+		NetworkInstance: &basev1.NetworkInstance{Address: "http://localhost:24601"},
 	})
 	instance, err := codefly.For(context.Background()).Module("producer").Service("records").
 		Endpoint("rest").API("rest").ResolveNetworkInstance()

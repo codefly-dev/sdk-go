@@ -59,8 +59,8 @@ root errors
 root fmt
 root github.com/codefly-dev/core/composition
 root github.com/codefly-dev/core/configurations
-root github.com/codefly-dev/core/generated/go/codefly/base/v0
-root github.com/codefly-dev/core/generated/go/codefly/runnable/v0
+root github.com/codefly-dev/core/generated/go/codefly/base/v1
+root github.com/codefly-dev/core/generated/go/codefly/runnable/v1
 root github.com/codefly-dev/core/network
 root github.com/codefly-dev/core/resources
 root github.com/codefly-dev/core/runnable
@@ -113,7 +113,7 @@ leaf encoding/hex
 leaf encoding/json workcontext/mint.go
 leaf errors
 leaf fmt
-leaf github.com/codefly-dev/core/generated/go/codefly/base/v0
+leaf github.com/codefly-dev/core/generated/go/codefly/base/v1
 leaf github.com/codefly-dev/core/workcontext
 leaf github.com/codefly-dev/sdk-go/workcontext
 leaf google.golang.org/grpc
@@ -137,6 +137,8 @@ leaf time
 
 # --- historical, published refs only (see above) ---
 legacy github.com/codefly-dev/core/configurations/standards
+legacy github.com/codefly-dev/core/generated/go/codefly/base/v0
+legacy github.com/codefly-dev/core/generated/go/codefly/runnable/v0
 legacy github.com/codefly-dev/core/shared
 legacy github.com/jackc/pgx/v5
 legacy github.com/jackc/pgx/v5/pgconn

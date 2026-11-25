@@ -5,7 +5,7 @@ import (
 	"os"
 	"testing"
 
-	basev0 "github.com/codefly-dev/core/generated/go/codefly/base/v0"
+	basev1 "github.com/codefly-dev/core/generated/go/codefly/base/v1"
 	"github.com/codefly-dev/core/resources"
 	codefly "github.com/codefly-dev/sdk-go"
 	"github.com/stretchr/testify/require"
@@ -26,8 +26,8 @@ var carriedEndpoint = resources.EndpointInformation{
 
 func carrierFor(name, api, address string) *resources.EndpointAccess {
 	return &resources.EndpointAccess{
-		Endpoint:        &basev0.Endpoint{Module: carriedEndpoint.Module, Service: carriedEndpoint.Service, Name: name, Api: api, Visibility: resources.VisibilityPublic},
-		NetworkInstance: &basev0.NetworkInstance{Address: address},
+		Endpoint:        &basev1.Endpoint{Module: carriedEndpoint.Module, Service: carriedEndpoint.Service, Name: name, Api: api, Visibility: resources.VisibilityPublic},
+		NetworkInstance: &basev1.NetworkInstance{Address: address},
 	}
 }
 
@@ -187,8 +187,8 @@ func TestDeployedProcessWithAWorkspaceStillSelectsFirst(t *testing.T) {
 				t.Setenv("CODEFLY__ENVIRONMENT", "production")
 				require.NoError(t, codefly.LoadEnvironmentVariables())
 				injectEndpointForTest(t, source, &resources.EndpointAccess{
-					Endpoint:        &basev0.Endpoint{Module: "producer", Service: "records", Name: "rest", Api: "rest"},
-					NetworkInstance: &basev0.NetworkInstance{Address: "https://upstream.example:9443"},
+					Endpoint:        &basev1.Endpoint{Module: "producer", Service: "records", Name: "rest", Api: "rest"},
+					NetworkInstance: &basev1.NetworkInstance{Address: "https://upstream.example:9443"},
 				})
 				query := codefly.For(context.Background()).Module("producer").Service("records").Endpoint("rest").API("rest")
 				instance, err := query.ResolveNetworkInstance()

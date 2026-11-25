@@ -8,7 +8,7 @@ import (
 	"testing"
 
 	"github.com/codefly-dev/core/configurations"
-	basev0 "github.com/codefly-dev/core/generated/go/codefly/base/v0"
+	basev1 "github.com/codefly-dev/core/generated/go/codefly/base/v1"
 	"github.com/codefly-dev/core/resources"
 	codefly "github.com/codefly-dev/sdk-go"
 	"github.com/stretchr/testify/require"
@@ -29,8 +29,8 @@ func TestConfigurationDocumentsReachSDKFromFilesAndRuntimeCarrier(t *testing.T) 
 	require.NoError(t, err)
 	require.Len(t, infos, 3)
 	manager := resources.NewEnvironmentVariableManager()
-	manager.SetEnvironment(&basev0.Environment{Name: "staging"})
-	require.NoError(t, manager.AddConfigurations(ctx, &basev0.Configuration{Origin: "app/api", Infos: infos}))
+	manager.SetEnvironment(&basev1.Environment{Name: "staging"})
+	require.NoError(t, manager.AddConfigurations(ctx, &basev1.Configuration{Origin: "app/api", Infos: infos}))
 	variables, err := manager.All()
 	require.NoError(t, err)
 	for _, variable := range variables {
@@ -105,8 +105,8 @@ func TestUnreadableConfigurationDocumentCarriersAreDistinctFromMissingOnes(t *te
 func TestInjectConfigurationDocumentsIsAtomicAndSeparatesWorkspaceScope(t *testing.T) {
 	t.Setenv(resources.EnvironmentPrefix, "staging")
 	t.Cleanup(func() { require.NoError(t, codefly.InjectConfigurations()) })
-	conf := &basev0.Configuration{Origin: resources.ConfigurationWorkspace, Infos: []*basev0.ConfigurationInformation{{
-		Name: "policy", Data: &basev0.ConfigurationData{Kind: "json", Content: []byte(`{"enabled":true}`)},
+	conf := &basev1.Configuration{Origin: resources.ConfigurationWorkspace, Infos: []*basev1.ConfigurationInformation{{
+		Name: "policy", Data: &basev1.ConfigurationData{Kind: "json", Content: []byte(`{"enabled":true}`)},
 	}}}
 	require.NoError(t, codefly.InjectConfigurations(conf))
 	query := codefly.For(context.Background()).Module("app").Service("api")
@@ -141,8 +141,8 @@ func TestInjectConfigurationDocumentsIsAtomicAndSeparatesWorkspaceScope(t *testi
 func TestWorkspaceSecretDocumentHasIndependentTypedScope(t *testing.T) {
 	t.Setenv(resources.EnvironmentPrefix, "staging")
 	t.Cleanup(func() { require.NoError(t, codefly.InjectConfigurations()) })
-	conf := &basev0.Configuration{Origin: resources.ConfigurationWorkspace, Infos: []*basev0.ConfigurationInformation{{
-		Name: "credentials", Data: &basev0.ConfigurationData{Kind: "json", Secret: true, Content: []byte(`{"token":"private-sentinel"}`)},
+	conf := &basev1.Configuration{Origin: resources.ConfigurationWorkspace, Infos: []*basev1.ConfigurationInformation{{
+		Name: "credentials", Data: &basev1.ConfigurationData{Kind: "json", Secret: true, Content: []byte(`{"token":"private-sentinel"}`)},
 	}}}
 	require.NoError(t, codefly.InjectConfigurations(conf))
 	query := codefly.For(context.Background())

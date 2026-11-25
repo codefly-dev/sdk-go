@@ -207,7 +207,7 @@ func inspectCodecUses(loaded *packages.Package, file *ast.File, path string) []s
 	// design, and the exemption was granted at the CODEC call inside them. But
 	// nothing looked at their CALLERS, so
 	//
-	//	decodeDocument(name, payload, &basev0.WorkContextV1{})
+	//	decodeDocument(name, payload, &basev1.WorkContextV1{})
 	//
 	// reached a json.Unmarshal of a capability through an exemption written for
 	// the runtime's own configuration documents — and configuration_document.go
@@ -467,7 +467,7 @@ func codecFunctionOf(loaded *packages.Package, expression ast.Expr) *types.Func 
 //
 //	type envelopeTarget struct{ proto.Message }
 //
-//	func decode(raw []byte, dst *basev0.WorkContextV1) error {
+//	func decode(raw []byte, dst *basev1.WorkContextV1) error {
 //	    return proto.Unmarshal(raw, &envelopeTarget{Message: dst})
 //	}
 //
@@ -746,7 +746,7 @@ import (
 
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/reflect/protoreflect"
-	basev0 "github.com/codefly-dev/core/generated/go/codefly/base/v0"
+	basev1 "github.com/codefly-dev/core/generated/go/codefly/base/v1"
 )
 
 // Sinks, so every probe shares one import block without "imported and not
@@ -755,7 +755,7 @@ var (
 	_ asn1.RawValue
 	_ = reflect.TypeOf
 	_ protoreflect.Message
-	_ = basev0.File_codefly_base_v0_work_context_proto
+	_ = basev1.File_codefly_base_v1_work_context_proto
 	_ = json.Valid
 	// proto.Size is not a codec, so naming it keeps the import live for every
 	// probe without being the finding in any of them.
@@ -768,7 +768,7 @@ var (
 		says   string
 	}{
 		"ASN1 decoding a capability": {
-			source: `func into(raw []byte, c *basev0.WorkContextV1) { _, _ = asn1.Unmarshal(raw, c) }`,
+			source: `func into(raw []byte, c *basev1.WorkContextV1) { _, _ = asn1.Unmarshal(raw, c) }`,
 			says:   "which is or contains",
 		},
 		"ASN1 decoder passed as a value": {
@@ -778,7 +778,7 @@ var (
 		// R1: a type parameter. Resolved to the spelling "M".
 		"a generic codec wrapper": {
 			source: `func into[M proto.Message](raw []byte, m M) error { return proto.Unmarshal(raw, m) }
-var _ = into[*basev0.WorkContextV1]`,
+var _ = into[*basev1.WorkContextV1]`,
 			says: "interface or a type parameter",
 		},
 		// R2: interface embedding. Resolved to "r6msg".
@@ -796,7 +796,7 @@ func into(raw []byte, m carrier) error { return proto.Unmarshal(raw, m) }`,
 		},
 		// R4: reflect. Resolved to "[]reflect#Value".
 		"a codec reached through reflect": {
-			source: `func into(raw []byte, c *basev0.WorkContextV1) {
+			source: `func into(raw []byte, c *basev1.WorkContextV1) {
 	reflect.ValueOf(proto.Unmarshal).Call([]reflect.Value{reflect.ValueOf(raw), reflect.ValueOf(c)})
 }`,
 			says: "without calling it",
@@ -804,13 +804,13 @@ func into(raw []byte, m carrier) error { return proto.Unmarshal(raw, m) }`,
 		// L6: a closure. codecArguments read the OUTER call's arguments.
 		"a codec handed to a closure": {
 			source: `func use(f func([]byte, proto.Message) error) func([]byte, proto.Message) error { return f }
-func into(raw []byte, c *basev0.WorkContextV1) error { return use(proto.Unmarshal)(raw, c) }`,
+func into(raw []byte, c *basev1.WorkContextV1) error { return use(proto.Unmarshal)(raw, c) }`,
 			says: "without calling it",
 		},
 		// The concrete capability, named outright, outside its one row.
 		"the capability named outright": {
-			source: `func into(raw []byte) (*basev0.WorkContextV1, error) {
-	c := &basev0.WorkContextV1{}
+			source: `func into(raw []byte) (*basev1.WorkContextV1, error) {
+	c := &basev1.WorkContextV1{}
 	return c, proto.Unmarshal(raw, c)
 }`,
 			says: "which is or contains",
@@ -828,7 +828,7 @@ func into(raw []byte, c *basev0.WorkContextV1) error { return use(proto.Unmarsha
 
 func (f thunk) ProtoReflect() protoreflect.Message { return f() }
 
-func decode(raw []byte, claims *basev0.WorkContextV1) error {
+func decode(raw []byte, claims *basev1.WorkContextV1) error {
 	return proto.Unmarshal(raw, thunk(claims.ProtoReflect))
 }`,
 			says: "hand-writes ProtoReflect",
@@ -840,7 +840,7 @@ func decode(raw []byte, claims *basev0.WorkContextV1) error {
 
 func (l lazy) ProtoReflect() protoreflect.Message { return l.get() }
 
-func decode(raw []byte, claims *basev0.WorkContextV1) error {
+func decode(raw []byte, claims *basev1.WorkContextV1) error {
 	return proto.Unmarshal(raw, lazy{get: claims.ProtoReflect})
 }`,
 			says: "hand-writes ProtoReflect",
@@ -848,7 +848,7 @@ func decode(raw []byte, claims *basev0.WorkContextV1) error {
 		// And the v1 contract, which proto.Unmarshal still accepts through
 		// protoimpl — so the rule covers both or it covers one spelling.
 		"the v1 message contract": {
-			source: `type legacy struct{ inner *basev0.WorkContextV1 }
+			source: `type legacy struct{ inner *basev1.WorkContextV1 }
 
 func (legacy) Reset()         {}
 func (legacy) String() string { return "" }
@@ -863,7 +863,7 @@ func (legacy) ProtoMessage()  {}`,
 		"a concrete wrapper around an embedded codec interface": {
 			source: `type envelopeTarget struct{ proto.Message }
 
-func decode(raw []byte, dst *basev0.WorkContextV1) error {
+func decode(raw []byte, dst *basev1.WorkContextV1) error {
 	return proto.Unmarshal(raw, &envelopeTarget{Message: dst})
 }`,
 			says: "interface or a type parameter",
@@ -877,7 +877,7 @@ type outer struct {
 	Inner inner
 }
 
-func decode(raw []byte, dst *basev0.WorkContextV1) error {
+func decode(raw []byte, dst *basev1.WorkContextV1) error {
 	wrapped := outer{Inner: inner{Message: dst}}
 	return proto.Unmarshal(raw, &wrapped.Inner)
 }`,
@@ -897,7 +897,7 @@ func decode(raw []byte, all batch) error { return proto.Unmarshal(raw, all[0]) }
 		// no type-name rule could resolve the alias across files. The walk
 		// finds it inside the struct.
 		"a capability embedded in a permitted struct": {
-			source: `type claims = basev0.WorkContextV1
+			source: `type claims = basev1.WorkContextV1
 type mintRequest struct {
 	Audience string
 	*claims
@@ -1022,8 +1022,8 @@ func key(raw []byte) string { return payloadEncoding.EncodeToString(raw) }
 	return json.Unmarshal(content, destination)
 }
 
-func read(raw []byte) (*basev0.WorkContextV1, error) {
-	claims := &basev0.WorkContextV1{}
+func read(raw []byte) (*basev1.WorkContextV1, error) {
+	claims := &basev1.WorkContextV1{}
 	return claims, decodeDocument("work-context", raw, claims)
 }`)
 		findings := inspectCodecUses(loaded, file, "configuration_document.go")

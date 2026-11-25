@@ -3,29 +3,29 @@ module github.com/codefly-dev/sdk-go/workcontext
 go 1.27.4
 
 require (
-	github.com/codefly-dev/core v0.19.36-0.20261121094328-95a426c5096f
+	github.com/codefly-dev/core v0.19.38-0.20261125185931-18555ee1d782
 	github.com/stretchr/testify v1.12.1
-	golang.org/x/mod v0.42.0
-	golang.org/x/tools v0.52.0
+	golang.org/x/mod v0.43.0
+	golang.org/x/tools v0.52.1-0.20261106145633-d407941a339a
 	google.golang.org/grpc v1.85.0
 	google.golang.org/protobuf v1.36.12
 )
 
 require (
 	buf.build/gen/go/bufbuild/protovalidate/protocolbuffers/go v1.36.12-20260825204119-511051f7f437.2 // indirect
-	buf.build/go/protovalidate v1.4.0 // indirect
-	cel.dev/cel-go v0.32.0 // indirect
+	buf.build/go/protovalidate v1.4.1 // indirect
+	cel.dev/cel-go v0.33.2 // indirect
 	cel.dev/expr v0.25.3 // indirect
 	github.com/antlr4-go/antlr/v4 v4.13.1 // indirect
 	github.com/google/uuid v1.6.0 // indirect
-	go.yaml.in/yaml/v3 v3.0.5 // indirect
-	golang.org/x/exp v0.0.0-20261014143641-f0251eb4aa3e // indirect
-	golang.org/x/net v0.62.0 // indirect
-	golang.org/x/sync v0.24.0 // indirect
-	golang.org/x/sys v0.49.0 // indirect
-	golang.org/x/text v0.43.0 // indirect
-	google.golang.org/genproto/googleapis/api v0.0.0-20261026165753-2ffab32bce7e // indirect
-	google.golang.org/genproto/googleapis/rpc v0.0.0-20261026165753-2ffab32bce7e // indirect
+	go.yaml.in/yaml/v3 v3.0.6 // indirect
+	golang.org/x/exp v0.0.0-20261113113407-e3970619a1a4 // indirect
+	golang.org/x/net v0.63.0 // indirect
+	golang.org/x/sync v0.25.0 // indirect
+	golang.org/x/sys v0.50.0 // indirect
+	golang.org/x/text v0.44.0 // indirect
+	google.golang.org/genproto/googleapis/api v0.0.0-20261123191846-1e707ab9fbc2 // indirect
+	google.golang.org/genproto/googleapis/rpc v0.0.0-20261123191846-1e707ab9fbc2 // indirect
 )
 
 // RETRACTED: every version of THIS module published before the second Work

@@ -7,7 +7,7 @@ import (
 	"strings"
 	"testing"
 
-	basev0 "github.com/codefly-dev/core/generated/go/codefly/base/v0"
+	basev1 "github.com/codefly-dev/core/generated/go/codefly/base/v1"
 	"github.com/codefly-dev/core/resources"
 	codefly "github.com/codefly-dev/sdk-go"
 	"github.com/stretchr/testify/require"
@@ -16,7 +16,7 @@ import (
 // deliver emits configuration the way a Codefly runner does — values above
 // the threshold written to files, the environment carrying their paths — and
 // sets that environment on the test process.
-func deliver(t *testing.T, configuration *basev0.Configuration) {
+func deliver(t *testing.T, configuration *basev1.Configuration) {
 	t.Helper()
 	var envs []*resources.EnvironmentVariable
 	for _, secret := range []bool{false, true} {
@@ -33,8 +33,8 @@ func deliver(t *testing.T, configuration *basev0.Configuration) {
 	}
 }
 
-func workspaceGroup(name string, values ...*basev0.ConfigurationValue) *basev0.Configuration {
-	return &basev0.Configuration{Origin: resources.ConfigurationWorkspace, Infos: []*basev0.ConfigurationInformation{{Name: name, ConfigurationValues: values}}}
+func workspaceGroup(name string, values ...*basev1.ConfigurationValue) *basev1.Configuration {
+	return &basev1.Configuration{Origin: resources.ConfigurationWorkspace, Infos: []*basev1.ConfigurationInformation{{Name: name, ConfigurationValues: values}}}
 }
 
 // A value delivered by file reads exactly as one delivered inline, through
@@ -44,9 +44,9 @@ func TestAFileDeliveredValueReadsThroughTheSDK(t *testing.T) {
 	large := strings.Repeat("descriptor-bytes ", resources.FileCarrierThreshold/16+64)
 	secret := strings.Repeat("s", resources.FileCarrierThreshold+1)
 	deliver(t, workspaceGroup("runnable-bindings",
-		&basev0.ConfigurationValue{Key: "ACME__OPERATION", Value: `{"schema":"small"}`},
-		&basev0.ConfigurationValue{Key: "DESCRIPTOR_SET__AB", Value: large},
-		&basev0.ConfigurationValue{Key: "BUNDLE", Value: secret, Secret: true},
+		&basev1.ConfigurationValue{Key: "ACME__OPERATION", Value: `{"schema":"small"}`},
+		&basev1.ConfigurationValue{Key: "DESCRIPTOR_SET__AB", Value: large},
+		&basev1.ConfigurationValue{Key: "BUNDLE", Value: secret, Secret: true},
 	))
 	carrier := resources.WorkspaceConfigurationPrefix + "__RUNNABLE_BINDINGS__DESCRIPTOR_SET__AB"
 	_, inline := os.LookupEnv(carrier)

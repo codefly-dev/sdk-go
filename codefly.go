@@ -10,7 +10,7 @@ import (
 	"strings"
 	"sync"
 
-	basev0 "github.com/codefly-dev/core/generated/go/codefly/base/v0"
+	basev1 "github.com/codefly-dev/core/generated/go/codefly/base/v1"
 	"github.com/codefly-dev/core/resources"
 	"github.com/codefly-dev/core/wool"
 	wotel "github.com/codefly-dev/core/wool/otel"
@@ -171,7 +171,7 @@ func LoadEnvironmentVariables() error {
 // an embedded Codefly flow: resolved configuration enters the same immutable
 // snapshot queried by For. Calling it with no configurations clears the prior
 // injected configuration values.
-func InjectConfigurations(configurations ...*basev0.Configuration) error {
+func InjectConfigurations(configurations ...*basev1.Configuration) error {
 	values := make(map[string]string)
 	for _, configuration := range configurations {
 		if configuration == nil {

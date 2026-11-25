@@ -4,7 +4,7 @@ import (
 	"context"
 	"testing"
 
-	basev0 "github.com/codefly-dev/core/generated/go/codefly/base/v0"
+	basev1 "github.com/codefly-dev/core/generated/go/codefly/base/v1"
 	"github.com/codefly-dev/core/resources"
 	codefly "github.com/codefly-dev/sdk-go"
 	"github.com/stretchr/testify/require"
@@ -17,8 +17,8 @@ func TestMalformedInjectedEndpointCannotFallBack(t *testing.T) {
 				t.Run("environment="+environment+"/source="+source+"/api="+api, func(t *testing.T) {
 					prepareEndpointLocationWorkspace(t, environment, "")
 					injectEndpointForTest(t, source, &resources.EndpointAccess{
-						Endpoint:        &basev0.Endpoint{Module: "platform", Service: "location-records", Name: "rest", Api: "rest"},
-						NetworkInstance: &basev0.NetworkInstance{Address: "not-an-address"},
+						Endpoint:        &basev1.Endpoint{Module: "platform", Service: "location-records", Name: "rest", Api: "rest"},
+						NetworkInstance: &basev1.NetworkInstance{Address: "not-an-address"},
 					})
 					query := codefly.For(context.Background()).Module("platform").Service("location-records").Endpoint("rest").API(api)
 					t.Run("ResolveNetworkInstance", func(t *testing.T) {
@@ -41,8 +41,8 @@ func TestInjectedParseFailureNeverReturnsPartialInstance(t *testing.T) {
 	require.Error(t, parseErr)
 	require.NotNil(t, partial)
 	injectEndpointForTest(t, "embedded", &resources.EndpointAccess{
-		Endpoint:        &basev0.Endpoint{Module: "platform", Service: "location-records", Name: "rest", Api: "rest"},
-		NetworkInstance: &basev0.NetworkInstance{Address: "localhost:not-a-port"},
+		Endpoint:        &basev1.Endpoint{Module: "platform", Service: "location-records", Name: "rest", Api: "rest"},
+		NetworkInstance: &basev1.NetworkInstance{Address: "localhost:not-a-port"},
 	})
 	query := codefly.For(context.Background()).Module("platform").Service("location-records").Endpoint("rest")
 	instance, err := query.ResolveNetworkInstance()

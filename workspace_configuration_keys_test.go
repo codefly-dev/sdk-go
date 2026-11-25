@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	basev0 "github.com/codefly-dev/core/generated/go/codefly/base/v0"
+	basev1 "github.com/codefly-dev/core/generated/go/codefly/base/v1"
 	"github.com/codefly-dev/core/resources"
 	codefly "github.com/codefly-dev/sdk-go"
 	"github.com/stretchr/testify/assert"
@@ -95,11 +95,11 @@ func TestWorkspaceConfigurationKeysListsAFileDeliveredKey(t *testing.T) {
 // environment; the listing sees what the per-key accessor sees.
 func TestWorkspaceConfigurationKeysListsInjectedConfiguration(t *testing.T) {
 	t.Cleanup(func() { require.NoError(t, codefly.InjectConfigurations()) })
-	require.NoError(t, codefly.InjectConfigurations(&basev0.Configuration{
+	require.NoError(t, codefly.InjectConfigurations(&basev1.Configuration{
 		Origin: resources.ConfigurationWorkspace,
-		Infos: []*basev0.ConfigurationInformation{{
+		Infos: []*basev1.ConfigurationInformation{{
 			Name: "keys-injected",
-			ConfigurationValues: []*basev0.ConfigurationValue{
+			ConfigurationValues: []*basev1.ConfigurationValue{
 				{Key: "documents__count-documents", Value: "count"},
 				{Key: "credential", Value: "secret", Secret: true},
 			},

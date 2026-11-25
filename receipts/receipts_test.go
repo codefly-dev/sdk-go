@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	runnablev0 "github.com/codefly-dev/core/generated/go/codefly/runnable/v0"
+	runnablev1 "github.com/codefly-dev/core/generated/go/codefly/runnable/v1"
 	"github.com/stretchr/testify/require"
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/reflect/protoreflect"
@@ -19,7 +19,7 @@ import (
 
 const testTenant = "tenant-a"
 
-func registry(t *testing.T, declared *runnablev0.Operation) fixture.Registry {
+func registry(t *testing.T, declared *runnablev1.Operation) fixture.Registry {
 	t.Helper()
 	built, err := fixture.New(declared)
 	require.NoError(t, err)

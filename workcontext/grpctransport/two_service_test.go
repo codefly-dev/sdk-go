@@ -19,7 +19,7 @@ import (
 	healthv1 "google.golang.org/grpc/health/grpc_health_v1"
 	"google.golang.org/grpc/status"
 
-	basev0 "github.com/codefly-dev/core/generated/go/codefly/base/v0"
+	basev1 "github.com/codefly-dev/core/generated/go/codefly/base/v1"
 	corework "github.com/codefly-dev/core/workcontext"
 
 	"github.com/codefly-dev/sdk-go/workcontext"
@@ -52,7 +52,7 @@ const (
 
 var hopNow = time.Date(2026, 9, 26, 12, 0, 0, 0, time.UTC)
 
-var hopScopes = []*basev0.WorkScopeV1{
+var hopScopes = []*basev1.WorkScopeV1{
 	{ResourceKind: "document", Actions: []string{"read", "write"}},
 	{ResourceKind: "record", Actions: []string{"append"}},
 }
@@ -237,7 +237,7 @@ func (s *serviceA) call(ctx context.Context, request *healthv1.HealthCheckReques
 		case hopAttenuate:
 			scopes = cloneHopScopes()[1:]
 		case hopWiden:
-			scopes = append(cloneHopScopes(), &basev0.WorkScopeV1{
+			scopes = append(cloneHopScopes(), &basev1.WorkScopeV1{
 				ResourceKind: "profile", Actions: []string{"read"},
 			})
 		}
@@ -268,10 +268,10 @@ func (s *serviceA) call(ctx context.Context, request *healthv1.HealthCheckReques
 	return response, nil
 }
 
-func cloneHopScopes() []*basev0.WorkScopeV1 {
-	out := make([]*basev0.WorkScopeV1, 0, len(hopScopes))
+func cloneHopScopes() []*basev1.WorkScopeV1 {
+	out := make([]*basev1.WorkScopeV1, 0, len(hopScopes))
 	for _, scope := range hopScopes {
-		out = append(out, &basev0.WorkScopeV1{
+		out = append(out, &basev1.WorkScopeV1{
 			ResourceKind: scope.GetResourceKind(),
 			Actions:      append([]string(nil), scope.GetActions()...),
 			ResourceIds:  append([]string(nil), scope.GetResourceIds()...),
@@ -450,11 +450,11 @@ func TestServiceHopExchangeMayAttenuateButNeverWiden(t *testing.T) {
 	// asked of the scopes core says are effective. This module answers no part
 	// of that question.
 	require.True(t, workcontext.ScopeContained(
-		&basev0.WorkScopeV1{ResourceKind: "record", Actions: []string{"append"}},
+		&basev1.WorkScopeV1{ResourceKind: "record", Actions: []string{"append"}},
 		atB.EffectiveScopes(),
 	))
 	require.False(t, workcontext.ScopeContained(
-		&basev0.WorkScopeV1{ResourceKind: "document", Actions: []string{"read"}},
+		&basev1.WorkScopeV1{ResourceKind: "document", Actions: []string{"read"}},
 		atB.EffectiveScopes(),
 	), "the hop attenuated the document scope away, so it is no longer covered")
 

@@ -6,7 +6,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	basev0 "github.com/codefly-dev/core/generated/go/codefly/base/v0"
+	basev1 "github.com/codefly-dev/core/generated/go/codefly/base/v1"
 	"github.com/codefly-dev/core/network"
 	"github.com/codefly-dev/core/resources"
 	codefly "github.com/codefly-dev/sdk-go"
@@ -37,7 +37,7 @@ func TestPublicEndpointResolvesLocally(t *testing.T) {
 			require.NoError(t, err)
 			require.NotNil(t, instance)
 			expected := network.NativeFor(ctx, "sdk-location-test", "platform", "location-records", "",
-				&basev0.Endpoint{Name: "rest", Api: "rest", Visibility: resources.VisibilityPublic})
+				&basev1.Endpoint{Name: "rest", Api: "rest", Visibility: resources.VisibilityPublic})
 			require.Equal(t, expected.Address, instance.Address)
 			require.Equal(t, expected.Hostname, instance.Hostname)
 			require.Equal(t, expected.Host, instance.Host)
@@ -118,8 +118,8 @@ func TestEndpointOnlyLookupUsesInjectedAddress(t *testing.T) {
 				t.Run("location="+location+"/environment="+environment+"/source="+source, func(t *testing.T) {
 					prepareEndpointLocationWorkspace(t, environment, location)
 					access := &resources.EndpointAccess{
-						Endpoint:        &basev0.Endpoint{Module: "platform", Service: "location-records", Name: "rest", Api: "rest", Visibility: resources.VisibilityPublic, Location: location},
-						NetworkInstance: &basev0.NetworkInstance{Address: "https://upstream.example:9443"},
+						Endpoint:        &basev1.Endpoint{Module: "platform", Service: "location-records", Name: "rest", Api: "rest", Visibility: resources.VisibilityPublic, Location: location},
+						NetworkInstance: &basev1.NetworkInstance{Address: "https://upstream.example:9443"},
 					}
 					injectEndpointForTest(t, source, access)
 					instance, err := codefly.For(context.Background()).Module("platform").Service("location-records").Endpoint("rest").ResolveNetworkInstance()
@@ -140,8 +140,8 @@ func TestInjectedAddressPrecedesLocalNativeAddress(t *testing.T) {
 			t.Run("environment="+environment+"/source="+source, func(t *testing.T) {
 				prepareEndpointLocationWorkspace(t, environment, "")
 				access := &resources.EndpointAccess{
-					Endpoint:        &basev0.Endpoint{Module: "platform", Service: "location-records", Name: "rest", Api: "rest", Visibility: resources.VisibilityPublic},
-					NetworkInstance: &basev0.NetworkInstance{Address: "http://runtime.example:43210"},
+					Endpoint:        &basev1.Endpoint{Module: "platform", Service: "location-records", Name: "rest", Api: "rest", Visibility: resources.VisibilityPublic},
+					NetworkInstance: &basev1.NetworkInstance{Address: "http://runtime.example:43210"},
 				}
 				injectEndpointForTest(t, source, access)
 				instance, err := codefly.For(context.Background()).Module("platform").Service("location-records").Endpoint("rest").API("rest").ResolveNetworkInstance()

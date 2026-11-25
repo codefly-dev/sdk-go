@@ -4,7 +4,7 @@ import (
 	"context"
 	"testing"
 
-	basev0 "github.com/codefly-dev/core/generated/go/codefly/base/v0"
+	basev1 "github.com/codefly-dev/core/generated/go/codefly/base/v1"
 	"github.com/codefly-dev/core/resources"
 	codefly "github.com/codefly-dev/sdk-go"
 	"github.com/stretchr/testify/require"
@@ -28,8 +28,8 @@ func TestInjectedEndpointMustPassCoreSelection(t *testing.T) {
 			t.Run(tc.name+"/"+source, func(t *testing.T) {
 				prepareEndpointSelectionWorkspace(t, "client", tc.declaration, "")
 				injectEndpointForTest(t, source, &resources.EndpointAccess{
-					Endpoint:        &basev0.Endpoint{Module: "producer", Service: "records", Name: "rest", Api: tc.api},
-					NetworkInstance: &basev0.NetworkInstance{Address: "http://runtime.example:43210"},
+					Endpoint:        &basev1.Endpoint{Module: "producer", Service: "records", Name: "rest", Api: tc.api},
+					NetworkInstance: &basev1.NetworkInstance{Address: "http://runtime.example:43210"},
 				})
 				query := codefly.For(context.Background()).Module("producer").Service("records").Endpoint("rest").API(tc.api)
 				t.Run("ResolveNetworkInstance", func(t *testing.T) {

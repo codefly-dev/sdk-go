@@ -13,7 +13,7 @@ import (
 )
 
 const devAdminPackage = `kind: module-package
-schema: codefly/module-package/v2
+schema: codefly/module-package/v1
 id: example/starter
 version: 0.1.0
 minimum-codefly-version: ">=0.3.32"

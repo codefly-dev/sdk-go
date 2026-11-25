@@ -10,7 +10,7 @@ import (
 	"slices"
 	"strconv"
 
-	basev0 "github.com/codefly-dev/core/generated/go/codefly/base/v0"
+	basev1 "github.com/codefly-dev/core/generated/go/codefly/base/v1"
 	"google.golang.org/protobuf/proto"
 )
 
@@ -201,13 +201,13 @@ func authorizationViewDigest(verified *Verified) (string, error) {
 // encodings, which puts a set of scopes in one order without this module
 // defining what "first" means for a scope. Each scope's own repeated fields are
 // sorted before encoding, for the same reason.
-func canonicalScopes(scopes []*basev0.WorkScopeV1) ([][]byte, error) {
+func canonicalScopes(scopes []*basev1.WorkScopeV1) ([][]byte, error) {
 	encoded := make([][]byte, 0, len(scopes))
 	for _, scope := range scopes {
 		if scope == nil {
 			continue
 		}
-		clone, ok := proto.Clone(scope).(*basev0.WorkScopeV1)
+		clone, ok := proto.Clone(scope).(*basev1.WorkScopeV1)
 		if !ok {
 			return nil, fmt.Errorf("%w: scope clone is not a scope", ErrInvalid)
 		}

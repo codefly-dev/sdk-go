@@ -4,7 +4,7 @@
 // the capability itself.
 //
 // It mints nothing and it verifies nothing. The Work Context is a core type
-// (codefly.base.v0.WorkContextV1) and github.com/codefly-dev/core/workcontext
+// (codefly.base.v1.WorkContextV1) and github.com/codefly-dev/core/workcontext
 // is its only implementation: the only code that signs a capability, the only
 // code that checks a signature, and the only encoding of either. This package
 // re-exports core's verification entry point rather than offering one of its

@@ -183,7 +183,7 @@ var narrowedImports = map[string]struct {
 	// They are also how a capability is decoded with its Go type appearing
 	// nowhere. dynamicpb.NewMessage(desc) builds a message from a descriptor,
 	// and protoregistry resolves one by NAME — and the name can be assembled
-	// from pieces ("codefly.base.v0.Work" + "ContextV1"), so no string
+	// from pieces ("codefly.base.v1.Work" + "ContextV1"), so no string
 	// matches either. Both were reproduced against a real WorkContextV1 in
 	// the root module.
 	//
@@ -361,7 +361,7 @@ const coreModulePath = "github.com/codefly-dev/core"
 
 // basev0Path is the generated package holding the capability's messages, so an
 // allowlist row can say which package it means.
-const basev0Path = coreModulePath + "/generated/go/codefly/base/v0"
+const basev0Path = coreModulePath + "/generated/go/codefly/base/v1"
 
 // leafModulePrefix is the leaf module's directory, as repositoryFiles names it.
 // Inside it the capability IS the subject, so every codec use is allowlisted by
@@ -724,7 +724,7 @@ func inspectEnvelopeDecoding(file sourceFile, base64Names map[string]bool) []str
 //
 // This is the alias bypass's other half. A function-local declaration is
 // invisible to every rule that reads a file's declarations, and `type X =
-// basev0.WorkContextV1` inside a function body is enough to give a codec row
+// basev1.WorkContextV1` inside a function body is enough to give a codec row
 // whatever type name it asks for. It is also something this module has no use
 // for: a type worth declaring here is worth declaring where a reader finds it.
 func inspectLocalTypes(file sourceFile) []string {
@@ -743,7 +743,7 @@ func inspectLocalTypes(file sourceFile) []string {
 				"%s declares the type %q inside a function.\n"+
 					"A function-local type is invisible to every rule here that reads a file's\n"+
 					"declarations, and a local alias is all it takes to hand a codec row a type name it\n"+
-					"permits — `type WorkScopeV1 = basev0.WorkContextV1` makes a capability marshal as\n"+
+					"permits — `type WorkScopeV1 = basev1.WorkContextV1` makes a capability marshal as\n"+
 					"an allowed scope. Declare it at file level, where it is read.",
 				file.path, spec.Name.Name))
 			return true
@@ -781,8 +781,8 @@ func inspectCoreAliases(file sourceFile, coreImports map[string]bool) []string {
 			kind = "declares a local type over"
 		}
 		// THROUGH A POINTER OR A SLICE. The check read spec.Type as a bare
-		// selector, so `type carrier = basev0.WorkContextV1` was a finding and
-		// `type carrier = *basev0.WorkContextV1` was not — and the pointer
+		// selector, so `type carrier = basev1.WorkContextV1` was a finding and
+		// `type carrier = *basev1.WorkContextV1` was not — and the pointer
 		// form is the one a codec takes.
 		selector, ok := unwrapTypeExpr(spec.Type).(*ast.SelectorExpr)
 		if !ok {
@@ -1232,12 +1232,12 @@ func TestTheGateCatchesItsOwnBypasses(t *testing.T) {
 			path: "work_context_reader.go",
 			source: `package codefly
 import (
-	basev0 "github.com/codefly-dev/core/generated/go/codefly/base/v0"
+	basev1 "github.com/codefly-dev/core/generated/go/codefly/base/v1"
 	"google.golang.org/protobuf/proto"
 )
 func decodeBase64URL(text string) []byte { return []byte(text) }
 func ReadWorkContextTenant(token string) (string, error) {
-	claims := &basev0.WorkContextV1{}
+	claims := &basev1.WorkContextV1{}
 	if err := proto.Unmarshal(decodeBase64URL(token), claims); err != nil {
 		return "", err
 	}
@@ -1249,10 +1249,10 @@ func ReadWorkContextTenant(token string) (string, error) {
 			path: "work_context_writer.go",
 			source: `package codefly
 import (
-	basev0 "github.com/codefly-dev/core/generated/go/codefly/base/v0"
+	basev1 "github.com/codefly-dev/core/generated/go/codefly/base/v1"
 	"google.golang.org/protobuf/proto"
 )
-func encodeClaims(claims *basev0.WorkContextV1) ([]byte, error) {
+func encodeClaims(claims *basev1.WorkContextV1) ([]byte, error) {
 	return proto.MarshalOptions{Deterministic: true}.Marshal(claims)
 }`,
 			says: "on a type it is not allowed to",
@@ -1264,11 +1264,11 @@ func encodeClaims(claims *basev0.WorkContextV1) ([]byte, error) {
 			path: "workcontext/cache_partition.go",
 			source: `package workcontext
 import (
-	basev0 "google.golang.org/protobuf/types/known/structpb"
+	basev1 "google.golang.org/protobuf/types/known/structpb"
 	"google.golang.org/protobuf/proto"
 )
 func encode() ([]byte, error) {
-	return proto.Marshal(&basev0.WorkScopeV1{})
+	return proto.Marshal(&basev1.WorkScopeV1{})
 }`,
 			says: "on a type it is not allowed to",
 		},
@@ -1421,11 +1421,11 @@ var _ = branca.NewBranca`,
 			path: "workcontext/cache_partition.go",
 			source: `package workcontext
 import (
-	basev0 "github.com/codefly-dev/core/generated/go/codefly/base/v0"
+	basev1 "github.com/codefly-dev/core/generated/go/codefly/base/v1"
 	"google.golang.org/protobuf/proto"
 )
-func encode(wc *basev0.WorkContextV1) ([]byte, error) {
-	type WorkScopeV1 = basev0.WorkContextV1
+func encode(wc *basev1.WorkContextV1) ([]byte, error) {
+	type WorkScopeV1 = basev1.WorkContextV1
 	return proto.MarshalOptions{Deterministic: true}.Marshal((*WorkScopeV1)(wc))
 }`,
 			says: "inside a function",
@@ -1434,10 +1434,10 @@ func encode(wc *basev0.WorkContextV1) ([]byte, error) {
 			path: "workcontext/cache_partition.go",
 			source: `package workcontext
 import (
-	basev0 "github.com/codefly-dev/core/generated/go/codefly/base/v0"
+	basev1 "github.com/codefly-dev/core/generated/go/codefly/base/v1"
 	"google.golang.org/protobuf/proto"
 )
-type WorkScopeV1 = basev0.WorkContextV1
+type WorkScopeV1 = basev1.WorkContextV1
 func encode(wc *WorkScopeV1) ([]byte, error) {
 	return proto.Marshal(wc)
 }`,
@@ -1496,9 +1496,9 @@ func read(raw []byte) error {
 			source: `package workcontext
 import (
 	"encoding/json"
-	basev0 "github.com/codefly-dev/core/generated/go/codefly/base/v0"
+	basev1 "github.com/codefly-dev/core/generated/go/codefly/base/v1"
 )
-func leak(claims *basev0.WorkContextV1) ([]byte, error) {
+func leak(claims *basev1.WorkContextV1) ([]byte, error) {
 	body := claims
 	return json.Marshal(body)
 }
@@ -1947,7 +1947,7 @@ type sourceFile struct {
 // package codefly, and the shell sweep — the root's only gate — bans imports
 // rather than reading code. A reviewer built the consequence and ran it: a root
 // file with a HAND-WRITTEN base64url decoder, so no banned import at all, and
-// proto.Unmarshal into basev0.WorkContextV1, compiled, passed golangci-lint
+// proto.Unmarshal into basev1.WorkContextV1, compiled, passed golangci-lint
 // with zero issues and passed the sweep as "ok working tree (58 Go files)".
 // Reading the AST is what sees that, so the AST gate reads both modules.
 func repositoryFiles(t *testing.T) []sourceFile {
@@ -2124,7 +2124,7 @@ func codecArgumentIsPermitted(file sourceFile, call ast.Node, codec string, oper
 		//	    return proto.Unmarshal(raw, m)
 		//	}
 		//
-		// in the root module, called it with &basev0.WorkContextV1{}, and the
+		// in the root module, called it with &basev1.WorkContextV1{}, and the
 		// gate was green. One interface-typed parameter defeated the decisive
 		// rule, because the codec's argument is then an interface and names no
 		// type at all.
@@ -2148,7 +2148,7 @@ func codecArgumentIsPermitted(file sourceFile, call ast.Node, codec string, oper
 		// the whole of the root module's rule, and it is why the gate reading
 		// that module closes a bypass the shell sweep cannot — a hand-written
 		// base64url decoder imports nothing, so only reading the code sees
-		// proto.Unmarshal into basev0.WorkContextV1.
+		// proto.Unmarshal into basev1.WorkContextV1.
 		return slices.Contains(permitted, named)
 	}
 	if isCodecInterfaceType(named) {
@@ -2161,7 +2161,7 @@ func codecArgumentIsPermitted(file sourceFile, call ast.Node, codec string, oper
 		//	    return proto.Unmarshal(raw, m)
 		//	}
 		//
-		// called with &basev0.WorkContextV1{}. The argument resolves perfectly
+		// called with &basev1.WorkContextV1{}. The argument resolves perfectly
 		// — to proto.Message — which is neither a capability nor unresolvable,
 		// so both of the checks above said yes. One interface-typed parameter,
 		// and the decisive rule was gone.
@@ -2303,7 +2303,7 @@ func resolveTypeName(file sourceFile, expression ast.Expr, use token.Pos) string
 // typeName reduces a type expression to its name, KEEPING THE PACKAGE
 // QUALIFIER: *pkg.T and pkg.T are "pkg.T", []T is "[]T", a map is "map".
 //
-// It used to return Sel.Name and drop the qualifier, so basev0.WorkScopeV1 and
+// It used to return Sel.Name and drop the qualifier, so basev1.WorkScopeV1 and
 // anything.WorkScopeV1 were the same string — and cache_partition.go's row,
 // which exists for ONE core scope message, permitted a proto.Marshal of any
 // type whose final name happened to be WorkScopeV1, including a local alias to
@@ -2327,7 +2327,7 @@ func typeNameThroughAliases(file sourceFile, expression ast.Expr, hops int) stri
 			return ""
 		}
 		// Resolved to the imported PACKAGE PATH, never to the local name. The
-		// local name is the author's choice, so `basev0 "some/other/pkg"`
+		// local name is the author's choice, so `basev1 "some/other/pkg"`
 		// would otherwise let a foreign type answer to a row written for one
 		// of core's — the same defect as dropping the qualifier altogether.
 		path := importPathOf(file, qualifier.Name)
@@ -2339,8 +2339,8 @@ func typeNameThroughAliases(file sourceFile, expression ast.Expr, hops int) stri
 		// A LOCAL NAME IS CHASED TO WHAT IT NAMES, which is the hole the
 		// qualifier fix left behind. Returning the identifier as written meant
 		//
-		//	type carrier = *basev0.WorkContextV1
-		//	var c carrier = &basev0.WorkContextV1{}
+		//	type carrier = *basev1.WorkContextV1
+		//	var c carrier = &basev1.WorkContextV1{}
 		//	proto.Unmarshal(raw, c)
 		//
 		// resolved to "carrier" — not a capability, not a codec interface, not
@@ -2370,7 +2370,7 @@ func typeNameThroughAliases(file sourceFile, expression ast.Expr, hops int) stri
 // localTypeTarget is the right-hand side of a file-level `type X = T` or
 // `type X T`, or nil.
 //
-// BOTH forms, and the defined form deliberately: `type X basev0.WorkContextV1`
+// BOTH forms, and the defined form deliberately: `type X basev1.WorkContextV1`
 // is a second declaration of a capability's shape under a local name. It cannot
 // reach proto.Unmarshal, because a defined type inherits no methods and so is
 // not a proto.Message — but a rule that is true for one spelling and silent for
@@ -2525,7 +2525,7 @@ func allowedJSONFiles() []string {
 // from, or "" when nothing imported it.
 //
 // It is what makes a type name mean a type rather than a spelling: the local
-// name in `basev0 "…/base/v0"` is chosen by whoever wrote the import, so an
+// name in `basev1 "…/base/v0"` is chosen by whoever wrote the import, so an
 // allowlist compared against local names is one anybody satisfies by aliasing
 // a different package to the expected name.
 func importPathOf(file sourceFile, local string) string {

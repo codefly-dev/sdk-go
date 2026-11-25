@@ -5,7 +5,7 @@ import (
 	"os"
 	"strings"
 
-	basev0 "github.com/codefly-dev/core/generated/go/codefly/base/v0"
+	basev1 "github.com/codefly-dev/core/generated/go/codefly/base/v1"
 	"path/filepath"
 	"testing"
 
@@ -106,8 +106,8 @@ func TestEndpointOnlySelectionRefusesAmbiguityBeforeInjection(t *testing.T) {
 	require.NoError(t, err)
 	writeFile(t, path, strings.Replace(string(declaration), "name: rest", "name: primary", 1))
 	require.NoError(t, codefly.InjectEndpoints(&resources.EndpointAccess{
-		Endpoint:        &basev0.Endpoint{Module: "producer", Service: "records", Name: "primary", Api: "rest"},
-		NetworkInstance: &basev0.NetworkInstance{Address: "https://upstream.example:9443"},
+		Endpoint:        &basev1.Endpoint{Module: "producer", Service: "records", Name: "primary", Api: "rest"},
+		NetworkInstance: &basev1.NetworkInstance{Address: "https://upstream.example:9443"},
 	}))
 	t.Cleanup(func() { require.NoError(t, codefly.InjectEndpoints()) })
 	instance, err := codefly.For(context.Background()).Module("producer").Service("records").Endpoint("rest").ResolveNetworkInstance()
@@ -120,8 +120,8 @@ func TestEndpointOnlySelectionUsesDeclaredAPI(t *testing.T) {
 	// health serves REST; its name is not its protocol. Exact name takes precedence
 	// over its REST sibling, and the selected declaration supplies the carrier API.
 	require.NoError(t, codefly.InjectEndpoints(&resources.EndpointAccess{
-		Endpoint:        &basev0.Endpoint{Module: "producer", Service: "records", Name: "health", Api: "rest"},
-		NetworkInstance: &basev0.NetworkInstance{Address: "https://health.example:9443"},
+		Endpoint:        &basev1.Endpoint{Module: "producer", Service: "records", Name: "health", Api: "rest"},
+		NetworkInstance: &basev1.NetworkInstance{Address: "https://health.example:9443"},
 	}))
 	t.Cleanup(func() { require.NoError(t, codefly.InjectEndpoints()) })
 	instance, err := codefly.For(context.Background()).Module("producer").Service("records").Endpoint("health").ResolveNetworkInstance()

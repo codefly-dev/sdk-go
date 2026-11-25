@@ -4,7 +4,7 @@ import (
 	"context"
 	"testing"
 
-	basev0 "github.com/codefly-dev/core/generated/go/codefly/base/v0"
+	basev1 "github.com/codefly-dev/core/generated/go/codefly/base/v1"
 	"github.com/codefly-dev/core/network"
 	"github.com/codefly-dev/core/resources"
 	codefly "github.com/codefly-dev/sdk-go"
@@ -70,6 +70,6 @@ func TestAQueryNamingAScopeStillReadsThatScopesNativeMap(t *testing.T) {
 
 	instance, err := healthQuery(ctx).NamingScope("other-run").ResolveNetworkInstance()
 	require.NoError(t, err)
-	expected := network.NativeFor(ctx, compositionRoot, "producer", "records", "other-run", &basev0.Endpoint{Name: "health", Api: "rest"})
+	expected := network.NativeFor(ctx, compositionRoot, "producer", "records", "other-run", &basev1.Endpoint{Name: "health", Api: "rest"})
 	require.Equal(t, expected.Address, instance.Address)
 }

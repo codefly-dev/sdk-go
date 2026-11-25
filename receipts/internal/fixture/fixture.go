@@ -17,13 +17,13 @@ import (
 	"google.golang.org/protobuf/types/dynamicpb"
 	"google.golang.org/protobuf/types/known/durationpb"
 
-	basev0 "github.com/codefly-dev/core/generated/go/codefly/base/v0"
-	runnablev0 "github.com/codefly-dev/core/generated/go/codefly/runnable/v0"
+	basev1 "github.com/codefly-dev/core/generated/go/codefly/base/v1"
+	runnablev1 "github.com/codefly-dev/core/generated/go/codefly/runnable/v1"
 )
 
 const (
 	// Package is the proto package the fixture service lives in.
-	Package = "codefly.receiptsfixture.v0"
+	Package = "codefly.receiptsfixture.v1"
 	// OperationMethod carries the operation option.
 	OperationMethod = "/" + Package + ".Fixture/Commit"
 	// PlainMethod does not, so a call on it must pass through untouched.
@@ -43,20 +43,20 @@ type Registry struct {
 // Operation is the execution policy the fixture's marked method declares. It is
 // a conforming one: core refuses a policy the runtime would refuse to install,
 // and the interceptor refuses to start over a method carrying such a policy.
-func Operation() *runnablev0.Operation {
-	return &runnablev0.Operation{
-		Completion:     basev0.RunnableExecution_COMPLETION_CALL,
+func Operation() *runnablev1.Operation {
+	return &runnablev1.Operation{
+		Completion:     basev1.RunnableExecution_COMPLETION_CALL,
 		AttemptTimeout: durationpb.New(10 * time.Second),
 		TotalTimeout:   durationpb.New(30 * time.Second),
 		MaxAttempts:    3,
 		Backoff:        durationpb.New(time.Second),
 		RetryableCodes: []string{"UNAVAILABLE"},
 		Audience:       "codefly.receiptsfixture",
-		InvokeScopes: []*basev0.WorkScopeV1{{
+		InvokeScopes: []*basev1.WorkScopeV1{{
 			ResourceKind: "fixture",
 			Actions:      []string{"read", "write"},
 		}},
-		LookupScopes: []*basev0.WorkScopeV1{{
+		LookupScopes: []*basev1.WorkScopeV1{{
 			ResourceKind: "fixture",
 			Actions:      []string{"read"},
 		}},
@@ -65,9 +65,9 @@ func Operation() *runnablev0.Operation {
 
 // New compiles the fixture service, marking its Commit method with the declared
 // operation. A nil declaration leaves both methods unmarked.
-func New(declared *runnablev0.Operation) (Registry, error) {
+func New(declared *runnablev1.Operation) (Registry, error) {
 	file := &descriptorpb.FileDescriptorProto{
-		Name:    proto.String("codefly/receiptsfixture/v0/fixture.proto"),
+		Name:    proto.String("codefly/receiptsfixture/v1/fixture.proto"),
 		Package: proto.String(Package),
 		Syntax:  proto.String("proto3"),
 		MessageType: []*descriptorpb.DescriptorProto{
@@ -124,7 +124,7 @@ func payload(name string) *descriptorpb.DescriptorProto {
 	}
 }
 
-func method(name string, declared *runnablev0.Operation) *descriptorpb.MethodDescriptorProto {
+func method(name string, declared *runnablev1.Operation) *descriptorpb.MethodDescriptorProto {
 	built := &descriptorpb.MethodDescriptorProto{
 		Name:       proto.String(name),
 		InputType:  proto.String("." + RequestMessage),
@@ -132,7 +132,7 @@ func method(name string, declared *runnablev0.Operation) *descriptorpb.MethodDes
 	}
 	if declared != nil {
 		built.Options = &descriptorpb.MethodOptions{}
-		proto.SetExtension(built.Options, runnablev0.E_Operation, declared)
+		proto.SetExtension(built.Options, runnablev1.E_Operation, declared)
 	}
 	return built
 }

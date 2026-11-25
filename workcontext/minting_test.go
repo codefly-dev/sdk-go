@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	basev0 "github.com/codefly-dev/core/generated/go/codefly/base/v0"
+	basev1 "github.com/codefly-dev/core/generated/go/codefly/base/v1"
 	corework "github.com/codefly-dev/core/workcontext"
 	"github.com/stretchr/testify/require"
 )
@@ -129,7 +129,7 @@ func (noGrants) Grant(context.Context, string) (*corework.Grant, error) {
 type mintInput struct {
 	tenant       string
 	audience     string
-	scopes       []*basev0.WorkScopeV1
+	scopes       []*basev1.WorkScopeV1
 	binding      string
 	taskID       string
 	organization string
@@ -171,7 +171,7 @@ func (a *authority) tryStartAt(now time.Time, input mintInput, lifetime time.Dur
 		input.taskID = "task-1"
 	}
 	if input.scopes == nil {
-		input.scopes = []*basev0.WorkScopeV1{scope("document", "read")}
+		input.scopes = []*basev1.WorkScopeV1{scope("document", "read")}
 	}
 	token, _, err := minter.Start(context.Background(), corework.StartInput{
 		// What the caller attests it is running, matched against the build the
@@ -198,7 +198,7 @@ func (a *authority) tryStartAt(now time.Time, input mintInput, lifetime time.Dur
 // narrowed independently of the owner's, so core seals the actor's epoch per
 // hop and refuses a hop that carries none. A test that delegates without
 // recording one fails at the mint, which is the right place for it to fail.
-func (a *authority) child(t *testing.T, parent string, principal string, scopes []*basev0.WorkScopeV1) string {
+func (a *authority) child(t *testing.T, parent string, principal string, scopes []*basev1.WorkScopeV1) string {
 	t.Helper()
 	return a.childAs(t, parent, hopInput{principal: principal, scopes: scopes})
 }
@@ -212,7 +212,7 @@ type hopInput struct {
 	kind         string
 	agent        string
 	organization string
-	scopes       []*basev0.WorkScopeV1
+	scopes       []*basev1.WorkScopeV1
 }
 
 func (a *authority) childAs(t *testing.T, parent string, input hopInput) string {
@@ -240,6 +240,6 @@ func (a *authority) childAs(t *testing.T, parent string, input hopInput) string 
 	return token
 }
 
-func scope(kind string, actions ...string) *basev0.WorkScopeV1 {
-	return &basev0.WorkScopeV1{ResourceKind: kind, Actions: actions}
+func scope(kind string, actions ...string) *basev1.WorkScopeV1 {
+	return &basev1.WorkScopeV1{ResourceKind: kind, Actions: actions}
 }

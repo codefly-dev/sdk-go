@@ -5,7 +5,7 @@ import (
 	"testing"
 	"time"
 
-	basev0 "github.com/codefly-dev/core/generated/go/codefly/base/v0"
+	basev1 "github.com/codefly-dev/core/generated/go/codefly/base/v1"
 	corework "github.com/codefly-dev/core/workcontext"
 	"github.com/stretchr/testify/require"
 	"google.golang.org/protobuf/proto"
@@ -29,7 +29,7 @@ import (
 // of the test:
 //
 //   - At VERIFICATION, a verifier holds the capability and not its parent, and
-//     codefly.base.v0.WorkContextV1 carries no absolute-deadline claim and no
+//     codefly.base.v1.WorkContextV1 carries no absolute-deadline claim and no
 //     per-hop timestamp — so "no later than its parent" is not a question the
 //     wire lets a verifier ask. That claim, and the check that reads it, are
 //     core's to add. What a verifier DOES enforce today is the chain's
@@ -43,8 +43,8 @@ import (
 // deriveChild is childAs with the TTL as a parameter, which is the dimension
 // this property varies and the shared helper fixes.
 func (a *authority) deriveChild(
-	t *testing.T, parent string, principal string, scopes []*basev0.WorkScopeV1, ttl time.Duration,
-) (string, *basev0.WorkContextV1, error) {
+	t *testing.T, parent string, principal string, scopes []*basev1.WorkScopeV1, ttl time.Duration,
+) (string, *basev1.WorkContextV1, error) {
 	t.Helper()
 	require.NoError(t, a.seals.PutEpoch(principal, 1))
 	verified, err := a.verifier(t).Verify(t.Context(), parent)
@@ -68,8 +68,8 @@ func expiryOf(t *testing.T, a *authority, token string) time.Time {
 }
 
 func TestDerivedContextNeverOutlivesParent(t *testing.T) {
-	parentScopes := []*basev0.WorkScopeV1{scope("document", "read", "write")}
-	childScopes := []*basev0.WorkScopeV1{scope("document", "read")}
+	parentScopes := []*basev1.WorkScopeV1{scope("document", "read", "write")}
+	childScopes := []*basev1.WorkScopeV1{scope("document", "read")}
 
 	// The matrix. Every parent lifetime against every requested child window,
 	// including the ones that ask for more than the parent has left — which is
@@ -145,7 +145,7 @@ func TestDerivedContextNeverOutlivesParent(t *testing.T) {
 			Grant: &corework.Grant{
 				ID:                    "grant-1",
 				Approvers:             []corework.Approver{{PrincipalID: testHumanPrincipal, Kind: "human"}},
-				Scope:                 &basev0.WorkScopeV1{ResourceKind: "document", Actions: []string{"read"}, ResourceIds: []string{"document-1"}},
+				Scope:                 &basev1.WorkScopeV1{ResourceKind: "document", Actions: []string{"read"}, ResourceIds: []string{"document-1"}},
 				Subject:               "subject-1",
 				RequestDigest:         "digest-1",
 				Audience:              testAudience,
@@ -186,12 +186,12 @@ func TestDerivedContextNeverOutlivesParent(t *testing.T) {
 		parent := a.startAt(t, a.now(), mintInput{scopes: parentScopes}, 30*time.Minute)
 
 		_, _, err := a.deriveChild(t, parent, "principal-wider",
-			[]*basev0.WorkScopeV1{scope("document", "read", "write", "delete")}, time.Minute)
+			[]*basev1.WorkScopeV1{scope("document", "read", "write", "delete")}, time.Minute)
 		require.ErrorIs(t, err, ErrInvalid)
 		require.ErrorContains(t, err, "widens authority beyond its parent")
 
 		_, _, err = a.deriveChild(t, parent, "principal-other-kind",
-			[]*basev0.WorkScopeV1{scope("secret", "read")}, time.Minute)
+			[]*basev1.WorkScopeV1{scope("secret", "read")}, time.Minute)
 		require.ErrorIs(t, err, ErrInvalid)
 		require.ErrorContains(t, err, "widens authority beyond its parent")
 

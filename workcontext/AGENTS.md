@@ -8,10 +8,8 @@ verifier itself is NOT re-exported (see "Core's verifier is NOT re-exported"
 below). Adding a dependency here is a design change — see
 `.claude/skills/dual-module-change`.
 
-Each module's `go.mod` owns its core pin. This leaf stays on core's **v0.19.1
-release tag** (`7f78302f`); the root is on core's candidate `835460f1`, the
-live-endpoint lane's green final, which is not released-pin qualification. Core
-owns the
+Both modules pin the Core feature candidate `18555ee1` for its v1 protobuf
+packages. Core owns the
 endpoint vocabulary: visibility is `private`/`internal`/`public`, and
 `location: external` describes an endpoint outside the system. The root SDK
 uses core's location predicate for local resolution; public visibility alone
@@ -59,7 +57,7 @@ The syntactic gate used to walk this module only, which was a hole with nothing
 behind it: the deleted implementation lived at the repository root, and the
 sweep bans *imports* rather than reading code. A reviewer built the consequence
 — a root file with a **hand-written base64url decoder**, so no banned import at
-all, and `proto.Unmarshal` into `basev0.WorkContextV1` — and it compiled, linted
+all, and `proto.Unmarshal` into `basev1.WorkContextV1` — and it compiled, linted
 clean and swept green.
 
 The two modules are held to different rules, deliberately. **In here the
@@ -92,7 +90,7 @@ qualifier, because the qualifier is the author's choice.
   exemption is an exemption for every type in it — and not to an operation
   name, because `Marshal` is an operation name shared by every codec, so
   `mint.go`'s `encoding/json` row also permitted `proto.Unmarshal` on anything
-  *named* `mintResponse`. Types resolve package-qualified (`basev0.WorkScopeV1`,
+  *named* `mintResponse`. Types resolve package-qualified (`basev1.WorkScopeV1`,
   not `WorkScopeV1` from anywhere), in the scope of the use, before the use, and
   an ambiguous identifier is refused rather than guessed.
   `encoding/asn1` is limited to `mint.go` decoding SAN GeneralNames into
@@ -101,10 +99,10 @@ qualifier, because the qualifier is the author's choice.
 - **No function-local type, and no second local name for core's types outside
   `core.go`** — alias or defined type, through a pointer or a slice, and a local
   name is CHASED to what it names. Either one hands a type-name allowlist
-  whatever name it asks for: `type WorkScopeV1 = basev0.WorkContextV1` makes a
+  whatever name it asks for: `type WorkScopeV1 = basev1.WorkContextV1` makes a
   capability marshal as an allowed scope, and a declaration inside a function
   body is invisible to every rule reading a file's declarations. One `*` walked
-  past both halves for three rounds — `type carrier = *basev0.WorkContextV1`
+  past both halves for three rounds — `type carrier = *basev1.WorkContextV1`
   resolved to `"carrier"`, neither a capability nor unresolvable, so the root
   module's one rule permitted a `proto.Unmarshal` into it.
 - **A codec-allowed struct's field set is FROZEN, embedded fields included.**

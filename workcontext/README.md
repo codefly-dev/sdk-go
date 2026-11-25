@@ -13,7 +13,7 @@ verification entry point *is* core's, by type alias.
 It is a separate Go module so a consumer can import
 `github.com/codefly-dev/sdk-go/workcontext` without inheriting the root SDK's
 transitive tail. Four direct dependencies: `codefly-dev/core` (the
-`codefly/base/v0` proto types **and** `core/workcontext`), `protobuf`,
+`codefly/base/v1` proto types **and** `core/workcontext`), `protobuf`,
 `testify`, `grpc`. The gRPC carrier lives in `workcontext/grpctransport` so a
 consumer that never makes a gRPC call does not compile grpc.
 
@@ -255,7 +255,7 @@ Two halves of the rule are not this module's to enforce, and the test says so
 where it asserts them:
 
 - **At verification** a verifier holds the capability and not its parent, and
-  `codefly.base.v0.WorkContextV1` carries no absolute-deadline claim and no
+  `codefly.base.v1.WorkContextV1` carries no absolute-deadline claim and no
   per-hop timestamp — so "no later than its parent" is not a question the wire
   lets a verifier ask. That claim, and the check that reads it, are core's.
 - **A renewal here is not a derivation.** `MintClient` renews by presenting the
@@ -761,7 +761,7 @@ Scope comes last, from the verified capability, through core's scope algebra:
 
 ```go
 if !workcontext.ScopeContained(
-    &basev0.WorkScopeV1{ResourceKind: "record", Actions: []string{"append"}, ResourceIds: []string{recordID}},
+    &basev1.WorkScopeV1{ResourceKind: "record", Actions: []string{"append"}, ResourceIds: []string{recordID}},
     verified.EffectiveScopes(),
 ) {
     return errRefused // the capability is good and does not cover this call
@@ -1105,7 +1105,7 @@ when pinning a consumer.
 
 ## The wire
 
-`base64url(deterministic protobuf of codefly.base.v0.WorkContextV1) + "." +
+`base64url(deterministic protobuf of codefly.base.v1.WorkContextV1) + "." +
 base64url(Ed25519 signature)`, signed by `core/workcontext` and by nothing
 else. The sealed fields are proto fields — `seal.installation_id`,
 `seal.installation_revision` and `seal.principal_epoch`; plus, for an operation
