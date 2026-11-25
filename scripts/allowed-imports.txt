@@ -85,7 +85,14 @@ root google.golang.org/protobuf/types/dynamicpb
 root google.golang.org/protobuf/types/known/durationpb
 root io
 root os
+# cmd/netguard is tooling, not the library: it lists the files git tracks, and
+# `git ls-files` is the one definition of "tracked" there is. Held to the one
+# file that runs it.
+root os/exec cmd/netguard/files.go
 root path/filepath
+# cmd/netguard's literal patterns (host:port, DSN, URL with a port, port
+# constant). Held to the one file that declares them.
+root regexp cmd/netguard/scan.go
 root runtime/debug
 root sort
 root strconv
