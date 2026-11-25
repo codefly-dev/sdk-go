@@ -20,7 +20,7 @@ minimum-codefly-version: ">=0.3.32"
 artifact-roots:
   - services
 contracts:
-  composition: ">=2.0 <3.0"
+  composition: ">=1.0 <2.0"
   fixtures: ">=1.0 <2.0"
 fixtures:
   - name: dev-admin
