@@ -1,0 +1,69 @@
+# sdk-go's reviewed network literals, read by cmd/netguard (go run ./cmd/netguard).
+# Tab-separated: class, path glob, literal, reason. An entry that covers nothing
+# fails the run, so a line leaves this file with the literal it allowed.
+#
+# class	path-glob	literal	reason
+
+# netguard's own source: the rule stated in its usage comment, and the pattern
+# examples beside each expression. Listed one literal at a time so a new address
+# in the tool's code is still a finding.
+doc	cmd/netguard/main.go	postgres://…	usage comment: the DSN shape the rule names
+doc	cmd/netguard/main.go	localhost:8080	usage comment: the host:port shape the rule names
+doc	cmd/netguard/main.go	http://localhost:54321	usage comment: the allow-list example line
+doc	cmd/netguard/scan.go	postgres://u@localhost:5432/db	comment: one DSN is one finding, not also a host:port
+doc	cmd/netguard/scan.go	8080	comment: examples of a port assigned to a name and of a port flag
+doc	cmd/netguard/scan.go	3000	comment: example of a port assigned to a name
+doc	cmd/netguard/scan.go	9090	comment: example of a port assigned to a name
+doc	cmd/netguard/scan.go	5432	comment: example of a port assigned to a name
+doc	cmd/netguard/scan.go	9000:9000	comment: example of a published container port
+doc	cmd/netguard/scan.go	:8080	comment: example of a listen address with no host
+
+# netguard's own tests: every line is an input the scanner is held to, or a
+# fixture repository written to a temporary directory. Nothing in them is dialled
+# or bound, and a list of each would restate the test tables.
+exclude	cmd/netguard/*_test.go	*	the scanner's own input vectors and fixture repositories
+
+# Prose.
+doc	AGENTS.md	postgres://…	placeholder in the receipts test command; the DSN is the reader's own
+
+# Carrier values under test: a test injects the value a runtime would deliver and
+# asserts the SDK answers exactly it. None is dialled.
+vector	codefly_test.go	http://localhost:1234	injected endpoint carrier read back as hostname, port and address
+vector	codefly_test.go	127.0.0.1:5432	injected embedded endpoint read back; an invalid replacement must leave it intact
+vector	codefly_test.go	postgresql://reader	secret carrier value read back
+vector	codefly_test.go	postgresql://normalized-reader	secret carrier value read back through a normalized key
+vector	codefly_test.go	postgresql://writer	secret carrier value read back
+vector	codefly_test.go	postgresql://live-reader	secret carrier value read back after a reload
+vector	codefly_test.go	postgresql://process	process-level secret, told apart from the in-process one
+vector	codefly_test.go	postgresql://in-process	in-process secret, told apart from the process-level one
+vector	endpoint_composition_root_test.go	http://localhost:24601	injected carrier: only selection may refuse the query
+vector	endpoint_foreign_workspace_test.go	http://localhost:24601	injected carrier answered under a foreign workspace
+vector	endpoint_host_composed_test.go	http://localhost:52382	the run's carrier read back as address and port
+vector	endpoint_naming_scope_test.go	http://localhost:41873	the scoped run's delivered carrier read back
+vector	endpoint_naming_scope_test.go	[::1]:1193	comment: the address a seed dialled in the defect this test pins
+vector	receipts/postgres_tenant_scope_test.go	postgres://localhost/never-dialled	sql.Open is lazy: the store is refused before any connection
+
+# Transport admission inputs: URLs handed to the validator, which admits or
+# refuses them by shape. The hosts are the rule's cases (loopback, an in-cluster
+# Service, a bare IP); none is dialled.
+vector	workcontext/mint_plaintext_test.go	http://127.0.0.1:8081	loopback plaintext: admitted on a local run only
+vector	workcontext/mint_plaintext_test.go	http://localhost:8081	loopback plaintext by name
+vector	workcontext/mint_plaintext_test.go	http://[::1]:8081	loopback plaintext over IPv6
+vector	workcontext/mint_plaintext_test.go	http://gateway.platform.svc:8081	in-cluster Service address under the mesh assertion
+vector	workcontext/mint_plaintext_test.go	http://gateway.platform.svc.cluster.local:8081	in-cluster Service address with the cluster domain
+vector	workcontext/mint_plaintext_test.go	http://10.4.1.9:8081	a bare IP is not an in-cluster Service address
+vector	workcontext/mint_test.go	http://127.0.0.1:8443	plaintext mint URL to loopback: refused with no transport source and off a local run
+vector	workcontext/minting_test.go	https://127.0.0.1:58543	comment: the transport error a past failure surfaced as
+vector	workcontext/mint_network_test.go	10000	base of the labels given to in-memory bufconn listeners; no socket is bound
+vector	workcontext/verifier_test.go	http://127.0.0.1:8080	loopback key-set URL: admitted on a local run only
+vector	workcontext/verifier_test.go	http://localhost:8080	loopback key-set URL by name
+vector	workcontext/verifier_test.go	http://LOCALHOST:8080	loopback is compared case-insensitively
+vector	workcontext/verifier_test.go	http://[::1]:8080	loopback key-set URL over IPv6
+vector	workcontext/verifier_test.go	http://authority.platform.svc:8080	in-cluster Service key-set URL under the mesh assertion
+vector	workcontext/verifier_test.go	http://10.4.1.9:8080	a bare IP is not an in-cluster Service address
+
+# A real address, listed because CI cannot resolve it: the coverage and race jobs
+# start their own Postgres service container, publish it at the port declared
+# beside this value, and hand the receipts tests its DSN. The job has no Codefly
+# runtime to resolve an endpoint from; the credentials are that container's own.
+bind	.github/workflows/go.yml	postgres://codefly:codefly@localhost:5432/receipts?sslmode=disable	the job's own Postgres service container, at the port the job publishes

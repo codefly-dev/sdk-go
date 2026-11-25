@@ -173,6 +173,26 @@ jobs:
           version: v2.13.2
           working-directory: ${{ matrix.module }}
 
+  # Every host, port, DSN and URL is resolved through this SDK; cmd/netguard is
+  # the tool the fleet runs to hold that, so it holds it here first. A literal
+  # it reports is fixed, or listed with its reason in scripts/networking.allow;
+  # an entry there that covers nothing fails too.
+  networking:
+    name: no hardcoded network address
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
+        with:
+          go-version-file: go.mod
+          cache: true
+          cache-dependency-path: go.sum
+      - name: netguard
+        run: go run ./cmd/netguard
+
   coverage:
     name: coverage
     runs-on: ubuntu-latest

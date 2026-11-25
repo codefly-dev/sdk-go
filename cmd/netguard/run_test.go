@@ -228,3 +228,12 @@ func TestRunCannotRun(t *testing.T) {
 		})
 	}
 }
+
+// The tool holds its own repository to the rule, under `go test ./...`: a
+// literal added anywhere in sdk-go is a finding here before it is one in CI,
+// and an entry of scripts/networking.allow that no longer covers anything
+// fails the same way.
+func TestThisRepositoryHoldsTheRule(t *testing.T) {
+	status, stdout, stderr := guard(filepath.Join("..", ".."))
+	require.Equal(t, exitClean, status, stdout+stderr)
+}

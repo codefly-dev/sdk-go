@@ -64,6 +64,7 @@ CODEFLY_TEST_POSTGRES_DSN=postgres://… go test ./receipts/...  # the receipts 
 go test -race ./...                                       # CI runs this separately
 go mod tidy && git diff --exit-code -- go.mod go.sum      # module consistency
 golangci-lint run                                         # v2.13.2, config .golangci.yaml
+go run ./cmd/netguard                                     # no hardcoded address; exceptions in scripts/networking.allow
 go test ./... -coverprofile=cover.out -covermode=atomic -coverpkg=./...
 ```
 
@@ -196,5 +197,4 @@ Loaded on demand rather than carried here — `.claude/skills/`:
   including inert methods or fields. Legacy means delete, not deprecate.
 - Keep this file under ~150 lines (hard cap 200). Push depth into a nested
   `AGENTS.md` beside what it describes, or into `.claude/skills/`.
-- `CLAUDE.md` points here — one canonical source, and the PR that changes a
-  process updates it.
+- `CLAUDE.md` points here — one canonical source, and the PR that changes a process updates it.
