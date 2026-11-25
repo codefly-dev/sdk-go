@@ -16,11 +16,11 @@ import (
 
 // cachePartitionViewDomain separates the view digest from every other SHA-256 a
 // component computes, so no other structure can be made to collide with it.
-const cachePartitionViewDomain = "codefly.work-context.cache-partition.view.v2\n"
+const cachePartitionViewDomain = "codefly.work-context.cache-partition.binary.view.v1\n"
 
 // cachePartitionViewerDomain does the same for the viewer digest, so a subject
 // can never be made to spell a view.
-const cachePartitionViewerDomain = "codefly.work-context.cache-partition.viewer.v2\n"
+const cachePartitionViewerDomain = "codefly.work-context.cache-partition.binary.viewer.v1\n"
 
 // CachePartition is the identity partition a cache stack scopes its entries to.
 // It is plain data on purpose: the cache takes it as an opaque value built from
@@ -127,11 +127,9 @@ func DeriveCachePartition(
 	// embeds them: no tenant or installation can contain the delimiter and
 	// spell another one's view key.
 	//
-	// The "wc3" prefix is not decoration. A shared cache that outlives the
-	// deploy — Redis, a warehouse table — still holds keys computed under an
-	// earlier scheme, and those keys would otherwise be reachable by a process
-	// that now partitions correctly. Changing the prefix orphans them instead.
-	key := "wc3:t:" + base64.RawURLEncoding.EncodeToString([]byte(claims.GetTenantId())) +
+	// Use a distinct prefix so a cache retained across an upgrade cannot return
+	// entries computed with an older partition layout, including "wc1:".
+	key := "wc:v1:t:" + base64.RawURLEncoding.EncodeToString([]byte(claims.GetTenantId())) +
 		":i:" + base64.RawURLEncoding.EncodeToString([]byte(seal.GetInstallationId())) +
 		":r:" + strconv.FormatUint(seal.GetInstallationRevision(), 10)
 	if settings.byAuthorizationView || settings.byViewer {

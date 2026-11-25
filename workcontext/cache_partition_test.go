@@ -39,7 +39,7 @@ func partition(t *testing.T, verified *Verified, options ...CachePartitionOption
 // installation and its revision are always present, so a test that spells the
 // prefix by hand spells all three.
 func partitionKeyPrefix(tenant string, revision uint64) string {
-	return "wc3:t:" + base64.RawURLEncoding.EncodeToString([]byte(tenant)) +
+	return "wc:v1:t:" + base64.RawURLEncoding.EncodeToString([]byte(tenant)) +
 		":i:" + base64.RawURLEncoding.EncodeToString([]byte(testInstallation)) +
 		":r:" + strconv.FormatUint(revision, 10)
 }

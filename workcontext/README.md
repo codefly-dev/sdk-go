@@ -1008,12 +1008,10 @@ computed under authority nobody else holds: caching it would serve an approved
 call's result to callers who were never approved, and reading from the cache
 would answer the approved call from an unapproved computation.
 
-The key prefix is `wc3:`. It moves whenever the key's composition does — this
-time, because the digest preimage became length-prefixed binary rather than
-JSON — so a shared cache that outlives the deploy (Redis, a warehouse table)
-cannot be reached under the keys it still holds. Those digests are framed field
-by field, so no tenant, installation or scope can contain a delimiter and spell
-another partition's key.
+The current key prefix is `wc:v1:`. This prefix leaves earlier cache entries
+unreachable in a cache that outlives the deployment. The authorization-view
+and viewer digests use separate domains and length-prefixed fields, so an
+identifier or scope containing a delimiter cannot spell another partition's key.
 
 ## What a consumer must stop doing
 
