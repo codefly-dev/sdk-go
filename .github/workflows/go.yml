@@ -170,7 +170,7 @@ jobs:
       - name: Lint
         uses: golangci/golangci-lint-action@ba0d7d2ec06a0ea1cb5fa41b2e4a3ab91d21278a # v9
         with:
-          version: v2.13.2
+          version: v2.14.0
           working-directory: ${{ matrix.module }}
 
   # Every host, port, DSN and URL is resolved through this SDK; cmd/netguard is

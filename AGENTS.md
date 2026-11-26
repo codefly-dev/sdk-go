@@ -63,7 +63,7 @@ go test ./...                                             # the suite
 CODEFLY_TEST_POSTGRES_DSN=postgres://… go test ./receipts/...  # the receipts store
 go test -race ./...                                       # CI runs this separately
 go mod tidy && git diff --exit-code -- go.mod go.sum      # module consistency
-golangci-lint run                                         # v2.13.2, config .golangci.yaml
+golangci-lint run                                         # v2.14.0, config .golangci.yaml
 go run ./cmd/netguard                                     # no hardcoded address; exceptions in scripts/networking.allow
 go test ./... -coverprofile=cover.out -covermode=atomic -coverpkg=./...
 ```
